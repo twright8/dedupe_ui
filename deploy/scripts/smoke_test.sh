@@ -171,9 +171,17 @@ import json, os
 print(json.dumps({"password": os.environ["SITE_PASSWORD"]}))')"
 	[ "$HTTP_CODE" = "200" ] || { echo "login returned $HTTP_CODE (401 means the password is wrong)"; return 1; }
 	grep -q $'\tsession\t' "$JAR" || { echo "logged in but no session cookie was stored"; return 1; }
+	# /api/auth/me answers 401 "No user set" for a valid session that has not picked a
+	# name yet. This test never picks one (that would write to the users table), so that
+	# answer means the session cookie WAS accepted. Only "Not authenticated" is a failure.
 	http GET "$BASE/api/auth/me"
-	[ "$HTTP_CODE" = "200" ] || { echo "the session cookie was rejected (/api/auth/me gave $HTTP_CODE)"; return 1; }
-	echo "200, session cookie accepted"
+	if [ "$HTTP_CODE" = "200" ]; then
+		echo "200, session cookie accepted"
+	elif [ "$HTTP_CODE" = "401" ] && body_has "No user set"; then
+		echo "session cookie accepted (no name chosen yet, as expected for this test)"
+	else
+		echo "the session cookie was rejected (/api/auth/me gave $HTTP_CODE)"; return 1
+	fi
 }
 
 NEWEST_RUN=""
