@@ -142,7 +142,7 @@ Each slice ends with something Tom can check in the browser.
 | 2+ | Derived columns (status standardisation), conditional match keys, trade union key, evidence focus | done, `e02ee3f` and the slice 5 commit |
 | 3 | Scoring per track, symmetric labels, review cockpit, evidence rows | done, `3958c25` |
 | 4 | Clusters and gate, registry, group decisions, publish, export | done, `66f9dfd` |
-| 5 | GBT per track, cold start, explanations, model panel, "most useful to label" | built, in final checks |
+| 5 | GBT per track, cold start, explanations, model panel, "most useful to label" | done |
 | 6 | Organisation track for donations | folded into slices 2 to 5: both tracks were built together |
 | 7 | Staging on the server, then the cutover with the chooser page | not started. Tom runs every command that changes the server |
 | 8 | PSC profile: bulk loader, person track, scale guards | not started. The full snapshot is still downloading |
