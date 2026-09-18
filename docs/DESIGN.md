@@ -154,6 +154,12 @@ How to run it locally: `cd backend && PROFILE=donations BASE_PATH=/donations DAT
 
 Known follow-ups: donations person scores pile up at 0.70 to 0.80 because Splink learned that a surname mismatch costs only 1.06 bits (m = 0.479 on the last level): one EM training rule fixes only the forename, and inside that block most "matches" are different people who share a first name. Change the training rules, then keep the change only if `score_only` holds person precision 0.9872 at recall 0.6236 or better; a full PSC rebuild belongs on the laptop (scoring a 3% sample already peaks at 6.3 GB, the server's cap); tune Splink for organisations (a shared postcode now carries too much weight, precision 97.0%); the person track needs human "keep apart" labels before the model can be graded; six earlier groups join a person with an organisation and forced cross-track merges are not built; `build_units` is 3.4 s per 52,000 records and should be measured again on PSC data; the legacy `roe_ui` pipeline modules (`stage_0_preprocess.py`, `stage_1_exact_match.py`, `stage_2_probabilistic_link.py`, `stage_3_evaluate.py`, `gbt_*.py`, the old `labels` table and its services) are unreachable from a dedupe run and can be deleted once nothing imports them.
 
+## Questions parked for Tom and Steve (asked 2026-09-18, to raise again)
+
+1. **Trade union size guard.** The key "Trade union: same name" holds any group over 200 records for one human confirmation. Eight groups are held: UNITE 207 and 259, TGWU 299, USDAW 439, AMICUS 453, CWU 677, GMB 1,006, UNISON 1,144 (4,484 records). Raising the guard to 1,200 merges all eight without review and lifts organisation recall from 67.1% to 71.7% with no new conflict. Current setting: 200. Change it on Config, Match keys, "Trade union: same name", max group size.
+2. **Reporting period and the bequest flag, for individuals.** Steve listed recipient, local unit, amount, date accepted and donation type. Does he also read the reporting period or whether a donation was a bequest? Both are already visible in the evidence tables behind "Show everything". If he uses them, add them to the individuals' evidence focus in `app/profiles/donations.py` so they show in the "What to check" strip.
+3. Set aside by Tom: the Kibana password visible on the server's process list, and HTTPS on port 8000.
+
 ## Open items
 
 - **The laptop disk is full: under 1 GB free on `/`.** Mostly 53 GB of DuckDB
