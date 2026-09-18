@@ -144,15 +144,15 @@ Each slice ends with something Tom can check in the browser.
 | 4 | Clusters and gate, registry, group decisions, publish, export | done, `66f9dfd` |
 | 5 | GBT per track, cold start, explanations, model panel, "most useful to label" | done |
 | 6 | Organisation track for donations | folded into slices 2 to 5: both tracks were built together |
-| 7 | Staging on the server, then the cutover with the chooser page | not started. Tom runs every command that changes the server |
-| 8 | PSC profile: bulk loader, person track, scale guards | not started. The full snapshot is still downloading |
-| 9 | PSC organisation track | not started |
+| 7 | Staging on the server, then the cutover with the chooser page | kit written and tested locally (`deploy/`, `docs/DEPLOY.md`), commit `3282dc4`. Nothing applied. Tom runs every command that changes the server |
+| 8 | PSC profile: bulk loader, both tracks, scale guards | 8a done on a 500,000-record sample (`3282dc4`). 8b (full scale) in progress: see `PSC_HANDOVER.md` |
+| 9 | PSC organisation track | built with slice 8a. Needs the full-scale run and tuning |
 
 Contracts live beside this file: `RULESET.md`, `LINKAGE.md`, `PAIRS_API.md`, `ENTITIES.md`, `ENTITIES_API.md`, `MODEL.md`, `MODEL_API.md`.
 
 How to run it locally: `cd backend && PROFILE=donations BASE_PATH=/donations DATA_DIR=data SITE_PASSWORD=devpass SECRET_KEY=dev-only-fixed-key .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8100`, then open `http://127.0.0.1:8100/donations/`. Build the frontend first with `cd frontend && npm run build`. Tests: `cd backend && SITE_PASSWORD=testpass123 .venv/bin/python -m pytest tests -q`.
 
-Known follow-ups: tune Splink for organisations (a shared postcode now carries too much weight, precision 97.0%); the person track needs human "keep apart" labels before the model can be graded; six earlier groups join a person with an organisation and forced cross-track merges are not built; `build_units` is 3.4 s per 52,000 records and should be measured again on PSC data; the legacy `roe_ui` pipeline modules (`stage_0_preprocess.py`, `stage_1_exact_match.py`, `stage_2_probabilistic_link.py`, `stage_3_evaluate.py`, `gbt_*.py`, the old `labels` table and its services) are unreachable from a dedupe run and can be deleted once nothing imports them.
+Known follow-ups: donations person scores pile up at 0.70 to 0.80 because Splink learned that a surname mismatch costs only 1.06 bits (m = 0.479 on the last level): one EM training rule fixes only the forename, and inside that block most "matches" are different people who share a first name. Change the training rules, then keep the change only if `score_only` holds person precision 0.9872 at recall 0.6236 or better; a full PSC rebuild belongs on the laptop (scoring a 3% sample already peaks at 6.3 GB, the server's cap); tune Splink for organisations (a shared postcode now carries too much weight, precision 97.0%); the person track needs human "keep apart" labels before the model can be graded; six earlier groups join a person with an organisation and forced cross-track merges are not built; `build_units` is 3.4 s per 52,000 records and should be measured again on PSC data; the legacy `roe_ui` pipeline modules (`stage_0_preprocess.py`, `stage_1_exact_match.py`, `stage_2_probabilistic_link.py`, `stage_3_evaluate.py`, `gbt_*.py`, the old `labels` table and its services) are unreachable from a dedupe run and can be deleted once nothing imports them.
 
 ## Open items
 
