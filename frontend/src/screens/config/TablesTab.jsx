@@ -361,7 +361,7 @@ function TokenListEditor({ name, table, errors, onChange }) {
 }
 
 /* ============================================================
-   Lookup — raw to canonical, as the jurisdictions tab was
+   Lookup — a table of raw values and the canonical value each maps to
    ============================================================ */
 function LookupEditor({ name, table, errors, onChange }) {
   const rows = Array.isArray(table.rows) ? table.rows : [];

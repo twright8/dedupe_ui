@@ -3,10 +3,11 @@
    Converted from mockup onClick routing to React Router NavLink
    ============================================================ */
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import { Icons } from "./Icons";
 import { useProfile } from "../profile";
+import { api } from "../api";
 
 // ---------- Brand block ----------
 export function Brand() {
@@ -80,8 +81,7 @@ const navItems = [
   { to: "/runs/new",     label: "New run",         icon: Icons.upload },
   { group: "Review" },
   { to: "/review",       label: "Review queue",    icon: Icons.review },
-  // The cluster screen replaces this in slice 4; the route and file stay in place.
-  // { to: "/ambiguous",    label: "Ambiguous",       icon: Icons.ambiguous },
+  { to: "/clusters",     label: "Cluster review",  icon: Icons.ambiguous, count: "reviewQueue" },
   { group: "Config" },
   { to: "/labels",       label: "Label library",   icon: Icons.review },
   { to: "/config",       label: "Config & rules",  icon: Icons.config },
@@ -91,6 +91,25 @@ const navItems = [
 export function SidebarNav({ user, onLogout }) {
   const displayName = user?.name || "Unknown";
   const displayInitials = user?.initials || "??";
+  // The cluster queue is the only badge in the sidebar, because it is the one
+  // number that says there is work waiting for a person.
+  const [badges, setBadges] = useState({});
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .listRuns()
+      .then((data) => {
+        if (!alive) return;
+        const runs = Array.isArray(data) ? data : data.runs || [];
+        const latest = runs.find((r) => r.status === "complete" && r.counts?.hasEntities);
+        setBadges({ reviewQueue: latest?.counts?.reviewQueue || 0 });
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   return (
     <aside className="sidebar">
@@ -108,6 +127,9 @@ export function SidebarNav({ user, onLogout }) {
             >
               <it.icon size={16} />
               <span>{it.label}</span>
+              {it.count && badges[it.count] > 0 && (
+                <span className="count">{badges[it.count]}</span>
+              )}
             </NavLink>
           )
         )}

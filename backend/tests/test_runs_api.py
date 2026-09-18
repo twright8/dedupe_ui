@@ -263,10 +263,9 @@ class TestRunsAPI:
             """INSERT INTO runs (id, status, config_version, counts_json)
                VALUES (?, ?, ?, ?)""",
             ("run_detail_1", "complete", 1, json.dumps({
-                "matches_exact": 100, "matches_high_confidence": 200,
-                "matches_for_review": 50, "merged_dataset": 1000,
-                "matched_titles": 850,
-                "roe_preprocessed": 300
+                "records_total": 1000, "units_total": 900, "pairs_scored": 200,
+                "pairs_accept": 120, "entities_proposed": 850,
+                "review_queue": 30, "decisions_total": 2,
             })),
         )
 
@@ -274,70 +273,17 @@ class TestRunsAPI:
         assert r.status_code == 200
         body = r.json()
         assert body["id"] == "run_detail_1"
-        assert body["counts"]["exact"] == 100
-        assert body["counts"]["probAccept"] == 100
-        assert body["counts"]["ocod"] == 1000
-        assert body["counts"]["matchRate"] == pytest.approx(0.85)
-
-    def test_get_run_detail_title_vs_proprietor_grain(self, client, db_path):
-        """merged_dataset is one row per (title, proprietor). Title-grain fields stay per
-        TITLE (ocod=total_titles, matchRate=matched/total_titles, unmatchedTitles reconciles),
-        while the additive proprietor-grain fields report the merged rows themselves."""
-        write_db(
-            db_path,
-            """INSERT INTO runs (id, status, config_version, counts_json)
-               VALUES (?, ?, ?, ?)""",
-            ("run_grain", "complete", 1, json.dumps({
-                "matches_exact": 60, "matches_high_confidence": 80, "matches_for_review": 5,
-                "merged_dataset": 130,          # proprietor rows
-                "total_titles": 100,            # distinct titles
-                "matched_titles": 70, "matched_titles_exact": 55,
-                "total_proprietors": 130, "matched_proprietors": 85,
-                "roe_preprocessed": 90,
-            })),
-        )
-        counts = client.get("/api/runs/run_grain").json()["counts"]
-        assert counts["ocod"] == 100                     # title grain, not the 130 merged rows
-        assert counts["matchedTitles"] == 70
-        assert counts["unmatchedTitles"] == 30           # 100 - 70 reconciles at title grain
-        assert counts["matchRate"] == pytest.approx(0.70)
-        assert counts["totalProprietors"] == 130
-        assert counts["matchedProprietors"] == 85
-
-    def test_get_run_surfaces_decision_model(self, client, db_path):
-        """The run payload exposes which model decided the run (decision_model + version)
-        so the list/detail can show it without opening diagnostics."""
-        write_db(
-            db_path,
-            """INSERT INTO runs (id, status, config_version, counts_json)
-               VALUES (?, ?, ?, ?)""",
-            ("run_decision_model", "complete", 1, json.dumps({
-                "matches_exact": 1, "matches_high_confidence": 2, "matches_for_review": 1,
-                "merged_dataset": 10, "matched_titles": 3, "roe_preprocessed": 5,
-                "decision_model": "gbt:4", "decision_model_version": 4,
-            })),
-        )
-        r = client.get("/api/runs/run_decision_model")
-        assert r.status_code == 200
-        counts = r.json()["counts"]
-        assert counts["decisionModel"] == "gbt:4"
-        assert counts["decisionModelVersion"] == 4
-
-    def test_get_run_decision_model_defaults_none_for_legacy(self, client, db_path):
-        """A legacy run recorded before decision_model existed reports None (frontend then
-        falls back to the diagnostics score_column)."""
-        write_db(
-            db_path,
-            """INSERT INTO runs (id, status, config_version, counts_json)
-               VALUES (?, ?, ?, ?)""",
-            ("run_legacy_dm", "complete", 1, json.dumps({
-                "matches_exact": 1, "matches_high_confidence": 2, "matches_for_review": 1,
-                "merged_dataset": 10, "matched_titles": 3, "roe_preprocessed": 5,
-            })),
-        )
-        counts = client.get("/api/runs/run_legacy_dm").json()["counts"]
-        assert counts["decisionModel"] is None
-        assert counts["decisionModelVersion"] is None
+        assert body["counts"]["recordsTotal"] == 1000
+        assert body["counts"]["pairsAccept"] == 120
+        assert body["counts"]["entitiesProposed"] == 850
+        assert body["counts"]["reviewQueue"] == 30
+        assert body["counts"]["decisionsTotal"] == 2
+        assert body["counts"]["hasEntities"] is True
+        # Nothing from the two-dataset tool this app was copied from.
+        for gone in ("ocod", "roe", "exact", "probAccept", "matchRate",
+                     "matchedTitles", "distinctEntities", "decisionModel",
+                     "preLabels"):
+            assert gone not in body["counts"]
 
     def test_get_run_surfaces_error_detail(self, client, db_path):
         """A failed run with structured error_detail_json exposes parsed error_detail."""

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from app.pipeline.dedupe import exact_overlay
 from app.pipeline.dedupe.stage_1_clean import RECORDS_FILENAME, load_ruleset
 from app.rules import keys, keys_eval
 
@@ -34,19 +35,54 @@ def _step(label, progress_callback=None):
         progress_callback("log", {"message": label})
 
 
-def build_report(records: pd.DataFrame, ruleset: dict) -> tuple[pd.DataFrame, dict]:
+def build_report(
+    records: pd.DataFrame,
+    ruleset: dict,
+    labels: pd.DataFrame | None = None,
+    decisions: dict | None = None,
+) -> tuple[pd.DataFrame, dict]:
     """``(groups, report)`` for *records* under *ruleset*.
 
     The report is exactly what ``exact_eval.json`` holds and what the key
     preview returns, so the Config screen and a finished run describe a ruleset
     in the same words.
+
+    *labels* and *decisions* let a reviewer's decisions change the grouping: a
+    merged group holding a human FALSE pair is dissolved into the parts its TRUE
+    labels connect, and a held group a reviewer merged becomes a merged one
+    (`docs/ENTITIES.md`). Without them the keys have the last word, which is
+    what the Config preview wants to show.
     """
     groups, stats = keys.apply_match_keys(records, ruleset)
+    groups, human = exact_overlay.apply_human_overlay(groups, labels, decisions)
+    overall = _restate(stats["overall"], groups, len(records)) \
+        if human["split_groups"] or human["merged_held_groups"] else stats["overall"]
     evaluation = keys_eval.evaluate(records, groups)
     return groups, {
         "keys": stats["keys"],
-        "overall": stats["overall"],
+        "overall": overall,
         "eval": evaluation,
+        "human": human,
+    }
+
+
+def _restate(overall: dict, groups: pd.DataFrame, n_records: int) -> dict:
+    """The overall totals after a human changed what the keys grouped.
+
+    The per-key stats stay as the keys reported them — they describe the rules,
+    not the outcome — but the totals have to describe what the run actually has.
+    """
+    merged = groups[groups["status"] == keys.MERGED] if len(groups) else groups
+    held = groups[groups["status"] == keys.HELD] if len(groups) else groups
+    merged_groups = int(merged["group_id"].nunique()) if len(merged) else 0
+    merged_records = int(merged["record_id"].nunique()) if len(merged) else 0
+    return {
+        **overall,
+        "merged_groups": merged_groups,
+        "merged_records": merged_records,
+        "held_groups": int(held["group_id"].nunique()) if len(held) else 0,
+        "held_records": int(held["record_id"].nunique()) if len(held) else 0,
+        "entities_after": n_records - (merged_records - merged_groups),
     }
 
 
@@ -63,12 +99,17 @@ def counts_from(report: dict) -> dict:
         "exact_conflicts": evaluation["conflicts"],
         "exact_pair_precision": evaluation["pair_precision"],
         "exact_pair_recall": evaluation["pair_recall"],
+        "exact_split_by_human": len(report.get("human", {}).get("split_groups", [])),
+        "exact_merged_by_human": len(
+            report.get("human", {}).get("merged_held_groups", [])),
     }
 
 
 def run_stage_2_exact(
     run_dir: str,
     config_dir: str,
+    labels: pd.DataFrame | None = None,
+    decisions: dict | None = None,
     progress_callback=None,
 ) -> dict:
     """Group ``<run_dir>/records.parquet`` under the run's match keys.
@@ -79,6 +120,9 @@ def run_stage_2_exact(
         The run's directory, holding the cleaned records from stage 1.
     config_dir : str
         The run's config snapshot, holding ``ruleset.json``.
+    labels, decisions : optional
+        The active human labels and the newest decision per cluster or held
+        group. They can dissolve a merged group and merge a held one.
     progress_callback : callable, optional
         ``(event: str, detail: dict) -> None`` called at key milestones.
     """
@@ -96,7 +140,7 @@ def run_stage_2_exact(
         f"{len(records):,} records...",
         progress_callback,
     )
-    groups, report = build_report(records, ruleset)
+    groups, report = build_report(records, ruleset, labels, decisions)
 
     groups.to_parquet(run_dir / EXACT_GROUPS_FILENAME, index=False)
     (run_dir / EXACT_EVAL_FILENAME).write_text(

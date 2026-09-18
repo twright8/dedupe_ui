@@ -358,6 +358,12 @@ function ScoreEvalStrip({ scoreEval }) {
       help: "Without the pairs the earlier labels accepted. The honest number for tuning.",
     },
     {
+      key: "with_human",
+      label: "With the human decisions applied",
+      value: scoreEval.with_human,
+      help: "The same, with your TRUE labels joined up and your FALSE labels pulled apart. This is what the run would publish today.",
+    },
+    {
       key: "exact_only",
       label: "The match keys on their own",
       value: scoreEval.exact_only,

@@ -9,7 +9,7 @@ import { Icons } from "../components/Icons";
 import { fmtNumber, fmtPct, fmtDateTime, timeAgo } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
 import { useProfile } from "../profile";
-import { hasExactCounts, hasPairCounts, hasRecordCounts, trackCountKey } from "../counts";
+import { hasEntityCounts, hasExactCounts, hasPairCounts, hasRecordCounts, trackCountKey } from "../counts";
 
 // Old linkage runs report pair buckets; a run that only loaded records does not.
 // The list shows whichever set of numbers the runs actually carry.
@@ -79,13 +79,14 @@ export default function RunsScreen() {
   // Which numbers this list can show at all
   const anyPairs = runs.some((r) => hasPairCounts(r.counts));
 
-  // Sparkline: recent match rates (oldest -> newest, left -> right)
+  // Sparkline: how many entities each recent run ended with, oldest to newest.
+  // Fewer entities over the same records means more records were joined up.
   const recent = [...runs]
-    .filter((r) => hasPairCounts(r.counts))
+    .filter((r) => hasEntityCounts(r.counts))
     .reverse()
     .slice(-8);
-  const maxRate = recent.length
-    ? Math.max(...recent.map((r) => r.counts.matchRate))
+  const maxEntities = recent.length
+    ? Math.max(...recent.map((r) => r.counts.entitiesProposed || 0), 1)
     : 1;
 
   // KPI values from latest run (if exists)
@@ -189,66 +190,59 @@ export default function RunsScreen() {
       {latest && hasPairCounts(latest.counts) && (
         <div className="kpi-grid" style={{ marginBottom: 20 }}>
           <div className="kpi">
-            <div className="label">Latest match rate</div>
-            <div className="value">
-              {fmtPct(latest.counts.matchRate, 1)}
-            </div>
-            <div className={`delta ${prior && prior.counts && latest.counts.matchRate >= prior.counts.matchRate ? "up" : "down"}`}>
-              {prior && prior.counts
-                ? `${latest.counts.matchRate >= prior.counts.matchRate ? "+" : ""}${((latest.counts.matchRate - prior.counts.matchRate) * 100).toFixed(1)}pp vs prior`
-                : "first run"}
-            </div>
-          </div>
-          <div className="kpi">
-            <div className="label">Auto-accepted (latest)</div>
-            <div className="value">
-              {fmtNumber(
-                latest.counts.exact + latest.counts.probAccept
-              )}
+            <div className="label">Pairs to review</div>
+            <div className="value" style={{ color: "var(--amber)" }}>
+              {fmtNumber(latest.counts.pairsReview)}
             </div>
             <div className="delta muted">
-              {fmtNumber(latest.counts.exact)} exact &middot;{" "}
-              {fmtNumber(latest.counts.probAccept)} prob.
+              {fmtNumber(latest.counts.pairsAccept)} accepted of{" "}
+              {fmtNumber(latest.counts.pairsScored)} scored
             </div>
           </div>
-          <div className="kpi">
-            <div className="label">Review queue</div>
-            <div className="value" style={{ color: "var(--amber)" }}>
-              {fmtNumber(latest.counts.review)}
-            </div>
-            <div className="delta down">
-              {prior && prior.counts
-                ? `${latest.counts.review <= prior.counts.review ? "" : "+"}${latest.counts.review - prior.counts.review} vs prior`
-                : ""}{" "}
-              &middot; {latest.counts.ambiguous} ambiguous
-            </div>
-          </div>
-          <div className="kpi">
-            <div className="label">Match rate &middot; last 8 runs</div>
-            <div style={{ marginTop: 6 }}>
-              <div className="barchart">
-                {recent.map((r, i) => (
-                  <div
-                    key={i}
-                    className="b"
-                    style={{
-                      height: `${(r.counts.matchRate / maxRate) * 100}%`,
-                    }}
-                    title={`${r.id}: ${fmtPct(r.counts.matchRate, 1)}`}
-                  />
-                ))}
-              </div>
-              {recent.length >= 2 && (
-                <div
-                  className="muted"
-                  style={{ fontSize: 11, marginTop: 4 }}
-                >
-                  {fmtPct(recent[0].counts.matchRate, 1)} &rarr;{" "}
-                  {fmtPct(recent[recent.length - 1].counts.matchRate, 1)}
+          {hasEntityCounts(latest.counts) && (
+            <>
+              <div className="kpi">
+                <div className="label">Entities proposed</div>
+                <div className="value">{fmtNumber(latest.counts.entitiesProposed)}</div>
+                <div className="delta muted">
+                  from {fmtNumber(latest.counts.recordsTotal)} records and{" "}
+                  {fmtNumber(latest.counts.unitsTotal)} units
                 </div>
-              )}
-            </div>
-          </div>
+              </div>
+              <div className="kpi">
+                <div className="label">Groups to decide</div>
+                <div className="value" style={{ color: "var(--amber)" }}>
+                  {fmtNumber(latest.counts.reviewQueue)}
+                </div>
+                <div className="delta muted">
+                  {fmtNumber(latest.counts.decisionsTotal)} already decided
+                </div>
+              </div>
+              <div className="kpi">
+                <div className="label">Entities &middot; last 8 runs</div>
+                <div style={{ marginTop: 6 }}>
+                  <div className="barchart">
+                    {recent.map((r, i) => (
+                      <div
+                        key={i}
+                        className="b"
+                        style={{
+                          height: `${((r.counts.entitiesProposed || 0) / maxEntities) * 100}%`,
+                        }}
+                        title={`${r.id}: ${fmtNumber(r.counts.entitiesProposed)} entities`}
+                      />
+                    ))}
+                  </div>
+                  {recent.length >= 2 && (
+                    <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+                      {fmtNumber(recent[0].counts.entitiesProposed)} &rarr;{" "}
+                      {fmtNumber(recent[recent.length - 1].counts.entitiesProposed)}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -326,21 +320,23 @@ export default function RunsScreen() {
                 {anyPairs ? (
                   <>
                     <th className="tnum" style={{ textAlign: "right" }}>
-                      OCOD rows
+                      Records
                     </th>
                     <th className="tnum" style={{ textAlign: "right" }}>
-                      ROE rows
+                      Units
                     </th>
                     <th className="tnum" style={{ textAlign: "right" }}>
-                      Matches
+                      Accepted
                     </th>
                     <th className="tnum" style={{ textAlign: "right" }}>
                       Review
                     </th>
                     <th className="tnum" style={{ textAlign: "right" }}>
-                      Ambig.
+                      Entities
                     </th>
-                    <th>Rate</th>
+                    <th className="tnum" style={{ textAlign: "right" }}>
+                      To decide
+                    </th>
                   </>
                 ) : (
                   <>
@@ -400,82 +396,35 @@ export default function RunsScreen() {
                   <td className="mono">{r.duration}</td>
                   {anyPairs ? (
                     <>
-                      <td
-                        className="mono"
-                        style={{ textAlign: "right" }}
-                      >
-                        {fmtNumber(r.counts?.ocod)}
+                      <td className="mono" style={{ textAlign: "right" }}>
+                        {fmtNumber(r.counts?.recordsTotal)}
                       </td>
-                      <td
-                        className="mono"
-                        style={{ textAlign: "right" }}
-                      >
-                        {fmtNumber(r.counts?.roe)}
+                      <td className="mono" style={{ textAlign: "right" }}>
+                        {fmtNumber(r.counts?.unitsTotal)}
                       </td>
-                      <td
-                        className="mono"
-                        style={{ textAlign: "right" }}
-                      >
-                        {hasPairCounts(r.counts)
-                          ? fmtNumber(
-                              r.counts.exact + r.counts.probAccept
-                            )
-                          : "—"}
+                      <td className="mono" style={{ textAlign: "right" }}>
+                        {hasPairCounts(r.counts) ? fmtNumber(r.counts.pairsAccept) : "—"}
                       </td>
                       <td
                         className="mono"
                         style={{
                           textAlign: "right",
-                          color: r.counts?.review
-                            ? "var(--amber)"
-                            : "var(--muted)",
+                          color: r.counts?.pairsReview ? "var(--amber)" : "var(--muted)",
                         }}
                       >
-                        {fmtNumber(r.counts?.review)}
+                        {fmtNumber(r.counts?.pairsReview)}
+                      </td>
+                      <td className="mono" style={{ textAlign: "right" }}>
+                        {hasEntityCounts(r.counts) ? fmtNumber(r.counts.entitiesProposed) : "—"}
                       </td>
                       <td
                         className="mono"
                         style={{
                           textAlign: "right",
-                          color: r.counts?.ambiguous
-                            ? "var(--violet)"
-                            : "var(--muted)",
+                          color: r.counts?.reviewQueue ? "var(--amber)" : "var(--muted)",
                         }}
                       >
-                        {fmtNumber(r.counts?.ambiguous)}
-                      </td>
-                      <td>
-                        {hasPairCounts(r.counts) ? (
-                          <div
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 8,
-                            }}
-                          >
-                            <div
-                              className="probbar"
-                              style={{ width: 40 }}
-                            >
-                              <i
-                                style={{
-                                  width: `${(r.counts.matchRate / 0.2) * 100}%`,
-                                  background: "var(--ti-red)",
-                                }}
-                              />
-                            </div>
-                            <span className="mono">
-                              {fmtPct(r.counts.matchRate, 1)}
-                            </span>
-                          </div>
-                        ) : r.counts ? (
-                          <span className="muted">—</span>
-                        ) : (
-                          <span className="tag red">
-                            <span className="dot" />
-                            failed
-                          </span>
-                        )}
+                        {hasEntityCounts(r.counts) ? fmtNumber(r.counts.reviewQueue) : "—"}
                       </td>
                     </>
                   ) : (

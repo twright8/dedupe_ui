@@ -55,12 +55,6 @@ function JobCard({ tone, n, title, children }) {
 
 // ---- the page --------------------------------------------------------------
 
-// The last two stages are being built. The chip is the only marker, so it is
-// easy to remove when they land.
-function Soon() {
-  return <span className="mth-tech">arriving next</span>;
-}
-
 export default function MethodologyScreen() {
   const profile = useProfile();
   const tracks = profile.tracks || [];
@@ -317,9 +311,6 @@ export default function MethodologyScreen() {
             title="Join the accepted pairs into groups"
             tech="Config → Thresholds & Splink"
           >
-            <div className="mth-techrow">
-              <Soon />
-            </div>
             <p>
               In go the accepted pairs. Two units joined by an accepted pair sit in the same
               cluster. A unit with no accepted pair is a cluster on its own.
@@ -343,9 +334,6 @@ export default function MethodologyScreen() {
             kicker="Entity IDs"
             title="Give each group one ID, then publish"
           >
-            <div className="mth-techrow">
-              <Soon />
-            </div>
             <p>
               In go the clusters the gate passed. Each one becomes one entity and takes an ID. If
               its records already belong to one entity, that ID is kept. If they belong to several,
@@ -569,8 +557,6 @@ function MthStyles() {
         margin: 8px 0; }
       .mth-card-list { border: 1px solid var(--line); border-radius: var(--r-md); padding: 16px 18px;
         background: var(--surface); box-shadow: var(--shadow-sm); }
-      .mth-ocod { border-top: 3px solid var(--blue); }
-      .mth-roe  { border-top: 3px solid var(--green); }
       .mth-list-tag { font: 600 11px/1 var(--font-mono); letter-spacing: .1em; color: var(--muted);
         margin-bottom: 8px; }
       .mth-list-h { font-size: 18px; font-weight: 640; margin-bottom: 6px; }

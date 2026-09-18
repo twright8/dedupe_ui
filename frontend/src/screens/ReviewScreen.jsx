@@ -20,7 +20,7 @@ import { DiffHero, BucketTag, entityIds } from "../components/DiffHero";
 import { PairExplain } from "../components/PairExplain";
 import { PairEvidence } from "../components/PairEvidence";
 import { ThresholdPanel } from "../components/ThresholdPanel";
-import { Cell, NUMERIC_TYPES } from "../components/cells";
+import { Cell, NUMERIC_TYPES, SYSTEM_COLUMNS, PATTERN_COLUMNS } from "../components/cells";
 import MethodologyNotes from "../components/MethodologyNotes";
 import { useKeyboardNav } from "../hooks/useKeyboardNav";
 import { useProfile } from "../profile";
@@ -383,7 +383,7 @@ export default function ReviewScreen() {
     );
   }
 
-  const pendingReview = counts.review ?? 0;
+  const pendingReview = counts.pairsReview ?? counts.review ?? 0;
 
   return (
     <div className="content" style={{ maxWidth: "none", paddingRight: 28 }}>
@@ -1218,25 +1218,6 @@ function ReviewDiff({
     </div>
   );
 }
-
-/* Bookkeeping the pipeline needs and a reviewer does not. Unit size and the
-   entity IDs are already chips in the header, which is where they belong. */
-const SYSTEM_COLUMNS = new Set([
-  "unit_id",
-  "unit_size",
-  "record_id",
-  "track",
-  "review_state",
-  "held_group_id",
-  "existing_entity_id",
-  "existing_entity_ids",
-  "n_existing_ids",
-  "is_trust",
-]);
-
-/* The donation pattern is spelled out in one line above the evidence tables,
-   so only the two figures that carry a profile label stay here. */
-const PATTERN_COLUMNS = new Set(["n_distinct_values", "share_round_1000", "top_values"]);
 
 const CLEANED_OPEN_KEY = "review.cleanedColumnsOpen";
 

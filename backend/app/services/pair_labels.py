@@ -14,6 +14,7 @@ can never become two labels.
 import csv as csvmod
 import io
 import re
+import uuid
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -21,10 +22,15 @@ import pandas as pd
 from app.db import query_db, write_db
 
 VERDICTS = ("TRUE", "FALSE")
-PROVENANCES = ("manual", "bulk_range", "llm", "import")
-# What a reviewer's own screen may send. `llm` and `import` are written by the
-# machine, never by a person clicking a button.
+PROVENANCES = ("manual", "bulk_range", "llm", "import", "cluster_merge",
+               "cluster_split")
+# What a reviewer's own screen may send on a single pair. `llm` and `import` are
+# written by the machine; the two cluster provenances come from a whole-group
+# decision, which has an endpoint of its own.
 HUMAN_PROVENANCES = ("manual", "bulk_range")
+# A group decision writes one of these (docs/ENTITIES.md).
+DECISION_PROVENANCES = {"merge": "cluster_merge", "split": "cluster_split"}
+DECISION_KINDS = tuple(DECISION_PROVENANCES)
 
 MAX_BATCH = 500
 
@@ -35,11 +41,11 @@ _URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 CSV_COLUMNS = [
     "record_id_a", "record_id_b", "track", "is_match", "provenance", "held_out",
     "reviewer", "notes", "evidence_url", "name_a", "name_b", "run_id",
-    "config_version", "created_at",
+    "config_version", "created_at", "decision_id", "decision_scope",
 ]
 
 LABEL_FIELDS = ("is_match", "reviewer", "created_at", "notes", "evidence_url",
-                "provenance", "held_out")
+                "provenance", "held_out", "decision_id")
 
 
 class LabelError(ValueError):
@@ -135,7 +141,8 @@ def labels_frame(db_path: str) -> pd.DataFrame:
     rows = active_labels(db_path)
     columns = ["id", "record_id_a", "record_id_b", "track", "is_match",
                "provenance", "held_out", "reviewer", "notes", "evidence_url",
-               "name_a", "name_b", "run_id", "config_version", "created_at"]
+               "name_a", "name_b", "run_id", "config_version", "created_at",
+               "decision_id", "decision_scope"]
     frame = pd.DataFrame(rows, columns=columns) if rows \
         else pd.DataFrame({c: pd.Series(dtype="object") for c in columns})
     for column in ("record_id_a", "record_id_b"):
@@ -195,6 +202,7 @@ def list_labels(
     active: int = 1,
     offset: int = 0,
     limit: int = 50,
+    decision_id: str | None = None,
 ) -> dict:
     """One page of the library, newest first. ``counts`` ignore the filters."""
     where: list[str] = []
@@ -217,6 +225,9 @@ def list_labels(
     if held_out is not None:
         where.append("held_out = ?")
         params.append(int(held_out))
+    if decision_id is not None:
+        where.append("decision_id = ?")
+        params.append(decision_id)
     if q:
         pattern = f"%{q.lower()}%"
         where.append(
@@ -262,6 +273,8 @@ def save_label(
     config_version: int | None = None,
     created_at: str | None = None,
     held_out: int | None = None,
+    decision_id: str | None = None,
+    decision_scope: str | None = None,
 ) -> tuple[dict, int]:
     """Append one decision. Returns ``(the new active row, rows superseded)``.
 
@@ -295,10 +308,11 @@ def save_label(
         """INSERT INTO pair_labels
                (record_id_a, record_id_b, track, is_match, provenance, held_out,
                 reviewer, notes, evidence_url, name_a, name_b, run_id,
-                config_version, created_at, active)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                config_version, created_at, active, decision_id, decision_scope)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
         (left, right, track, verdict, source, int(held_out or 0), reviewer,
-         notes or None, url, name_a, name_b, run_id, config_version, now),
+         notes or None, url, name_a, name_b, run_id, config_version, now,
+         decision_id, decision_scope),
     )
     for row in prior:
         write_db(
@@ -310,6 +324,154 @@ def save_label(
         db_path, "SELECT * FROM pair_labels WHERE id = ?", (label_id,)
     )[0])
     return new_row, len(prior)
+
+
+def new_decision_id() -> str:
+    """A short id every label of one group decision shares."""
+    return "d_" + uuid.uuid4().hex[:12]
+
+
+def star_pairs(parts: list[list[str]]) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """``(the TRUE pairs, the FALSE pairs)`` a group decision writes.
+
+    Inside a part, a star from its smallest record to each of the others: n−1
+    labels instead of the n(n−1)/2 a clique would need, and enough, because a
+    cluster is a connected component and a star connects the part. Between two
+    parts, one FALSE between their smallest records, which is what keeps them
+    apart when the exact keys or the scorer try to join them again.
+    """
+    cleaned = [sorted({str(r) for r in part if str(r or "").strip()}) for part in parts]
+    cleaned = [part for part in cleaned if part]
+    true_pairs: list[tuple[str, str]] = []
+    for part in cleaned:
+        head = part[0]
+        true_pairs.extend(pair_key(head, other) for other in part[1:])
+    false_pairs: list[tuple[str, str]] = []
+    heads = [part[0] for part in cleaned]
+    for index, left in enumerate(heads):
+        for right in heads[index + 1:]:
+            false_pairs.append(pair_key(left, right))
+    return true_pairs, false_pairs
+
+
+def save_decision(
+    db_path: str,
+    scope: str,
+    kind: str,
+    parts: list[list[str]],
+    reviewer: str,
+    names: dict | None = None,
+    track: str | None = None,
+    notes: str | None = None,
+    evidence_url: str | None = None,
+    run_id: str | None = None,
+    config_version: int | None = None,
+) -> dict:
+    """Write one whole-group decision as ordinary labels sharing a decision id.
+
+    A merge is one part. A split is several: a TRUE star inside each, and a
+    FALSE between every two. Everything goes through ``save_label``, so the
+    append-only rule, the unique active pair and the inherited Teaches/Tests
+    role all still hold.
+    """
+    if kind not in DECISION_PROVENANCES:
+        raise LabelError(f"kind must be one of {', '.join(DECISION_KINDS)}")
+    true_pairs, false_pairs = star_pairs(parts)
+    if kind == "split" and len(false_pairs) == 0:
+        raise LabelError("A split needs at least two parts")
+    written = true_pairs + false_pairs
+    if not written:
+        raise LabelError("That decision would not label anything")
+    if len(written) > MAX_BATCH:
+        raise LabelError(
+            f"A decision writes at most {MAX_BATCH} labels; that one needs {len(written)}"
+        )
+
+    decision_id = new_decision_id()
+    provenance = DECISION_PROVENANCES[kind]
+    names = names or {}
+    superseded = 0
+    for verdict, pairs in (("TRUE", true_pairs), ("FALSE", false_pairs)):
+        for left, right in pairs:
+            _label, replaced = save_label(
+                db_path, left, right, verdict, reviewer=reviewer,
+                provenance=provenance, notes=notes, evidence_url=evidence_url,
+                track=track, name_a=names.get(left), name_b=names.get(right),
+                run_id=run_id, config_version=config_version,
+                decision_id=decision_id, decision_scope=str(scope),
+            )
+            superseded += replaced
+    return {
+        "decision_id": decision_id,
+        "kind": kind,
+        "labels_written": len(written),
+        "superseded": superseded,
+    }
+
+
+def latest_decision(db_path: str, scope: str) -> dict | None:
+    """The newest active decision on a cluster or held group, or None."""
+    rows = query_db(
+        db_path,
+        """SELECT decision_id, provenance, reviewer, created_at, notes, evidence_url,
+                  COUNT(*) AS n_labels, MAX(id) AS newest
+           FROM pair_labels
+           WHERE active = 1 AND decision_scope = ? AND decision_id IS NOT NULL
+           GROUP BY decision_id ORDER BY newest DESC LIMIT 1""",
+        (str(scope),),
+    )
+    if not rows:
+        return None
+    row = dict(rows[0])
+    kind = {v: k for k, v in DECISION_PROVENANCES.items()}.get(row["provenance"])
+    return {
+        "decision_id": row["decision_id"],
+        "kind": kind,
+        "reviewer": row["reviewer"],
+        "created_at": row["created_at"],
+        "n_labels": int(row["n_labels"]),
+        "notes": row["notes"],
+        "evidence_url": row["evidence_url"],
+    }
+
+
+def decisions_by_scope(db_path: str) -> dict[str, dict]:
+    """The newest active decision for every scope that has one."""
+    rows = query_db(
+        db_path,
+        """SELECT decision_scope, decision_id, provenance, reviewer, created_at,
+                  notes, evidence_url, COUNT(*) AS n_labels, MAX(id) AS newest
+           FROM pair_labels
+           WHERE active = 1 AND decision_scope IS NOT NULL AND decision_id IS NOT NULL
+           GROUP BY decision_scope, decision_id ORDER BY newest""",
+        (),
+    )
+    kinds = {v: k for k, v in DECISION_PROVENANCES.items()}
+    latest: dict[str, dict] = {}
+    for row in rows:
+        latest[row["decision_scope"]] = {
+            "decision_id": row["decision_id"],
+            "kind": kinds.get(row["provenance"]),
+            "reviewer": row["reviewer"],
+            "created_at": row["created_at"],
+            "n_labels": int(row["n_labels"]),
+            "notes": row["notes"],
+            "evidence_url": row["evidence_url"],
+        }
+    return latest
+
+
+def withdraw_decision(db_path: str, scope: str) -> dict | None:
+    """Deactivate every label of the newest decision on *scope*, as a unit."""
+    decision = latest_decision(db_path, scope)
+    if decision is None:
+        return None
+    write_db(
+        db_path,
+        "UPDATE pair_labels SET active = 0 WHERE active = 1 AND decision_id = ?",
+        (decision["decision_id"],),
+    )
+    return {**decision, "labels_withdrawn": decision["n_labels"]}
 
 
 def withdraw_label(db_path: str, a, b) -> dict | None:

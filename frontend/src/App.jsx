@@ -13,7 +13,7 @@ import RunsScreen from "./screens/RunsScreen";
 import NewRunScreen from "./screens/NewRunScreen";
 import RunDetailScreen from "./screens/RunDetailScreen";
 import ReviewScreen from "./screens/ReviewScreen";
-import AmbiguousScreen from "./screens/AmbiguousScreen";
+import ClusterScreen from "./screens/ClusterScreen";
 import ConfigScreen from "./screens/ConfigScreen";
 import LabelsScreen from "./screens/LabelsScreen";
 import AuditScreen from "./screens/AuditScreen";
@@ -43,11 +43,11 @@ function useCrumbs() {
 
   if (path === "/runs/new") return [root, "Runs", "New run"];
   if (path.match(/^\/runs\/[^/]+\/review$/)) return [root, "Runs", "Run", "Review queue"];
-  if (path.match(/^\/runs\/[^/]+\/ambiguous$/)) return [root, "Runs", "Run", "Ambiguous"];
+  if (path.match(/^\/runs\/[^/]+\/clusters$/)) return [root, "Runs", "Run", "Cluster review"];
   if (path.match(/^\/runs\/[^/]+$/)) return [root, "Runs", "Run detail"];
   if (path === "/runs") return [root, "Runs"];
   if (path === "/review") return [root, "Review queue"];
-  if (path === "/ambiguous") return [root, "Ambiguous"];
+  if (path === "/clusters") return [root, "Cluster review"];
   if (path === "/labels") return [root, "Label library"];
   if (path === "/config") return [root, "Config & rules"];
   if (path === "/audit") return [root, "Audit log"];
@@ -78,10 +78,10 @@ function LatestRunRedirect({ target }) {
       .then((data) => {
         if (!alive) return;
         const runs = Array.isArray(data) ? data : data.runs || [];
-        const bucket = target === "ambiguous" ? "ambiguous" : "review";
+        const bucket = target === "clusters" ? "reviewQueue" : "review";
         const exact = runs.find((r) => r.status === "complete" && (r.counts?.[bucket] || 0) > 0);
         // Fall back only to runs that produced pair counts at all. A run that
-        // only loaded records has no review or ambiguous queue to open.
+        // only loaded records has no review or cluster queue to open.
         const fallback = runs.find(
           (r) => r.status === "complete" && hasPairCounts(r.counts)
         );
@@ -134,9 +134,9 @@ function AppLayout({ user, onLogout }) {
           <Route path="runs/new" element={<NewRunScreen />} />
           <Route path="runs/:id" element={<RunDetailScreen />} />
           <Route path="runs/:id/review" element={<ReviewScreen />} />
-          <Route path="runs/:id/ambiguous" element={<AmbiguousScreen />} />
+          <Route path="runs/:id/clusters" element={<ClusterScreen />} />
           <Route path="review" element={<LatestRunRedirect target="review" />} />
-          <Route path="ambiguous" element={<LatestRunRedirect target="ambiguous" />} />
+          <Route path="clusters" element={<LatestRunRedirect target="clusters" />} />
           <Route path="labels" element={<LabelsScreen />} />
           <Route path="config" element={<ConfigScreen />} />
           <Route path="audit" element={<AuditScreen />} />

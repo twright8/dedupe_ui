@@ -125,7 +125,10 @@ class TestStage:
         frame = pd.read_parquet(run_dir / "exact_groups.parquet")
         from app.rules import keys
 
-        assert list(frame.columns) == list(keys.GROUP_COLUMNS)
+        # The key columns, then the two flags a human decision sets (slice 4).
+        assert list(frame.columns) == list(keys.GROUP_COLUMNS) + [
+            "split_by_human", "merged_by_human",
+        ]
         merged = frame[frame["status"] == "merged"]
         assert {
             group_id: set(rows["record_id"])

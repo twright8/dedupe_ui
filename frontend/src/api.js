@@ -122,6 +122,49 @@ export const api = {
   },
 
   // --- Scored pairs (stage 3) ---
+  // --- Clusters, entities, publish (stages 4 and 5) ---
+  getRunClusters(id, params) {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return get(`/api/runs/${id}/clusters${qs}`);
+  },
+  getRunCluster(id, clusterId, params) {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return get(`/api/runs/${id}/clusters/${encodeURIComponent(clusterId)}${qs}`);
+  },
+  decideCluster(id, clusterId, body) {
+    return post(`/api/runs/${id}/clusters/${encodeURIComponent(clusterId)}/decision`, body);
+  },
+  setClusterAttribute(id, clusterId, body) {
+    return post(`/api/runs/${id}/clusters/${encodeURIComponent(clusterId)}/attribute`, body);
+  },
+  undoClusterDecision(id, clusterId) {
+    return del(`/api/runs/${id}/clusters/${encodeURIComponent(clusterId)}/decision`);
+  },
+  recluster(id) {
+    return post(`/api/runs/${id}/recluster`);
+  },
+  getRunEntities(id, params) {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return get(`/api/runs/${id}/entities${qs}`);
+  },
+  getRunEntity(id, entityId, params) {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return get(`/api/runs/${id}/entities/${encodeURIComponent(entityId)}${qs}`);
+  },
+  getPublishPreview(id) {
+    return get(`/api/runs/${id}/publish-preview`);
+  },
+  publishRun(id, body) {
+    return post(`/api/runs/${id}/publish`, body || { force: false });
+  },
+  runExportUrl(id, params) {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return apiUrl(`/api/runs/${encodeURIComponent(id)}/export${qs}`);
+  },
+  registryAliasesUrl() {
+    return apiUrl("/api/registry/aliases.csv");
+  },
+
   getRunPairs(id, params) {
     const qs = params ? "?" + new URLSearchParams(params).toString() : "";
     return get(`/api/runs/${id}/pairs${qs}`);
@@ -150,23 +193,8 @@ export const api = {
     return del(`/api/runs/${id}/labels/${encodeURIComponent(pairId)}`);
   },
 
-  getRunMatches(id, params) {
-    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
-    return get(`/api/runs/${id}/matches${qs}`);
-  },
-  getRunMatchesByOcod(id, params) {
-    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
-    return get(`/api/runs/${id}/matches/by-ocod${qs}`);
-  },
-  getRunMatchesByRoe(id, params) {
-    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
-    return get(`/api/runs/${id}/matches/by-roe${qs}`);
-  },
   reBucketRun(id, data) {
     return post(`/api/runs/${id}/re-bucket`, data);
-  },
-  createLabelsBatch(data) {
-    return post(`/api/labels/batch`, data);
   },
   getRunDiagnostics(id) {
     return get(`/api/runs/${id}/diagnostics`);
@@ -179,12 +207,6 @@ export const api = {
   },
   deleteRun(id) {
     return del(`/api/runs/${id}`);
-  },
-  applyLabels(id, data) {
-    return post(`/api/runs/${id}/apply-labels`, data);
-  },
-  markUnlabelled(id, data) {
-    return post(`/api/runs/${id}/mark-unlabelled`, data);
   },
   runFileUrl(id, filename) {
     return apiUrl(

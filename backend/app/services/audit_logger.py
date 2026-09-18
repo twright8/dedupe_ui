@@ -7,7 +7,8 @@ from typing import Any
 
 from app.db import write_db
 
-_VALID_KINDS = {"run", "label", "config", "threshold", "upload", "export", "model"}
+_VALID_KINDS = {"run", "label", "config", "threshold", "upload", "export",
+                "model", "publish"}
 
 
 def log_event(

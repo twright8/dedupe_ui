@@ -1,0 +1,699 @@
+# backend/app/routers/entities.py
+"""Clusters, group decisions, entities, publishing, the registry and the export.
+
+The contract is `docs/ENTITIES_API.md`. Everything run-scoped keeps the
+``/api/runs/{run_id}/...`` shape the pairs API already uses, so one screen can
+move between a pair, a cluster and an entity without changing its base URL.
+"""
+
+import csv
+import io
+import json
+import time
+from pathlib import Path
+
+import pandas as pd
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from app.auth import current_user
+from app.db import query_db, write_db
+from app.profiles import get_profile
+from app.registry import plan as registry_plan
+from app.registry import store as registry_store
+from app.services import clusters_reader, entities_reader, pair_labels
+from app.services.audit_logger import log_event
+
+router = APIRouter(tags=["entities"])
+
+
+def _db_path() -> str:
+    from app.main import DB_PATH
+    return DB_PATH
+
+
+def _data_dir() -> Path:
+    from app.main import DATA_DIR
+    return Path(DATA_DIR)
+
+
+def _run_or_404(run_id: str) -> dict:
+    rows = query_db(_db_path(), "SELECT * FROM runs WHERE id = ?", (run_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return dict(rows[0])
+
+
+def _run_dir(run_id: str) -> str:
+    return str(_data_dir() / "runs" / run_id)
+
+
+def _decisions() -> dict:
+    return pair_labels.decisions_by_scope(_db_path())
+
+
+def _id_statuses(run_dir: str) -> dict:
+    """``{entity_id: id_status}`` straight off the proposal."""
+    path = entities_reader.entities_path(run_dir)
+    if not path.is_file():
+        return {}
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        columns = [d[0] for d in con.execute(
+            "SELECT * FROM read_parquet(?) LIMIT 0", [str(path)]
+        ).description]
+        if "id_status" not in columns:
+            return {}
+        rows = con.execute(
+            "SELECT DISTINCT CAST(entity_id AS VARCHAR), id_status FROM read_parquet(?)",
+            [str(path)],
+        ).fetchall()
+        return {row[0]: row[1] for row in rows}
+    finally:
+        con.close()
+
+
+def _cluster_floor(run_id: str) -> float:
+    from app.rules import linkage
+
+    path = _data_dir() / "runs" / run_id / "config" / "linkage_settings.json"
+    if not path.is_file():
+        return linkage.DEFAULT_CLUSTER_FLOOR
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return linkage.DEFAULT_CLUSTER_FLOOR
+    return float(settings.get("cluster_floor", linkage.DEFAULT_CLUSTER_FLOOR))
+
+
+# ---------------------------------------------------------------------------
+# Clusters
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/runs/{run_id}/clusters")
+def get_clusters(
+    run_id: str,
+    track: str | None = Query(None, description="person | organisation"),
+    status: str | None = Query(None),
+    withheld: str | None = Query(None, description="yes | no"),
+    decided: str | None = Query(None, description="yes | no"),
+    min_units: int = Query(2, ge=1),
+    q: str | None = Query(None),
+    sort: str = Query(clusters_reader.DEFAULT_SORT),
+    order: str = Query("desc"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(clusters_reader.DEFAULT_LIMIT, ge=1,
+                       le=clusters_reader.MAX_LIMIT),
+):
+    """The cluster review queue, held exact groups included."""
+    _run_or_404(run_id)
+    try:
+        return clusters_reader.get_clusters(
+            _run_dir(run_id), track=track, status=status, withheld=withheld,
+            decided=decided, min_units=min_units, q=q, sort=sort, order=order,
+            offset=offset, limit=limit, decisions=_decisions(),
+        )
+    except clusters_reader.ClustersNotFound:
+        raise HTTPException(status_code=404, detail="Run has no clusters yet")
+    except clusters_reader.InvalidQuery as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/api/runs/{run_id}/clusters/{cluster_id}")
+def get_cluster(
+    run_id: str,
+    cluster_id: str,
+    events: int = Query(0, ge=0, le=1, description="1 adds each unit's evidence rows"),
+):
+    """One cluster: its units, the pairs between them, and the proposed parts."""
+    _run_or_404(run_id)
+    try:
+        cluster = clusters_reader.get_cluster(
+            _run_dir(run_id), cluster_id, decisions=_decisions(),
+            with_events=bool(events), cluster_floor=_cluster_floor(run_id),
+        )
+    except clusters_reader.ClustersNotFound:
+        raise HTTPException(status_code=404, detail="Run has no clusters yet")
+    if cluster is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No cluster '{cluster_id}' in this run")
+    return cluster
+
+
+class DecisionBody(BaseModel):
+    kind: str
+    parts: list[list[str]] | None = None
+    notes: str | None = None
+    evidence_url: str | None = None
+
+
+@router.post("/api/runs/{run_id}/clusters/{cluster_id}/decision")
+def save_decision(run_id: str, cluster_id: str, body: DecisionBody,
+                  user_name: str = Depends(current_user)):
+    """Merge a whole cluster, or split it into parts. Works on a held group too."""
+    run = _run_or_404(run_id)
+    run_dir = _run_dir(run_id)
+    try:
+        members = clusters_reader.cluster_members(run_dir, cluster_id)
+    except clusters_reader.ClustersNotFound:
+        raise HTTPException(status_code=404, detail="Run has no clusters yet")
+    if not members:
+        raise HTTPException(status_code=404,
+                            detail=f"No cluster '{cluster_id}' in this run")
+
+    kind = (body.kind or "").strip().lower()
+    if kind not in pair_labels.DECISION_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"kind must be one of {', '.join(pair_labels.DECISION_KINDS)}",
+        )
+    if kind == "merge":
+        # One representative per unit: the records inside a unit are already
+        # one thing, so labelling them again would say nothing (ENTITIES.md).
+        parts = [clusters_reader.cluster_representatives(run_dir, cluster_id)]
+    else:
+        parts = [[str(r) for r in part] for part in (body.parts or [])]
+        if len(parts) < 2:
+            raise HTTPException(status_code=400, detail="A split needs at least two parts")
+        known = set(members)
+        seen: set[str] = set()
+        for part in parts:
+            for record_id in part:
+                if record_id not in known:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Record '{record_id}' is not in cluster {cluster_id}",
+                    )
+                if record_id in seen:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Record '{record_id}' is in two parts",
+                    )
+                seen.add(record_id)
+
+    names, track = _member_names(run_dir, members)
+    try:
+        result = pair_labels.save_decision(
+            _db_path(), scope=cluster_id, kind=kind, parts=parts,
+            reviewer=user_name, names=names, track=track,
+            notes=body.notes, evidence_url=body.evidence_url,
+            run_id=run_id, config_version=run.get("config_version"),
+        )
+    except pair_labels.LabelError as exc:
+        status = 422 if "at most" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc))
+
+    log_event(
+        _db_path(), user=user_name or "unknown", kind="label",
+        description=f"Decided {kind} on {cluster_id} ({result['labels_written']} labels)",
+        metadata={"run_id": run_id, "cluster_id": cluster_id, **result},
+    )
+    from app.routers.runs import _refresh_after_labels, _normalize_counts
+
+    counts = _refresh_after_labels(_db_path(), run_dir, run_id)
+    return {**result, "cluster_id": cluster_id, "needs_recluster": True,
+            "counts": _normalize_counts(counts)}
+
+
+class AttributeBody(BaseModel):
+    column: str
+    value: str | None = None
+    notes: str | None = None
+
+
+@router.post("/api/runs/{run_id}/clusters/{cluster_id}/attribute")
+def save_attribute(run_id: str, cluster_id: str, body: AttributeBody,
+                   user_name: str = Depends(current_user)):
+    """Settle a consensus column for every record of a cluster.
+
+    Stored per record, so it survives a rerun that groups them differently. The
+    next recluster reads it back and the column's basis becomes ``human``.
+    """
+    from app.services import attribute_overrides
+
+    _run_or_404(run_id)
+    run_dir = _run_dir(run_id)
+    columns = list(getattr(get_profile(), "consensus_columns", []))
+    if body.column not in columns:
+        raise HTTPException(
+            status_code=400,
+            detail=f"column must be one of {', '.join(columns) or '(none)'}",
+        )
+    try:
+        members = clusters_reader.cluster_members(run_dir, cluster_id)
+    except clusters_reader.ClustersNotFound:
+        raise HTTPException(status_code=404, detail="Run has no clusters yet")
+    if not members:
+        raise HTTPException(status_code=404,
+                            detail=f"No cluster '{cluster_id}' in this run")
+
+    decision_id = pair_labels.new_decision_id()
+    written = attribute_overrides.save_overrides(
+        _db_path(), members, body.column, body.value, reviewer=user_name,
+        notes=body.notes, decision_id=decision_id,
+    )
+    log_event(
+        _db_path(), user=user_name or "unknown", kind="label",
+        description=(f"Set {body.column} to {body.value!r} on {cluster_id} "
+                     f"({written} records)"),
+        metadata={"run_id": run_id, "cluster_id": cluster_id,
+                  "column": body.column, "value": body.value,
+                  "records": written, "decision_id": decision_id},
+    )
+    return {
+        "decision_id": decision_id, "column": body.column, "value": body.value,
+        "records_set": written, "needs_recluster": True,
+    }
+
+
+@router.delete("/api/runs/{run_id}/clusters/{cluster_id}/decision")
+def delete_decision(run_id: str, cluster_id: str,
+                    user_name: str = Depends(current_user)):
+    """Undo the latest decision on a cluster, every one of its labels at once."""
+    _run_or_404(run_id)
+    run_dir = _run_dir(run_id)
+    from app.services import attribute_overrides
+
+    withdrawn = pair_labels.withdraw_decision(_db_path(), cluster_id)
+    if withdrawn is None:
+        # An attribute decision writes no labels, so it is undone on its own.
+        undone = _withdraw_attribute_decision(_db_path(), run_dir, cluster_id)
+        if undone is None:
+            raise HTTPException(status_code=404,
+                                detail=f"No decision on cluster '{cluster_id}'")
+        from app.routers.runs import _normalize_counts, _refresh_after_labels
+
+        return {
+            "decision_id": undone["decision_id"],
+            "labels_withdrawn": 0,
+            "attributes_withdrawn": undone["records"],
+            "needs_recluster": True,
+            "counts": _normalize_counts(
+                _refresh_after_labels(_db_path(), run_dir, run_id)
+            ),
+        }
+    attribute_overrides.withdraw_decision(_db_path(), withdrawn["decision_id"])
+    log_event(
+        _db_path(), user=user_name or "unknown", kind="label",
+        description=(f"Undid the {withdrawn['kind']} decision on {cluster_id} "
+                     f"({withdrawn['labels_withdrawn']} labels)"),
+        metadata={"run_id": run_id, "cluster_id": cluster_id,
+                  "decision_id": withdrawn["decision_id"]},
+    )
+    from app.routers.runs import _refresh_after_labels, _normalize_counts
+
+    counts = _refresh_after_labels(_db_path(), run_dir, run_id)
+    return {
+        "decision_id": withdrawn["decision_id"],
+        "labels_withdrawn": withdrawn["labels_withdrawn"],
+        "attributes_withdrawn": 0,
+        "needs_recluster": True,
+        "counts": _normalize_counts(counts),
+    }
+
+
+def _withdraw_attribute_decision(db_path: str, run_dir: str, cluster_id: str):
+    """Undo the newest attribute decision on a cluster, if it has one."""
+    from app.services import attribute_overrides
+
+    try:
+        members = clusters_reader.cluster_members(run_dir, cluster_id)
+    except clusters_reader.ClustersNotFound:
+        return None
+    if not members:
+        return None
+    rows = attribute_overrides.active_overrides(db_path)
+    mine = rows[rows["record_id"].isin(set(members))]
+    mine = mine[mine["decision_id"].notna()]
+    if not len(mine):
+        return None
+    decision_id = mine.sort_values("id").iloc[-1]["decision_id"]
+    count = attribute_overrides.withdraw_decision(db_path, decision_id)
+    return {"decision_id": decision_id, "records": count}
+
+
+def _member_names(run_dir: str, record_ids: list[str]) -> tuple[dict, str | None]:
+    """``({record_id: name}, track)`` so a label carries what a human will read."""
+    import duckdb
+
+    path = Path(run_dir) / "records.parquet"
+    if not path.is_file() or not record_ids:
+        return {}, None
+    con = duckdb.connect()
+    try:
+        columns = [d[0] for d in con.execute(
+            "SELECT * FROM read_parquet(?) LIMIT 0", [str(path)]
+        ).description]
+        name = "CAST(name AS VARCHAR)" if "name" in columns else "CAST(NULL AS VARCHAR)"
+        track = "CAST(track AS VARCHAR)" if "track" in columns else "CAST(NULL AS VARCHAR)"
+        marks = ", ".join("?" * len(record_ids))
+        rows = con.execute(
+            f"""SELECT CAST(record_id AS VARCHAR), {name}, {track}
+                FROM read_parquet(?)
+                WHERE CAST(record_id AS VARCHAR) IN ({marks})""",
+            [str(path), *record_ids],
+        ).fetchall()
+    finally:
+        con.close()
+    names = {row[0]: row[1] for row in rows}
+    tracks = {row[2] for row in rows if row[2]}
+    return names, (sorted(tracks)[0] if len(tracks) == 1 else None)
+
+
+# ---------------------------------------------------------------------------
+# Recluster
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/runs/{run_id}/recluster")
+def recluster(run_id: str, user_name: str = Depends(current_user)):
+    """Redo stages 4 and 5 after decisions, without rerunning Splink."""
+    from app.services.pipeline_runner import recluster_run
+
+    _run_or_404(run_id)
+    try:
+        result = recluster_run(_db_path(), _run_dir(run_id), run_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Run has no scored pairs yet")
+    log_event(
+        _db_path(), user=user_name or "unknown", kind="run",
+        description=f"Reclustered run {run_id}",
+        metadata={"run_id": run_id, **{k: v for k, v in result.items()
+                                       if k != "counts"}},
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Entities
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/runs/{run_id}/entities")
+def get_entities(
+    run_id: str,
+    track: str | None = Query(None),
+    basis: str | None = Query(None),
+    id_status: str | None = Query(None),
+    min_size: int = Query(1, ge=1),
+    q: str | None = Query(None),
+    sort: str = Query(entities_reader.DEFAULT_SORT),
+    order: str = Query("desc"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(entities_reader.DEFAULT_LIMIT, ge=1,
+                       le=entities_reader.MAX_LIMIT),
+):
+    """The entities this run proposes."""
+    _run_or_404(run_id)
+    run_dir = _run_dir(run_id)
+    try:
+        return entities_reader.get_entities(
+            run_dir, track=track, basis=basis, id_status=id_status,
+            min_size=min_size, q=q, sort=sort, order=order, offset=offset,
+            limit=limit, statuses=_id_statuses(run_dir),
+        )
+    except entities_reader.EntitiesNotFound:
+        raise HTTPException(status_code=404, detail="Run has no entities yet")
+    except entities_reader.InvalidQuery as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/api/runs/{run_id}/entities/{entity_id}")
+def get_entity(run_id: str, entity_id: str,
+               events: int = Query(0, ge=0, le=1)):
+    """One entity with its member records."""
+    _run_or_404(run_id)
+    run_dir = _run_dir(run_id)
+    try:
+        entity = entities_reader.get_entity(
+            run_dir, entity_id, statuses=_id_statuses(run_dir),
+            with_events=bool(events),
+        )
+    except entities_reader.EntitiesNotFound:
+        raise HTTPException(status_code=404, detail="Run has no entities yet")
+    if entity is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No entity '{entity_id}' in this run")
+    return entity
+
+
+# ---------------------------------------------------------------------------
+# Publishing
+# ---------------------------------------------------------------------------
+
+
+# The preview reads the whole proposal and the whole registry, so a screen that
+# polls it would pay for that every time. One slot per run is enough: the key
+# carries the proposal's mtime and how many times the registry has been written,
+# so a recluster or a publish invalidates it without anyone remembering to.
+_PLAN_CACHE: dict[str, tuple] = {}
+
+
+def _plan_key(run_id: str, path: Path) -> tuple:
+    published = query_db(_db_path(), "SELECT COUNT(*) AS n FROM entity_publications")
+    retired = query_db(_db_path(),
+                       "SELECT COUNT(*) AS n FROM entities WHERE status = 'retired'")
+    return (run_id, path.stat().st_mtime_ns, path.stat().st_size,
+            published[0]["n"], retired[0]["n"])
+
+
+def _plan_for(run_id: str) -> dict:
+    run_dir = _run_dir(run_id)
+    path = entities_reader.entities_path(run_dir)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Run has no entities yet")
+
+    key = _plan_key(run_id, path)
+    cached = _PLAN_CACHE.get(run_id)
+    if cached and cached[0] == key:
+        return cached[1]
+
+    entities = pd.read_parquet(path)
+    names = {}
+    records_path = Path(run_dir) / "records.parquet"
+    if records_path.is_file():
+        import duckdb
+
+        con = duckdb.connect()
+        try:
+            columns = [d[0] for d in con.execute(
+                "SELECT * FROM read_parquet(?) LIMIT 0", [str(records_path)]
+            ).description]
+            if "name" in columns:
+                rows = con.execute(
+                    "SELECT CAST(record_id AS VARCHAR), CAST(name AS VARCHAR) "
+                    "FROM read_parquet(?)", [str(records_path)]
+                ).fetchall()
+                names = {row[0]: row[1] for row in rows}
+        finally:
+            con.close()
+
+    plan = registry_plan.build_plan(
+        _db_path(), run_id, entities, names,
+        list(getattr(get_profile(), "consensus_columns", [])),
+    )
+    _PLAN_CACHE[run_id] = (key, plan)
+    return plan
+
+
+@router.get("/api/runs/{run_id}/publish-preview")
+def publish_preview(run_id: str):
+    """What publishing this run would change in the registry."""
+    run = _run_or_404(run_id)
+    plan = _plan_for(run_id)
+    newer = registry_plan.newer_publication(_db_path(), run_id, run.get("started_at"))
+    report_path = entities_reader.report_path(_run_dir(run_id))
+    collisions = {}
+    if report_path.is_file():
+        try:
+            collisions = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            collisions = {}
+    latest = registry_store.latest_publication(_db_path())
+    return {
+        "run_id": run_id,
+        "registry_entities": plan["registry_entities"],
+        "published_at": (latest or {}).get("published_at"),
+        "published_by": (latest or {}).get("published_by"),
+        "can_publish": newer is None,
+        "blocked_by": ({"kind": "newer_run_published", "run_id": newer["run_id"],
+                        "published_at": newer["published_at"]} if newer else None),
+        "summary": {**plan["summary"],
+                    "id_collisions": collisions.get("id_collisions", 0)},
+        "new_examples": plan["examples"]["new"],
+        "kept_examples": plan["examples"]["kept"],
+        "alias_examples": plan["examples"]["aliases"],
+        "merged_examples": plan["examples"]["merged"],
+        "split_examples": plan["examples"]["split"],
+        "moved_examples": plan["examples"]["moved"],
+        "id_collision_examples": collisions.get("id_collision_examples", []),
+    }
+
+
+class PublishBody(BaseModel):
+    force: bool = False
+
+
+@router.post("/api/runs/{run_id}/publish")
+def publish(run_id: str, body: PublishBody | None = None,
+            user_name: str = Depends(current_user)):
+    """Write the proposal into the registry, in one transaction."""
+    body = body or PublishBody()
+    run = _run_or_404(run_id)
+    already = registry_store.publication(_db_path(), run_id)
+    if already:
+        return {"ok": True, "run_id": run_id, "already": True,
+                "published_at": already["published_at"],
+                "published_by": already["published_by"],
+                "summary": json.loads(already["summary_json"] or "{}")}
+
+    newer = registry_plan.newer_publication(_db_path(), run_id, run.get("started_at"))
+    if newer and not body.force:
+        raise HTTPException(status_code=409, detail={
+            "kind": "newer_run_published", "run_id": newer["run_id"],
+            "published_at": newer["published_at"],
+        })
+
+    plan = _plan_for(run_id)
+    result = registry_store.publish(_db_path(), run_id, plan,
+                                    published_by=user_name or "")
+    write_db(_db_path(), "UPDATE runs SET label = COALESCE(label, ?) WHERE id = ?",
+             ("published", run_id))
+    log_event(
+        _db_path(), user=user_name or "unknown", kind="publish",
+        description=(f"Published run {run_id}: {plan['summary']['new']} new, "
+                     f"{plan['summary']['kept']} kept, {plan['summary']['merged']} merged"),
+        metadata={"run_id": run_id, **plan["summary"]},
+    )
+    return {"ok": True, "run_id": run_id, "already": False,
+            "published_at": result["published_at"],
+            "published_by": user_name or "", "summary": plan["summary"]}
+
+
+# ---------------------------------------------------------------------------
+# The registry
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/registry/aliases.csv")
+def aliases_csv():
+    """Every retired ID with the entity it finally resolves to."""
+    rows = registry_store.alias_rows(_db_path())
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=[
+        "retired_entity_id", "survivor_entity_id", "track", "retired_run", "retired_at",
+    ])
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: ("" if v is None else v) for k, v in row.items()})
+    return Response(content=buffer.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=aliases.csv"})
+
+
+@router.get("/api/registry/entities/{entity_id}")
+def registry_entity(entity_id: str):
+    """Follow the alias chain to the entity that is live now."""
+    try:
+        found = registry_store.entity_detail(_db_path(), entity_id)
+    except registry_store.RegistryError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    if found is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No entity '{entity_id}' in the registry")
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Export
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/runs/{run_id}/export")
+def export(run_id: str, format: str = Query("xlsx"), scope: str = Query("proposal"),
+           user_name: str = Depends(current_user)):
+    """The profile's export file, streamed."""
+    run = _run_or_404(run_id)
+    if format not in ("xlsx", "csv"):
+        raise HTTPException(status_code=400, detail="format must be xlsx or csv")
+    if scope not in ("proposal", "published"):
+        raise HTTPException(status_code=400, detail="scope must be proposal or published")
+    run_dir = Path(_run_dir(run_id))
+    entities_path = entities_reader.entities_path(str(run_dir))
+    if not entities_path.is_file():
+        raise HTTPException(status_code=404, detail="Run has no entities yet")
+    if scope == "published" and not registry_store.publication(_db_path(), run_id):
+        raise HTTPException(status_code=409, detail="This run has not been published")
+
+    entities = pd.read_parquet(entities_path)
+    if scope == "published":
+        current = registry_store.current_members(_db_path())
+        entities = entities.copy()
+        entities["record_id"] = entities["record_id"].astype(str)
+        entities["entity_id"] = entities["record_id"].map(current).fillna(
+            entities["entity_id"]
+        )
+
+    counts = {}
+    if run.get("counts_json"):
+        try:
+            counts = json.loads(run["counts_json"])
+        except (ValueError, TypeError):
+            counts = {}
+
+    profile = get_profile()
+    started = time.time()
+    try:
+        path = profile.export(run_dir, scope, format, {
+            "raw": _raw_input(run),
+            "entities": entities,
+            "aliases": registry_store.alias_rows(_db_path()),
+            "run_id": run_id,
+            "config_version": run.get("config_version"),
+            "counts": counts,
+            "scope": scope,
+            "input_name": run.get("input_filename"),
+        })
+    except NotImplementedError:
+        path = _default_export(run_dir, entities, format)
+    log_event(
+        _db_path(), user=user_name or "unknown", kind="export",
+        description=f"Exported run {run_id} ({scope}, {format})",
+        metadata={"run_id": run_id, "scope": scope, "format": format,
+                  "seconds": round(time.time() - started, 1)},
+    )
+    return FileResponse(path=str(path), filename=path.name)
+
+
+def _raw_input(run: dict) -> pd.DataFrame:
+    """The original input file, as the loader read it."""
+    from app.profiles.donations import read_input
+
+    name = run.get("input_filename")
+    if not name:
+        raise HTTPException(status_code=400, detail="This run has no input file recorded")
+    path = _data_dir() / "uploads" / name
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"The input file '{name}' is no longer in the uploads folder",
+        )
+    return read_input(path)
+
+
+def _default_export(run_dir: Path, entities: pd.DataFrame, fmt: str) -> Path:
+    """A profile with no export of its own gets its records plus the new columns."""
+    records = pd.read_parquet(run_dir / "records.parquet")
+    records["record_id"] = records["record_id"].astype(str)
+    merged = records.merge(
+        entities[["record_id", "entity_id", "entity_basis"]], on="record_id", how="left"
+    )
+    path = run_dir / f"export.{'csv' if fmt != 'xlsx' else 'xlsx'}"
+    if fmt == "xlsx":
+        merged.to_excel(path, index=False)
+    else:
+        merged.to_csv(path, index=False, encoding="utf-8-sig")
+    return path

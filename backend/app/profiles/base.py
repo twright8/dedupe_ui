@@ -89,6 +89,12 @@ class Profile:
     # The evidence rows a profile may supply (D13b): the donations behind a
     # donor, the companies behind a PSC. Empty when there are none.
     event_columns: list[DisplayColumn] = field(default_factory=list)
+    # Columns settled once per entity rather than per record (D8a, stage 2 of
+    # the two). Donations: the standardised donor status.
+    consensus_columns: list[str] = field(default_factory=list)
+    # Only the default mint uses this; a profile with an ID convention of its
+    # own ignores it.
+    _entity_counter: int = 0
 
     def load_records(self, input_path: Path) -> tuple[pd.DataFrame, dict]:
         """Read the input file and return (records frame, load stats).
@@ -111,6 +117,45 @@ class Profile:
         this and ``load_records`` from the same parse.
         """
         return None
+
+    def mint_entity_ids(self, members: pd.DataFrame) -> pd.Series:
+        """Fresh entity IDs for the proposals that belong to no registry entity.
+
+        *members* is every such proposal's record rows in one frame, carrying
+        ``entity_key``. The answer is a Series indexed by ``entity_key``. It is
+        a whole frame rather than one entity at a time because PSC will have
+        millions of them.
+
+        The default is a counter, which suits a profile with no ID convention.
+        Donations overrides it: its IDs have to line up with the numbers the
+        earlier manual work already handed out (D15).
+        """
+        keys = members["entity_key"].drop_duplicates().sort_values()
+        start = self._entity_counter
+        self._entity_counter += len(keys)
+        return pd.Series(
+            [f"E{start + n + 1:08d}" for n in range(len(keys))], index=keys.to_numpy()
+        )
+
+    def choose_survivors(self, claims: pd.DataFrame) -> pd.Series:
+        """Which ID wins where a proposed entity spans several registry ones.
+
+        *claims* is long form: ``entity_key`` and ``registry_entity``, several
+        rows per key. The answer is a Series indexed by ``entity_key``. The
+        others retire as aliases when the run is published, so the choice has to
+        be stable — the same set must always give one answer.
+        """
+        return claims.groupby("entity_key", sort=False)["registry_entity"].min()
+
+    def export(self, run_dir: Path, scope: str, fmt: str, context: dict) -> Path:
+        """Write this profile's export file and return its path.
+
+        *context* carries what the file needs beyond the run's own parquet
+        files: the aliases, the run row and its counts. A profile with no
+        export of its own raises, and the runs API falls back to a plain
+        records CSV.
+        """
+        raise NotImplementedError(f"Profile '{self.key}' has no export of its own.")
 
     def aggregate_unit_columns(
         self, members: pd.DataFrame, events: pd.DataFrame | None = None
@@ -139,6 +184,7 @@ class Profile:
             "display_columns": [c.as_dict() for c in self.display_columns],
             "priority_columns": list(self.priority_columns),
             "event_columns": [c.as_dict() for c in self.event_columns],
+            "consensus_columns": list(self.consensus_columns),
         }
 
 

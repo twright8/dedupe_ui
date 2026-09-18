@@ -170,24 +170,6 @@ def test_refresh_counts_survives_a_run_with_no_stored_counts(db_path, tmp_path):
     assert counts["labels_applied"] == 0
 
 
-def test_normalize_counts_exposes_the_pre_label_baseline():
-    from app.routers.runs import _normalize_counts
-
-    out = _normalize_counts({
-        "total_titles": 100, "matched_titles": 90,
-        "pre_labels": {"total_titles": 100, "matched_titles": 80},
-    })
-    assert out["matchedTitles"] == 90
-    assert out["preLabels"]["matchedTitles"] == 80
-    # The baseline carries no baseline of its own — the recursion terminates.
-    assert out["preLabels"]["preLabels"] is None
-
-
-def test_normalize_counts_returns_no_baseline_for_legacy_runs():
-    from app.routers.runs import _normalize_counts
-    assert _normalize_counts({"total_titles": 10})["preLabels"] is None
-
-
 # ---------------------------------------------------------------------------
 # Wiring: the full Stage 3 export actually produces these
 # ---------------------------------------------------------------------------

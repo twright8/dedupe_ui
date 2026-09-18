@@ -11,8 +11,16 @@ import { Empty } from "../components/Empty";
 import ModelPanel from "../components/ModelPanel";
 import RecordsTable from "../components/RecordsTable";
 import ExactGroupsTable from "../components/ExactGroupsTable";
+import EntitiesTable from "../components/EntitiesTable";
+import PublishPanel from "../components/PublishPanel";
 import { useProfile } from "../profile";
-import { hasExactCounts, hasPairCounts, hasRecordCounts, trackCountKey } from "../counts";
+import {
+  hasEntityCounts,
+  hasExactCounts,
+  hasPairCounts,
+  hasRecordCounts,
+  trackCountKey,
+} from "../counts";
 import { useRunProgress } from "../hooks/useRunProgress";
 
 // ---------- Unmapped-lookup-values self-serve fix ----------
@@ -376,6 +384,133 @@ function ContradictionsPanel({ runId, count }) {
   );
 }
 
+/* How the proposed IDs line up with the earlier manual grouping. The backend
+   adds this to score-eval, so the card only appears once it is there. */
+const REASON_LABELS = {
+  merged_two_earlier_groups: "Joined two earlier groups",
+  split: "Split an earlier group",
+  collision_re_mint: "Given a new ID after a collision",
+};
+
+function VersusEarlierIds({ scoreEval }) {
+  const v = scoreEval?.versus_existing_entity_id;
+  const entities = scoreEval?.entities;
+  if (!v && !entities) return null;
+  const reasons = Object.entries(v?.reasons || {});
+
+  return (
+    <div className="card">
+      <div className="card-h">
+        <Icons.branch size={16} />
+        <h3>The proposed IDs against the earlier ones</h3>
+        {entities && (
+          <span className="muted" style={{ fontSize: 12 }}>
+            pair precision {entities.pair_precision == null ? "—" : fmtPct(entities.pair_precision, 1)}{" "}
+            · pair recall {entities.pair_recall == null ? "—" : fmtPct(entities.pair_recall, 1)}
+          </span>
+        )}
+      </div>
+      <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {v && (
+          <div style={{ fontSize: 13.5 }}>
+            <strong>{fmtNumber(v.identical_records)}</strong> of{" "}
+            {fmtNumber(v.labelled_records)} records that already had an ID keep exactly the same
+            grouping. <strong>{fmtNumber(v.different_records)}</strong> are grouped differently.
+          </div>
+        )}
+        {reasons.length > 0 && (
+          <div className="tbl-wrap">
+            <table className="t" style={{ borderRadius: 0 }}>
+              <thead>
+                <tr>
+                  <th style={{ minWidth: 220 }}>Why it differs</th>
+                  <th style={{ width: 110, textAlign: "right" }}>Records</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reasons.map(([key, n]) => (
+                  <tr key={key}>
+                    <td>{REASON_LABELS[key] || key}</td>
+                    <td className="mono tnum" style={{ textAlign: "right" }}>
+                      {fmtNumber(n)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="muted" style={{ fontSize: 11.5, margin: 0, lineHeight: 1.5 }}>
+          A record can appear under more than one reason, so these numbers do not add up to the
+          records that differ. {v?.circular}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Entity KPI strip ----------
+// The last row on the summary: what stage 5 proposed, and what is still
+// waiting for a person before the run can be published.
+function EntityKpis({ c, onQueue }) {
+  const collisions = c.idCollisions || 0;
+  const ties = c.attributeTies || 0;
+  return (
+    <div className="kpi-grid">
+      <div className="kpi">
+        <div className="label">Entities proposed</div>
+        <div className="value">{fmtNumber(c.entitiesProposed)}</div>
+        <div className="delta muted">
+          {fmtNumber(c.entitiesNew)} new · {fmtNumber(c.entitiesKept)} kept ·{" "}
+          {fmtNumber(c.entitiesMerged)} merged
+        </div>
+      </div>
+      <div
+        className="kpi"
+        onClick={onQueue}
+        style={{ cursor: "pointer" }}
+        title="Open the cluster review queue"
+      >
+        <div className="label">Withheld groups</div>
+        <div className="value" style={{ color: "var(--amber)" }}>
+          {fmtNumber(c.clustersWithheld)}
+        </div>
+        <div className="delta muted">the gate did not settle these</div>
+      </div>
+      <div className="kpi" onClick={onQueue} style={{ cursor: "pointer" }}>
+        <div className="label">Held groups open</div>
+        <div className="value" style={{ color: "var(--amber)" }}>
+          {fmtNumber(c.heldGroupsOpen)}
+        </div>
+        <div className="delta muted">a match key guard stopped these</div>
+      </div>
+      <div className="kpi">
+        <div className="label">Attribute ties</div>
+        <div className="value" style={ties > 0 ? { color: "var(--violet)" } : undefined}>
+          {fmtNumber(ties)}
+        </div>
+        <div className="delta muted">no single value was the most common</div>
+      </div>
+      <div className="kpi">
+        <div className="label">ID collisions</div>
+        <div className="value" style={collisions > 0 ? { color: "var(--ti-red)" } : undefined}>
+          {fmtNumber(collisions)}
+        </div>
+        <div className="delta muted">
+          {collisions > 0
+            ? "two entities claimed one earlier ID, so one took a new one"
+            : "no earlier ID was claimed twice"}
+        </div>
+      </div>
+      <div className="kpi">
+        <div className="label">Decisions made</div>
+        <div className="value">{fmtNumber(c.decisionsTotal)}</div>
+        <div className="delta muted">groups a person has settled</div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Scoring KPI strip ----------
 // The third row on the summary, once stage 3 has scored the pairs.
 function ScoreKpis({ c, onReview }) {
@@ -561,11 +696,12 @@ class PanelErrorBoundary extends Component {
   }
 }
 
-function RunSummary({ run, onReview, onConflicts }) {
+function RunSummary({ run, onReview, onConflicts, onQueue }) {
   const c = run.counts;
   const [diagData, setDiagData] = useState(null);
   const [labelStats, setLabelStats] = useState(null);
   const [modelStatus, setModelStatus] = useState(null);
+  const [scoreEval, setScoreEval] = useState(null);
 
   useEffect(() => {
     if (run && run.id) {
@@ -573,6 +709,7 @@ function RunSummary({ run, onReview, onConflicts }) {
         .then((data) => setDiagData(data))
         .catch(() => setDiagData(null));
       api.modelStatus().then(setModelStatus).catch(() => setModelStatus(null));
+      api.getRunScoreEval(run.id).then(setScoreEval).catch(() => setScoreEval(null));
       api.listLabels({ active: 1, run_id: run.id, per_page: 1 })
         .then((data) => {
           const forRun = data.total || 0;
@@ -599,6 +736,7 @@ function RunSummary({ run, onReview, onConflicts }) {
   // One summary for every stage a run has reached: records, then the exact
   // groups, then the scored pairs. Each strip appears once its stage has run.
   const exact = hasExactCounts(c);
+  const entities = hasEntityCounts(c);
   const contradictions = c.labelContradictions || 0;
 
   return (
@@ -607,6 +745,8 @@ function RunSummary({ run, onReview, onConflicts }) {
       <RecordKpis c={c} />
       {exact && <ExactKpis c={c} onConflicts={onConflicts} />}
       {pairs && <ScoreKpis c={c} onReview={onReview} />}
+      {entities && <EntityKpis c={c} onQueue={onQueue} />}
+      {entities && <VersusEarlierIds scoreEval={scoreEval} />}
       <div className="card">
         <div className="card-h">
           <Icons.table size={16} />
@@ -690,25 +830,9 @@ function RunDiagnostics({ runId }) {
   const thresholdReview = +(diag.thresholds?.threshold_review ?? 0.5);
   const scoreColumn = diag.score_column === "gbt_score" ? "GBT score" : "Splink probability";
   const pct = (v) => `${Math.max(0, Math.min(1, v)) * 100}%`;
-  const features = (diag.features || [
-    {
-      lab: "name_jw",
-      v: 0.92,
-      info: "Jaro-Winkler on cleaned name",
-    },
-    { lab: "name_core", v: 0.88, info: "Entity-suffix stripped" },
-    {
-      lab: "tokens_sorted",
-      v: 0.81,
-      info: "Word-order invariant",
-    },
-    { lab: "digits", v: 0.74, info: "Set equality of digits" },
-    {
-      lab: "jurisdiction",
-      v: 1.0,
-      info: "Hard-equal after canonicalisation",
-    },
-  ]).filter((f) => f.lab !== "suffix_norm");
+  // Whatever comparisons the run actually used. There is no stand-in list: made-up
+  // weights from the ROE tool were worse than showing nothing.
+  const features = (diag.features || []).filter((f) => f.lab !== "suffix_norm");
 
   const confusion = diag.confusion || null;
   const examples = diag.cleaning_examples || diag.examples || [];
@@ -1320,6 +1444,7 @@ export default function RunDetailScreen() {
   // pairs. Hide them otherwise rather than send the user to a 404.
   const pairs = hasPairCounts(run.counts);
   const exact = hasExactCounts(run.counts);
+  const entities = hasEntityCounts(run.counts);
 
   return (
     <div className="content">
@@ -1394,26 +1519,6 @@ export default function RunDetailScreen() {
             <Icons.refresh size={14} /> Re-run with{" "}
             {run.config}
           </button>
-          {pairs && (
-            <a
-              className="btn"
-              href={api.runFileUrl(id, "matches_final.csv")}
-              download
-              title="Only the rows that got a match — exact + high-confidence + the ones you confirmed — without the blanks."
-            >
-              <Icons.export size={14} /> Download matches only
-            </a>
-          )}
-          {pairs && (
-            <a
-              className="btn"
-              href={api.runFileUrl(id, "merged_dataset.csv")}
-              download
-              title="Every OCOD row, with its match where there is one and a blank where there isn't."
-            >
-              <Icons.export size={14} /> Export all rows (full)
-            </a>
-          )}
           {pairs && buckets.review > 0 && (
             <button
               className="btn primary"
@@ -1454,6 +1559,8 @@ export default function RunDetailScreen() {
           { id: "summary", lab: "Summary" },
           { id: "records", lab: "Records" },
           ...(exact ? [{ id: "exact", lab: "Exact groups" }] : []),
+          ...(entities ? [{ id: "entities", lab: "Entities" }] : []),
+          ...(entities ? [{ id: "publish", lab: "Publish & export" }] : []),
           { id: "diagnostics", lab: "Diagnostics" },
           { id: "files", lab: "Files" },
           { id: "history", lab: "History" },
@@ -1479,6 +1586,7 @@ export default function RunDetailScreen() {
             setExactAgreement("conflict");
             setTab("exact");
           }}
+          onQueue={() => navigate(`/runs/${id}/clusters`)}
         />
       )}
       <PanelErrorBoundary resetKey={`${id}:${tab}`}>
@@ -1490,6 +1598,8 @@ export default function RunDetailScreen() {
             initialAgreement={exactAgreement}
           />
         )}
+        {tab === "entities" && <EntitiesTable runId={id} profile={profile} />}
+        {tab === "publish" && <PublishPanel runId={id} run={run} profile={profile} />}
         {tab === "diagnostics" && <RunDiagnostics runId={id} />}
         {tab === "files" && <RunFiles runId={id} />}
         {tab === "history" && <RunHistory runId={id} />}

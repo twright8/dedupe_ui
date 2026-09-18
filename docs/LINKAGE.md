@@ -63,7 +63,7 @@ The bucket the score alone gives is kept as `score_bucket`, beside the `bucket` 
 
 Two overlays then apply, in this order. The later one wins.
 
-1. **Imported labels** (D11). If the two units carry the same single `existing_entity_id`, the pair is `accept` with `decided_by: "import"`. If they carry different ones, the pair keeps its score bucket and gets `import_disagrees: true`. That flag is a weak signal for training and for sorting. It never decides a pair.
+1. **Imported labels** (D11). If the two units carry the same single `existing_entity_id`, the pair is `accept` with `decided_by: "import"`. Scoring only decides pairs blocking produced, so stage 4 goes further and joins every unit carrying one such id to the others carrying it, within its track, as `import` edges — an earlier real group is a trusted merge and a run must not keep it apart (`ENTITIES.md`). If they carry different ones, the pair keeps its score bucket and gets `import_disagrees: true`. That flag is a weak signal for training and for sorting. It never decides a pair.
 2. **Human labels** from the UI. A TRUE label makes the pair `accept`, a FALSE label makes it `reject`, both with `decided_by: "human"`. A human label always wins.
 
 `pairs.parquet` holds the score and the first overlay only. The second is joined on where the pairs are read — in SQL by `pairs_reader`, in pandas by `label_overlay.apply_to_pairs` — because a label is a row in a table and recording one must not rewrite a file that will one day hold millions of rows. Only the run's counts and its evaluation are worked out again.

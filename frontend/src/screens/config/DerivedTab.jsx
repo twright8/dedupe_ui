@@ -266,7 +266,7 @@ function DerivedColumnCard({
         errors={errors}
         pathPrefix={`derived_columns[${index}].rules`}
         resultHeader="Value"
-        resultWidth={190}
+        resultWidth={260}
         makeRule={(ids) => ({
           id: nextId(`${derived.id || "d"}r`, ids),
           description: "",

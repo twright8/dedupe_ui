@@ -683,9 +683,7 @@ def run_stage_3_score(
                                      thresholds={"candidate": candidate,
                                                  "review": review, "high": high},
                                      applied=outcome["applied"])
-    (run_dir / SCORE_EVAL_FILENAME).write_text(
-        json.dumps(evaluation, indent=2), encoding="utf-8"
-    )
+    _write_evaluation(run_dir, evaluation)
 
     counts = counts_from(units, pairs, evaluation, outcome)
     elapsed = time.time() - t_start
@@ -748,9 +746,7 @@ def rebucket(
                     "high": float(threshold_high)},
         applied=outcome["applied"],
     )
-    (run_dir / SCORE_EVAL_FILENAME).write_text(
-        json.dumps(evaluation, indent=2), encoding="utf-8"
-    )
+    _write_evaluation(run_dir, evaluation)
     return counts_from(units, pairs, evaluation, outcome)
 
 
@@ -782,7 +778,24 @@ def refresh_after_labels(run_dir: str, labels: pd.DataFrame | None) -> dict:
         thresholds={"candidate": candidate, "review": review, "high": high},
         applied=outcome["applied"],
     )
-    (run_dir / SCORE_EVAL_FILENAME).write_text(
-        json.dumps(evaluation, indent=2), encoding="utf-8"
-    )
+    _write_evaluation(run_dir, evaluation)
     return counts_from(units, pairs, evaluation, outcome)
+
+
+def _write_evaluation(run_dir: Path, evaluation: dict) -> None:
+    """Write score_eval.json, keeping the figures stage 5 added to it.
+
+    A label write redoes this file, and stage 5 does not run again — so the
+    entity figure set has to be carried over rather than quietly dropped.
+    """
+    path = Path(run_dir) / SCORE_EVAL_FILENAME
+    carried = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            carried = {key: existing[key]
+                       for key in ("entities", "versus_existing_entity_id")
+                       if key in existing}
+        except (OSError, json.JSONDecodeError):
+            carried = {}
+    path.write_text(json.dumps({**evaluation, **carried}, indent=2), encoding="utf-8")

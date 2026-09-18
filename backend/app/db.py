@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS pair_labels (
     track           TEXT,
     is_match        TEXT NOT NULL,             -- 'TRUE' | 'FALSE'
     provenance      TEXT,                      -- manual | bulk_range | llm | import
+                                               -- | cluster_merge | cluster_split
     held_out        INTEGER NOT NULL DEFAULT 0,-- 1 = frozen eval set, excluded from training
     reviewer        TEXT,
     notes           TEXT,
@@ -87,7 +88,68 @@ CREATE TABLE IF NOT EXISTS pair_labels (
     config_version  INTEGER,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     active          INTEGER NOT NULL DEFAULT 1,
-    superseded_by   INTEGER
+    superseded_by   INTEGER,
+    -- Every label a single group decision wrote shares one id, so the decision
+    -- can be shown, superseded or undone as a whole (docs/ENTITIES.md).
+    decision_id     TEXT,
+    -- The cluster or held exact group the decision was about, so it can be
+    -- found, superseded and undone as a whole.
+    decision_scope  TEXT
+);
+
+-- The durable registry (docs/ENTITIES.md). A run never writes it; publishing a
+-- run does, in one transaction. Entity IDs outlive runs, so a retired ID stays
+-- as a redirect to the entity that absorbed it rather than being deleted.
+CREATE TABLE IF NOT EXISTS entities (
+    entity_id       TEXT PRIMARY KEY,
+    track           TEXT,
+    created_run     TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    status          TEXT NOT NULL DEFAULT 'active',   -- active | retired
+    alias_of        TEXT,                             -- the survivor, when retired
+    retired_run     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS entity_members (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id       TEXT NOT NULL,
+    entity_id       TEXT NOT NULL,
+    since_run       TEXT,
+    until_run       TEXT                              -- null while current
+);
+
+CREATE TABLE IF NOT EXISTS entity_attributes (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id       TEXT NOT NULL,
+    column_name     TEXT NOT NULL,
+    value           TEXT,
+    basis           TEXT,                             -- rule | majority | raw | tie
+    run_id          TEXT
+);
+
+-- Which runs have been published. Publishing the same run twice is then a
+-- no-op, and publishing an older run over a newer one can be refused.
+CREATE TABLE IF NOT EXISTS entity_publications (
+    run_id          TEXT PRIMARY KEY,
+    published_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    published_by    TEXT,
+    summary_json    TEXT
+);
+
+-- A reviewer settling a consensus column the entity could not settle itself
+-- (docs/ENTITIES_API.md). Stored per RECORD so it outlives the entity: a rerun
+-- may put those records in a different cluster, and the decision still holds.
+CREATE TABLE IF NOT EXISTS attribute_overrides (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id       TEXT NOT NULL,
+    column_name     TEXT NOT NULL,
+    value           TEXT,
+    reviewer        TEXT,
+    notes           TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    active          INTEGER NOT NULL DEFAULT 1,
+    superseded_by   INTEGER,
+    decision_id     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -151,6 +213,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_pair_labels_active_key
 CREATE INDEX IF NOT EXISTS idx_pair_labels_active
     ON pair_labels (active, id DESC);
 
+-- A record belongs to one entity at a time; the index is on the live row.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_members_current
+    ON entity_members (record_id)
+    WHERE until_run IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_attribute_overrides_active
+    ON attribute_overrides (record_id, column_name)
+    WHERE active = 1;
+
+CREATE INDEX IF NOT EXISTS idx_attribute_overrides_decision
+    ON attribute_overrides (decision_id);
+
+CREATE INDEX IF NOT EXISTS idx_entity_members_entity
+    ON entity_members (entity_id, until_run);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_attributes_key
+    ON entity_attributes (entity_id, column_name);
+
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp
     ON audit_log (timestamp DESC);
 
@@ -172,6 +252,8 @@ _MIGRATIONS = [
     ("labels", "superseded_by", "INTEGER"),
     ("labels", "roe_name", "TEXT"),
     ("config_versions", "ruleset", "TEXT"),
+    ("pair_labels", "decision_id", "TEXT"),
+    ("pair_labels", "decision_scope", "TEXT"),
 ]
 
 
@@ -234,6 +316,17 @@ def init_db(db_path: str) -> None:
     # Superseded by idx_labels_raw_key_unique (same columns, now unique).
     conn.execute("DROP INDEX IF EXISTS idx_labels_raw_key")
     _apply_migrations(conn)
+    # Indexes over a migrated column have to wait for the column to exist: on a
+    # database made before slice 4 the schema above runs first and pair_labels
+    # has no decision_id yet.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pair_labels_decision "
+        "ON pair_labels (decision_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pair_labels_scope "
+        "ON pair_labels (decision_scope, active)"
+    )
     conn.commit()
     conn.close()
 

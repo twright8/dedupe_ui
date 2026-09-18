@@ -12,6 +12,7 @@ from app.db import init_db
 from app.profiles import get_profile
 from app.routers.audit import router as audit_router
 from app.routers.config import router as config_router
+from app.routers.entities import router as entities_router
 from app.routers.pair_labels import router as labels_router
 from app.routers.model import router as model_router
 from app.routers.notes import router as notes_router
@@ -101,6 +102,7 @@ app.add_middleware(BasePathMiddleware)
 app.include_router(auth_router)
 app.include_router(audit_router)
 app.include_router(config_router)
+app.include_router(entities_router)
 app.include_router(labels_router)
 app.include_router(model_router)
 app.include_router(notes_router)

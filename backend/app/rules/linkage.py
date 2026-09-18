@@ -38,6 +38,14 @@ DEFAULT_MAX_PAIRS = 20_000_000
 # probability_two_random_records_match is null and Splink has to estimate it.
 DEFAULT_DETERMINISTIC_RECALL = 0.8
 
+# The stage 4 gate (docs/ENTITIES.md). A cluster held together by a pair below
+# the floor may be a chain; one over the unit cap is a runaway attractor; one
+# carrying more than max_existing_ids earlier ids would merge groups the manual
+# work deliberately kept apart.
+DEFAULT_CLUSTER_FLOOR = 0.20
+DEFAULT_MAX_CLUSTER_UNITS = 200
+DEFAULT_MAX_EXISTING_IDS = 1
+
 BUCKETS = ("accept", "review", "reject")
 DECIDED_BY = ("score", "import", "human")
 
@@ -300,6 +308,20 @@ def validate_linkage_settings(settings, ruleset: dict, raw_columns) -> list[dict
     if isinstance(iterations, bool) or not isinstance(iterations, int) or iterations < 1:
         _error(errors, "linkage_settings.em_iterations",
                "em_iterations must be a whole number of 1 or more")
+
+    floor = settings.get("cluster_floor", DEFAULT_CLUSTER_FLOOR)
+    if isinstance(floor, bool) or not isinstance(floor, (int, float)) \
+            or not 0 <= float(floor) <= 1:
+        _error(errors, "linkage_settings.cluster_floor",
+               "cluster_floor must be a number between 0 and 1")
+    for key, default, least in (
+        ("max_cluster_units", DEFAULT_MAX_CLUSTER_UNITS, 2),
+        ("max_existing_ids", DEFAULT_MAX_EXISTING_IDS, 1),
+    ):
+        value = settings.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < least:
+            _error(errors, f"linkage_settings.{key}",
+                   f"{key} must be a whole number of {least} or more")
 
     prior = settings.get("probability_two_random_records_match")
     if prior is not None:

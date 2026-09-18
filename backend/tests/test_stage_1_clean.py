@@ -246,6 +246,7 @@ def test_every_stage_reports_progress(client, db_path, data_dir):
     starts = [e for e in timeline if e.get("event") == "stage_start"]
     assert [(e["stage"], e["name"]) for e in starts] == [
         (0, "load"), (1, "clean"), (2, "exact"), (3, "score"),
+        (4, "cluster"), (5, "entities"),
     ]
 
 
@@ -269,7 +270,9 @@ def test_an_unmapped_lookup_fails_the_run_with_a_structured_error(client, db_pat
 
 def test_the_pipeline_stages_endpoint_lists_the_stages_that_exist(client):
     stages = client.get("/api/pipeline/stages").json()
-    assert [s["key"] for s in stages] == ["load", "clean", "exact", "score"]
+    assert [s["key"] for s in stages] == [
+        "load", "clean", "exact", "score", "cluster", "entities",
+    ]
     for stage in stages:
         assert set(stage) == {"key", "label", "description"}
         assert stage["label"] and stage["description"]

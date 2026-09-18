@@ -502,12 +502,14 @@ def revert_run_to_splink(db_path: str, run_dir: str, config_dir: str, run_id: st
 # ---------------------------------------------------------------------------
 
 # The dedupe pipeline replaces the old two-dataset linkage stages one slice at a
-# time. Four stages run today; clustering and export are added beside them later.
+# time. Six stages run today; export is a request, not a stage.
 STAGE_NAMES = {
     0: "load",
     1: "clean",
     2: "exact",
     3: "score",
+    4: "cluster",
+    5: "entities",
 }
 
 
@@ -632,6 +634,8 @@ def _run_pipeline(
             from app.pipeline.dedupe.stage_1_clean import run_stage_1_clean
             from app.pipeline.dedupe.stage_2_exact import run_stage_2_exact
             from app.pipeline.dedupe.stage_3_score import run_stage_3_score
+            from app.pipeline.dedupe.stage_4_cluster import run_stage_4_cluster
+            from app.pipeline.dedupe.stage_5_entities import run_stage_5_entities
 
             # Count active labels before running so we know what was available.
             # Nothing consumes them yet — matching arrives in a later slice — but
@@ -654,23 +658,38 @@ def _run_pipeline(
                 config_dir=config_dir,
                 progress_callback=progress_callback,
             ))
+            from app.services.pair_labels import decisions_by_scope, labels_frame
+
+            labels = labels_frame(db_path)
             counts.update(run_stage_2_exact(
                 run_dir=run_dir,
                 config_dir=config_dir,
+                labels=labels,
+                decisions=decisions_by_scope(db_path),
                 progress_callback=progress_callback,
             ))
             # A label is a statement about two records, so it outlives the run
             # that made it: stage 3 maps each one onto whichever units hold
             # those two records now.
-            from app.services.pair_labels import labels_frame
-
             counts.update(run_stage_3_score(
                 run_dir=run_dir,
                 config_dir=config_dir,
                 threshold_high=threshold_high,
                 threshold_review=threshold_review,
                 render_diagnostics=render_diagnostics,
-                labels=labels_frame(db_path),
+                labels=labels,
+                progress_callback=progress_callback,
+            ))
+            counts.update(run_stage_4_cluster(
+                run_dir=run_dir,
+                config_dir=config_dir,
+                labels=labels,
+                decisions=decisions_by_scope(db_path),
+                progress_callback=progress_callback,
+            ))
+            counts.update(run_stage_5_entities(
+                run_dir=run_dir,
+                db_path=db_path,
                 progress_callback=progress_callback,
             ))
             counts["labels_in_library"] = labels_in_library
@@ -920,3 +939,95 @@ def cancel_run(db_path: str, run_id: str) -> None:
         ("failed", "Cancelled by user", run_id),
     )
     _emit_event(run_id, {"event": "cancelled", "timestamp": time.time()})
+
+
+def recluster_run(db_path: str, run_dir: str, run_id: str) -> dict:
+    """Redo the grouping and the entities after decisions, without rescoring.
+
+    Splink is the expensive part and nothing a decision changes affects it, so
+    the scored pairs are reused. What does change: a split can dissolve an exact
+    group, which changes the units, and a unit the scorer never saw has no pairs
+    at all. Those units are clustered on their human edges alone and reported,
+    because only a full rerun can score them.
+    """
+    import pandas as pd
+
+    from app.pipeline.dedupe import units as units_module
+    from app.pipeline.dedupe.stage_2_exact import EXACT_GROUPS_FILENAME, run_stage_2_exact
+    from app.pipeline.dedupe.stage_3_score import (
+        PAIRS_FILENAME, refresh_after_labels,
+    )
+    from app.pipeline.dedupe.stage_4_cluster import run_stage_4_cluster
+    from app.pipeline.dedupe.stage_5_entities import run_stage_5_entities
+    from app.pipeline.dedupe.stage_0_load import EVENTS_FILENAME
+    from app.services.pair_labels import decisions_by_scope, labels_frame
+
+    started = time.time()
+    run_dir_path = Path(run_dir)
+    config_dir = run_dir_path / "config"
+    if not (run_dir_path / PAIRS_FILENAME).is_file():
+        raise FileNotFoundError(str(run_dir_path / PAIRS_FILENAME))
+
+    labels = labels_frame(db_path)
+    decisions = decisions_by_scope(db_path)
+
+    before = pd.read_parquet(run_dir_path / EXACT_GROUPS_FILENAME)
+    counts: dict = {}
+    counts.update(run_stage_2_exact(run_dir=run_dir, config_dir=str(config_dir),
+                                    labels=labels, decisions=decisions))
+    after = pd.read_parquet(run_dir_path / EXACT_GROUPS_FILENAME)
+    groups_rebuilt = not before.equals(after)
+
+    units_rebuilt = False
+    unscored = 0
+    if groups_rebuilt:
+        records = pd.read_parquet(run_dir_path / "records.parquet")
+        events_path = run_dir_path / EVENTS_FILENAME
+        events = pd.read_parquet(events_path) if events_path.is_file() else None
+        units, members = units_module.build_units(records, after, events)
+        units.to_parquet(run_dir_path / units_module.UNITS_FILENAME, index=False)
+        members.to_parquet(run_dir_path / units_module.UNIT_MEMBERS_FILENAME, index=False)
+        units_rebuilt = True
+
+        pairs = pd.read_parquet(run_dir_path / PAIRS_FILENAME)
+        known = set(units["unit_id"].astype(str))
+        if len(pairs):
+            keep = (pairs["unit_id_l"].astype(str).isin(known)
+                    & pairs["unit_id_r"].astype(str).isin(known))
+            pairs = pairs[keep.to_numpy()]
+            pairs.to_parquet(run_dir_path / PAIRS_FILENAME, index=False)
+        scored = set(pairs["unit_id_l"].astype(str)) | set(pairs["unit_id_r"].astype(str)) \
+            if len(pairs) else set()
+        # A unit a split created that no surviving pair mentions was never scored.
+        unscored = int(sum(1 for unit_id in known if unit_id not in scored
+                           and unit_id not in set(before["record_id"].astype(str))))
+
+    counts.update(refresh_after_labels(run_dir, labels))
+    counts.update(run_stage_4_cluster(run_dir=run_dir, config_dir=str(config_dir),
+                                      labels=labels, decisions=decisions))
+    counts.update(run_stage_5_entities(run_dir=run_dir, db_path=db_path))
+
+    stored = query_db(db_path, "SELECT counts_json FROM runs WHERE id = ?", (run_id,))
+    merged = {}
+    if stored and stored[0]["counts_json"]:
+        try:
+            merged = json.loads(stored[0]["counts_json"])
+        except (ValueError, TypeError):
+            merged = {}
+    merged.update(counts)
+    write_db(db_path, "UPDATE runs SET counts_json = ? WHERE id = ?",
+             (json.dumps(merged), run_id))
+
+    from app.routers.runs import _normalize_counts
+
+    note = (f"{unscored} unit(s) were created by a split and have no scored pairs. "
+            "Rerun the pipeline to score them.") if unscored else None
+    return {
+        "ok": True,
+        "exact_groups_rebuilt": groups_rebuilt,
+        "units_rebuilt": units_rebuilt,
+        "unscored_units": unscored,
+        "unscored_note": note,
+        "elapsed_seconds": round(time.time() - started, 1),
+        "counts": _normalize_counts(merged),
+    }

@@ -96,6 +96,70 @@ def _clean_postcode(value) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Entity IDs (D15)
+# ---------------------------------------------------------------------------
+
+
+def donations_id_key(value) -> tuple:
+    """Sort key for a donations ID: the number, with a trust after a donor.
+
+    ``DonorId`` is a number, so '100' must not sort before '99'. Trusts use a
+    separate range under a ``TR`` prefix, and a trust ID sorts after a plain one
+    of the same number so a merge of the two keeps the donor's.
+    """
+    text = str(value or "").strip()
+    trust = text.upper().startswith("TR")
+    digits = text[2:] if trust else text
+    try:
+        number = int(digits)
+    except (TypeError, ValueError):
+        # Anything that is not a number sorts last, in its own text order.
+        return (1, 0, text)
+    return (0, number, 1 if trust else 0)
+
+
+def id_sort_frame(values: pd.Series) -> pd.DataFrame:
+    """``donations_id_key`` as three sortable columns, computed for a whole column.
+
+    The key is (is-not-a-number, the number, is-a-trust). Working it out once per
+    column with vectorised string operations is what lets the whole of stage 5
+    be group-bys.
+    """
+    text = values.astype("object").where(values.notna(), None)
+    text = pd.Series([None if v is None else str(v).strip() for v in text],
+                     index=values.index)
+    blank = text.isna() | (text == "") | (text.str.lower() == "nan")
+    upper = text.fillna("").str.upper()
+    trust = upper.str.startswith("TR")
+    digits = text.fillna("").where(~trust, text.fillna("").str.slice(2))
+    number = pd.to_numeric(digits, errors="coerce")
+    return pd.DataFrame({
+        "blank": blank.to_numpy(),
+        "not_number": number.isna().to_numpy(),
+        "number": number.fillna(0).to_numpy(),
+        "trust": trust.to_numpy(),
+        "text": text.fillna("").to_numpy(),
+    }, index=values.index)
+
+
+def _lowest_by_id_order(frame: pd.DataFrame, column: str) -> pd.Series:
+    """The lowest value of *column* per ``entity_key``, in the donations ID order."""
+    if column not in frame.columns:
+        return pd.Series(dtype="object")
+    keyed = id_sort_frame(frame[column])
+    usable = frame[~keyed["blank"].to_numpy()].copy()
+    if not len(usable):
+        return pd.Series(dtype="object")
+    keyed = keyed.loc[usable.index]
+    ordered = usable.assign(**{
+        "_a": keyed["not_number"], "_b": keyed["number"],
+        "_c": keyed["trust"], "_d": keyed["text"],
+    }).sort_values(["entity_key", "_a", "_b", "_c", "_d"], kind="mergesort")
+    lowest = ordered.drop_duplicates(subset=["entity_key"]).set_index("entity_key")
+    return lowest[column].astype(str)
+
+
+# ---------------------------------------------------------------------------
 # Reading the input file
 # ---------------------------------------------------------------------------
 
@@ -447,7 +511,36 @@ class DonationsProfile(Profile):
             priority_columns=["total_value"],
             raw_columns=list(RAW_COLUMNS),
             event_columns=[DisplayColumn(*c) for c in EVENT_COLUMNS],
+            consensus_columns=["donor_status_std"],
         )
+
+    # -- entity ids (D15) ----------------------------------------------------
+
+    def mint_entity_ids(self, members) -> pd.Series:
+        """The donations ID convention, so a new ID lines up with the old ones.
+
+        Where the members already carry an entity ID from the earlier manual
+        work, that is the ID — the lowest of them. Where none do, the ID is the
+        smallest ``record_id``, which already carries the ``TR`` prefix for a
+        trust. Both are one ``idxmin`` over a sort key, so a million entities
+        cost one pass rather than a million calls.
+        """
+        frame = members[["entity_key", "record_id"]].copy()
+        frame["existing"] = members["existing_entity_id"] \
+            if "existing_entity_id" in members.columns else None
+        return _lowest_by_id_order(frame, "existing").combine_first(
+            _lowest_by_id_order(frame, "record_id")
+        )
+
+    def choose_survivors(self, claims) -> pd.Series:
+        """The lowest ID survives; the rest become aliases of it (D15)."""
+        frame = claims.rename(columns={"registry_entity": "value"})
+        return _lowest_by_id_order(frame, "value")
+
+    def export(self, run_dir, scope: str, fmt: str, context: dict):
+        from app.profiles import donations_export
+
+        return donations_export.write(run_dir, scope, fmt, context)
 
     def load_records(self, input_path: Path) -> tuple[pd.DataFrame, dict]:
         return build_records(read_input(Path(input_path)))

@@ -311,84 +311,30 @@ def create_run(body: CreateRunRequest, user_name: str = Depends(current_user)):
     return rows[0] if rows else {"id": run_id, "status": "pending"}
 
 
-# counts_json keys written by the matching stages (not by the stage 0 loader).
-_PAIR_COUNT_KEYS = (
-    "matches_exact", "exact", "matches_high_confidence", "high", "high_confidence",
-    "matches_for_review", "review", "matches_ambiguous", "ambiguous",
-)
-
-
 def _normalize_counts(raw):
-    """Convert pipeline counts_json keys to frontend-expected keys."""
+    """The run's counts, in the camelCase the screens read.
+
+    Only what this pipeline produces. The two-dataset tool this app was copied
+    from wrote a dozen more keys — matched titles, ambiguous candidates, a match
+    rate — and they sat at zero on every dedupe run, which is worse than absent:
+    a zero looks like a measurement.
+    """
     if not raw:
         return None
-    merged = raw.get("merged_dataset", raw.get("ocod", 0))
-    exact = raw.get("matches_exact", raw.get("exact", 0))
-    high = raw.get("matches_high_confidence", raw.get("high", raw.get("high_confidence", 0)))
-    review = raw.get("matches_for_review", raw.get("review", 0))
-    ambiguous = raw.get("matches_ambiguous", raw.get("ambiguous", 0))
-    prob_accept = high - exact if high > exact else 0
-
-    # merged_dataset is now one row per (title, proprietor); total_titles is the DISTINCT
-    # title count, so title-grain fields (matchRate, unmatchedTitles, the land-title panel)
-    # stay per TITLE. Legacy runs predate total_titles and had one row per title, so fall
-    # back to the merged row count there — matched + unmatched still reconcile to the total.
-    total_titles = raw.get("total_titles", merged)
-
-    # matched_titles = distinct titles with at least one matched proprietor row. Falls back
-    # to the entity-level accept count for runs that predate the field.
-    matched_titles = raw.get("matched_titles", 0)
-    if matched_titles == 0 and (exact + prob_accept) > 0:
-        matched_titles = exact + prob_accept
 
     return {
-        "ocod": total_titles,                               # Total land titles (title grain)
-        "roe": raw.get("roe_preprocessed", raw.get("roe", 0)),
-        "exact": exact,
-        "probAccept": prob_accept,
-        "review": review,
-        "ambiguous": ambiguous,
-        "unmatched": raw.get("unmatched_ocod", 0),          # per-OWNER (deduped proprietors)
-        "matchedTitles": matched_titles,                    # per-TITLE (exact + fuzzy + confirmed)
-        "matchedTitlesExact": raw.get("matched_titles_exact", 0),  # per-TITLE, exact only
-        "matchedTitlesFormer": raw.get("matched_titles_former", 0),  # per-TITLE, matched via a former company name
-        "unmatchedTitles": max(0, total_titles - matched_titles),  # per-TITLE; reconciles: matched + unmatched = total
-        "totalProprietors": raw.get("total_proprietors", merged),  # per-PROPRIETOR rows in merged_dataset (title x proprietor)
-        "matchedProprietors": raw.get("matched_proprietors", matched_titles),  # per-PROPRIETOR matched rows
-        "unmatchedRoe": raw.get("unmatched_roe", 0),        # ROE companies with no match
-        "mergedRoe": raw.get("merged_roe", 0),              # rows in the ROE-side export
-        # Distinct entities behind the proprietor rows. "identified" = keyed on a real OE
-        # number; "unidentified" = keyed on cleaned name + jurisdiction because no OE
-        # number was found. Kept apart so the two are never summed into one claim.
-        "distinctEntities": raw.get("distinct_entities", 0),
-        "distinctEntitiesIdentified": raw.get("distinct_entities_identified", 0),
-        "distinctEntitiesUnidentified": raw.get("distinct_entities_unidentified", 0),
-        "matchRate": matched_titles / total_titles if total_titles > 0 else 0,
-        "labelsInLibrary": raw.get("labels_in_library", 0),
-        "droppedBelowReview": raw.get("dropped_below_review", 0),  # scored but below the review floor (retained in parquet)
-        "labelsApplied": raw.get("labels_applied", 0),
-        "labelsUnmatched": raw.get("labels_unmatched", 0),
-        # Which model decided this run — authoritative, so the run list/detail can show it
-        # per run without opening diagnostics. None on legacy runs (frontend then falls back).
-        "decisionModel": raw.get("decision_model"),                # 'splink' | 'gbt:<version>' | None
-        "decisionModelVersion": raw.get("decision_model_version"),
-        "gbtWarning": raw.get("gbt_warning"),                      # set when a collapsed active model fell back to Splink
-        # What the matcher alone decided, before human labels were overlaid on the
-        # export. None on runs made before this was captured. Recurses once — the
-        # baseline never carries a baseline of its own.
-        "preLabels": _normalize_counts(raw.get("pre_labels")),
-        # Dedupe stage 0 — what the loader read and made of it. Zero on a run
-        # that predates the loader.
+        # Stage 0 — what the loader read and made of it.
         "inputRows": raw.get("input_rows", 0),
         "inputRowsDropped": raw.get("input_rows_dropped", 0),
+        "eventRows": raw.get("event_rows", 0),
         "recordsTotal": raw.get("records_total", 0),
         "recordsPerson": raw.get("records_person", 0),
         "recordsOrganisation": raw.get("records_organisation", 0),
         "recordsLabelled": raw.get("records_labelled", 0),
         "recordsUnreviewed": raw.get("records_unreviewed", 0),
-        # Dedupe stage 2 — what the match keys settled without a human. Precision
-        # and recall are null when the run has no labels to score against, which
-        # is a different thing from scoring zero.
+        # Stage 2 — what the match keys settled without a human. Precision and
+        # recall are null when there is nothing to score against, which is a
+        # different thing from scoring zero.
         "exactMergedGroups": raw.get("exact_merged_groups", 0),
         "exactMergedRecords": raw.get("exact_merged_records", 0),
         "exactHeldGroups": raw.get("exact_held_groups", 0),
@@ -397,9 +343,9 @@ def _normalize_counts(raw):
         "exactConflicts": raw.get("exact_conflicts", 0),
         "exactPairPrecision": raw.get("exact_pair_precision"),
         "exactPairRecall": raw.get("exact_pair_recall"),
-        # Dedupe stage 3 — the units the exact keys left and what Splink made of
-        # them. Precision and recall are for the exact groups plus the accepted
-        # pairs together, so they sit next to the exact-only pair above.
+        "exactSplitByHuman": raw.get("exact_split_by_human", 0),
+        "exactMergedByHuman": raw.get("exact_merged_by_human", 0),
+        # Stage 3 — the units and what Splink made of them.
         "unitsTotal": raw.get("units_total", 0),
         "unitsPerson": raw.get("units_person", 0),
         "unitsOrganisation": raw.get("units_organisation", 0),
@@ -412,28 +358,43 @@ def _normalize_counts(raw):
         "entitiesAfterScore": raw.get("entities_after_score", 0),
         "scorePairPrecision": raw.get("score_pair_precision"),
         "scorePairRecall": raw.get("score_pair_recall"),
-        # Slice 3b — what the reviewers have decided about this run's pairs, and
-        # what the run looks like once their decisions are applied.
+        # Human labels.
         "labelsTotal": raw.get("labels_total", 0),
         "labelsTrue": raw.get("labels_true", 0),
         "labelsFalse": raw.get("labels_false", 0),
         "labelsSatisfied": raw.get("labels_satisfied", 0),
         "labelsForced": raw.get("labels_forced", 0),
+        "labelsApplied": raw.get("labels_applied", 0),
+        "labelsInLibrary": raw.get("labels_in_library", 0),
         "labelContradictions": raw.get("label_contradictions", 0),
         "entitiesAfterHuman": raw.get("entities_after_human",
                                       raw.get("entities_after_score", 0)),
         "humanPairPrecision": raw.get("human_pair_precision",
                                       raw.get("score_pair_precision")),
         "humanPairRecall": raw.get("human_pair_recall", raw.get("score_pair_recall")),
-        # Every key above defaults to 0, so the frontend cannot tell "no pairs yet"
-        # from "zero pairs" by value. These flags say which stages have run.
+        # Stages 4 and 5 — the clusters, the open queue and the proposal.
+        "clustersTotal": raw.get("clusters_total", 0),
+        "clustersWithheld": raw.get("clusters_withheld", 0),
+        "clustersByStatus": raw.get("clusters_by_status", {}),
+        "heldGroupsOpen": raw.get("held_groups_open", 0),
+        "reviewQueue": raw.get("review_queue", 0),
+        "decisionsTotal": raw.get("decisions_total", 0),
+        "crossTrackIds": raw.get("cross_track_ids", 0),
+        "entitiesProposed": raw.get("entities_proposed", 0),
+        "entitiesNew": raw.get("entities_new", 0),
+        "entitiesKept": raw.get("entities_kept", 0),
+        "entitiesMerged": raw.get("entities_merged", 0),
+        "attributeTies": raw.get("attribute_ties", 0),
+        "idCollisions": raw.get("id_collisions", 0),
+        "publishedAt": raw.get("published_at"),
+        # Every count above defaults to 0, so a screen cannot tell "nothing yet"
+        # from "zero" by value. These flags say which stages have run.
         "hasRecords": "records_total" in raw,
         "hasExact": "exact_merged_groups" in raw,
-        # True once the score stage has run. The legacy keys are still read so a
-        # run made by the two-dataset pipeline keeps its review screen.
-        "hasPairs": "pairs_scored" in raw or any(k in raw for k in _PAIR_COUNT_KEYS),
+        "hasPairs": "pairs_scored" in raw,
         "hasUnits": "units_total" in raw,
         "hasLabels": bool(raw.get("labels_total", 0)),
+        "hasEntities": "entities_proposed" in raw,
     }
 
 
