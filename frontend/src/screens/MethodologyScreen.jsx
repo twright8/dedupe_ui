@@ -143,7 +143,7 @@ export default function MethodologyScreen() {
 
         <div className="mth-pipe">
           <Stage n="0" tone="var(--muted)" kicker="Tidy up" title="Clean the names"
-            tech="config rules — name_rules.json + jurisdiction_map.csv">
+            tech="config rules — cleaning steps + lookups">
             Turn messy names into a standard form so harmless spelling differences don't block a match:
             “LIMITED” → “LTD”, drop accents and punctuation, fix spacing, line up country names.
             “Badby Properties (Middlesbrough) S.à r.l.” becomes “BADBY PROPERTY MIDDLESBROUGH SARL”.

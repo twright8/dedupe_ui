@@ -10,45 +10,45 @@ import { fmtNumber, fmtPct, fmtDateTime, timeAgo } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
 import ModelPanel from "../components/ModelPanel";
 import RecordsTable from "../components/RecordsTable";
+import ExactGroupsTable from "../components/ExactGroupsTable";
 import { useProfile } from "../profile";
-import { hasPairCounts, hasRecordCounts, trackCountKey } from "../counts";
+import { hasExactCounts, hasPairCounts, hasRecordCounts, trackCountKey } from "../counts";
 import { useRunProgress } from "../hooks/useRunProgress";
 
-// ---------- Unmapped-jurisdictions self-serve fix ----------
-// Shown when a run failed because the data contained jurisdiction values that
-// aren't in the config's jurisdiction map. Lets the user supply the canonical
-// standardised value for each, save a new config version, and re-run — without
-// leaving the screen or editing the Config tab by hand.
-function UnmappedJurisdictionsPanel({ run, runId, navigate }) {
-  const unmapped = run.error_detail?.unmapped || [];
+// ---------- Unmapped-lookup-values self-serve fix ----------
+// Shown when a run failed because a lookup whose fallback is "error" met values
+// it does not hold. Lets the user give the canonical value for each (or keep it
+// as it is), add the rows to that lookup as a new config version, and re-run —
+// without leaving the screen or editing the Config tab by hand.
+function UnmappedLookupValuesPanel({ run, runId, navigate }) {
+  const detail = run.error_detail || {};
+  const table = detail.table || "";
+  // Values may arrive as plain strings or as small objects; both read the same.
+  const unmapped = (detail.values || []).map((v) =>
+    typeof v === "string" ? v : String(v?.value ?? v?.raw ?? "")
+  );
   const [rows, setRows] = useState(
-    unmapped.map((u) => ({
-      source_dataset: u.source_dataset,
-      raw_value: u.raw_value,
-      // Identity default (e.g. TAJIKISTAN→TAJIKISTAN); user edits rollups
-      // like PUERTO RICO→UNITED STATES.
-      standardised_value: u.raw_value,
-    }))
+    unmapped.map((raw) => ({ raw, canonical: raw, keep: true }))
   );
   const [saving, setSaving] = useState(false);
   const [savedVersion, setSavedVersion] = useState(null);
   const [err, setErr] = useState(null);
 
-  function setStd(i, value) {
-    setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, standardised_value: value } : r)));
+  function setRow(i, patch) {
+    setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   }
 
   function handleSave() {
-    if (rows.some((r) => !r.standardised_value.trim())) {
-      setErr("Every value needs a standardised mapping.");
+    if (rows.some((r) => !r.keep && !r.canonical.trim())) {
+      setErr("Every value needs a canonical value, or tick keep as is.");
       return;
     }
     setSaving(true);
     setErr(null);
     api
-      .addJurisdictions({
-        entries: rows,
-        note: `Added ${rows.length} jurisdiction mapping(s) after run ${runId} hit unmapped values`,
+      .addLookupRows(table, {
+        rows: rows.map((r) => ({ raw: r.raw, canonical: r.keep ? r.raw : r.canonical.trim() })),
+        note: `Added ${rows.length} row(s) to ${table} after run ${runId} hit unmapped values`,
       })
       .then((res) => setSavedVersion(res.version))
       .catch((e) => setErr(e.message || "Failed to save"))
@@ -62,13 +62,13 @@ function UnmappedJurisdictionsPanel({ run, runId, navigate }) {
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
         <Icons.alert size={16} />
-        <h3 style={{ margin: 0 }}>Unmapped jurisdictions blocked this run</h3>
+        <h3 style={{ margin: 0 }}>Unmapped lookup values blocked this run</h3>
       </div>
       <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
-        The data contained {unmapped.length} jurisdiction value
-        {unmapped.length === 1 ? "" : "s"} not in the config's jurisdiction map.
-        Jurisdiction is a blocking key for matching, so the run stops rather than
-        guess. Set the canonical value for each, save a new config version, then re-run.
+        The data contained {unmapped.length} value{unmapped.length === 1 ? "" : "s"} the lookup{" "}
+        <span className="mono">{table}</span> does not hold, and that lookup is set to stop the
+        run rather than guess. Give the canonical value for each, or keep it as it is, then save
+        a new config version and re-run.
       </p>
 
       {savedVersion == null ? (
@@ -76,26 +76,31 @@ function UnmappedJurisdictionsPanel({ run, runId, navigate }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr style={{ textAlign: "left", color: "var(--muted, #777)" }}>
-                <th style={{ padding: "4px 8px" }}>Dataset</th>
                 <th style={{ padding: "4px 8px" }}>Raw value (from data)</th>
-                <th style={{ padding: "4px 8px" }}>Standardised value</th>
+                <th style={{ padding: "4px 8px" }}>Canonical value</th>
+                <th style={{ padding: "4px 8px", width: 110 }}>Keep as is</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((r, i) => (
-                <tr key={`${r.source_dataset}:${r.raw_value}`}>
-                  <td style={{ padding: "4px 8px" }}>
-                    <span className="tag">{r.source_dataset.toUpperCase()}</span>
-                  </td>
+                <tr key={r.raw}>
                   <td style={{ padding: "4px 8px" }} className="mono">
-                    {r.raw_value}
+                    {r.raw}
                   </td>
                   <td style={{ padding: "4px 8px" }}>
                     <input
                       className="input"
-                      style={{ width: "100%", textTransform: "uppercase" }}
-                      value={r.standardised_value}
-                      onChange={(e) => setStd(i, e.target.value)}
+                      style={{ width: "100%" }}
+                      value={r.keep ? r.raw : r.canonical}
+                      disabled={r.keep}
+                      onChange={(e) => setRow(i, { canonical: e.target.value })}
+                    />
+                  </td>
+                  <td style={{ padding: "4px 8px" }}>
+                    <input
+                      type="checkbox"
+                      checked={r.keep}
+                      onChange={(e) => setRow(i, { keep: e.target.checked })}
                     />
                   </td>
                 </tr>
@@ -107,7 +112,7 @@ function UnmappedJurisdictionsPanel({ run, runId, navigate }) {
           )}
           <div style={{ marginTop: 10 }}>
             <button className="btn primary" onClick={handleSave} disabled={saving}>
-              {saving ? "Saving…" : `Add ${rows.length} mapping${rows.length === 1 ? "" : "s"} & save new config version`}
+              {saving ? "Saving…" : `Add ${rows.length} row${rows.length === 1 ? "" : "s"} to ${table} & save new config version`}
             </button>
           </div>
         </>
@@ -125,7 +130,7 @@ function UnmappedJurisdictionsPanel({ run, runId, navigate }) {
         >
           <span style={{ fontSize: 13 }}>
             Saved as config <strong>v{savedVersion}</strong>. Re-run with the same
-            files to continue.
+            file to continue.
           </span>
           <button
             className="btn primary"
@@ -224,6 +229,62 @@ function RecordKpis({ c }) {
   );
 }
 
+// ---------- Exact-key KPI strip ----------
+// The second row on the summary once the exact keys have run: what merged, what
+// is waiting for a human, and how the result sits against the earlier labels.
+function ExactKpis({ c, onConflicts }) {
+  const conflicts = c.exactConflicts || 0;
+  return (
+    <div className="kpi-grid">
+      <div className="kpi">
+        <div className="label">Entities after exact keys</div>
+        <div className="value">{fmtNumber(c.exactEntitiesAfter)}</div>
+        <div className="delta muted">was {fmtNumber(c.recordsTotal)} records</div>
+      </div>
+      <div className="kpi">
+        <div className="label">Records merged</div>
+        <div className="value">{fmtNumber(c.exactMergedRecords)}</div>
+        <div className="delta muted">
+          into {fmtNumber(c.exactMergedGroups)} group{c.exactMergedGroups === 1 ? "" : "s"}
+        </div>
+      </div>
+      <div className="kpi">
+        <div className="label">Held for review</div>
+        <div className="value" style={{ color: "var(--amber)" }}>
+          {fmtNumber(c.exactHeldGroups)}
+        </div>
+        <div className="delta muted">
+          {fmtNumber(c.exactHeldRecords)} records a guard stopped
+        </div>
+      </div>
+      <div
+        className="kpi"
+        onClick={conflicts > 0 ? onConflicts : undefined}
+        style={conflicts > 0 ? { cursor: "pointer" } : undefined}
+        title={conflicts > 0 ? "Open the Exact groups tab, filtered to conflicts" : undefined}
+      >
+        <div className="label">Conflicts with earlier labels</div>
+        <div className="value" style={conflicts > 0 ? { color: "var(--ti-red)" } : undefined}>
+          {fmtNumber(conflicts)}
+        </div>
+        <div className="delta muted">
+          {conflicts > 0 ? "groups joining different entity IDs — open them" : "no group joins two entity IDs"}
+        </div>
+      </div>
+      <div className="kpi">
+        <div className="label">Pair precision</div>
+        <div className="value">{fmtPct(c.exactPairPrecision, 1)}</div>
+        <div className="delta muted">of pairs these keys join, the manual work agreed</div>
+      </div>
+      <div className="kpi">
+        <div className="label">Pair recall</div>
+        <div className="value">{fmtPct(c.exactPairRecall, 1)}</div>
+        <div className="delta muted">of pairs the manual work joined, these keys find</div>
+      </div>
+    </div>
+  );
+}
+
 function normalizeRun(r) {
   if (!r) return r;
   const dur = r.duration_secs;
@@ -291,7 +352,7 @@ class PanelErrorBoundary extends Component {
   }
 }
 
-function RunSummary({ run, onReview }) {
+function RunSummary({ run, onReview, onConflicts }) {
   const c = run.counts;
   const [diagData, setDiagData] = useState(null);
   const [labelStats, setLabelStats] = useState(null);
@@ -329,19 +390,33 @@ function RunSummary({ run, onReview }) {
   // A run that only loaded records: no pair panels to draw, so say what there
   // is and point at the Records tab.
   if (!pairs) {
+    const exact = hasExactCounts(c);
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
         <RecordKpis c={c} />
+        {exact && <ExactKpis c={c} onConflicts={onConflicts} />}
         <div className="card">
           <div className="card-h">
             <Icons.table size={16} />
-            <h3>Records loaded</h3>
+            <h3>{exact ? "What this run did" : "Records loaded"}</h3>
           </div>
           <div className="card-b">
             <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.6 }}>
-              This run read the input file and sorted every record into a track. Open the{" "}
-              <strong>Records</strong> tab to read them. Matching, the review queue and
-              entity IDs are not built yet.
+              {exact ? (
+                <>
+                  This run read the input file, sorted every record into a track, cleaned it with
+                  the config's rules, and merged records that share a match key. Open the{" "}
+                  <strong>Records</strong> tab to read the records, or{" "}
+                  <strong>Exact groups</strong> to see what merged and what a guard held back.
+                  Scoring, the review queue and durable entity IDs are not built yet.
+                </>
+              ) : (
+                <>
+                  This run read the input file and sorted every record into a track. Open the{" "}
+                  <strong>Records</strong> tab to read them. Matching, the review queue and
+                  entity IDs are not built yet.
+                </>
+              )}
             </p>
           </div>
         </div>
@@ -1458,6 +1533,9 @@ export default function RunDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [tab, setTab] = useState("summary");
+  // Set when the summary's Conflicts card is clicked, so the Exact groups tab
+  // opens already filtered.
+  const [exactAgreement, setExactAgreement] = useState(null);
 
   useEffect(() => {
     setLoading(true);
@@ -1518,6 +1596,7 @@ export default function RunDetailScreen() {
   // Match exports and the review queue only exist once the run has produced
   // pairs. Hide them otherwise rather than send the user to a 404.
   const pairs = hasPairCounts(run.counts);
+  const exact = hasExactCounts(run.counts);
 
   return (
     <div className="content">
@@ -1634,26 +1713,31 @@ export default function RunDetailScreen() {
         </div>
       </div>
 
-      {/* Self-serve fix for runs that failed on unmapped jurisdictions */}
+      {/* Self-serve fix for runs that failed on unmapped lookup values */}
       {run.status === "failed" &&
-        run.error_detail?.type === "unmapped_jurisdictions" &&
-        (run.error_detail.unmapped?.length || 0) > 0 && (
-          <UnmappedJurisdictionsPanel run={run} runId={id} navigate={navigate} />
+        run.error_detail?.kind === "unmapped_lookup_values" &&
+        (run.error_detail.values?.length || 0) > 0 && (
+          <UnmappedLookupValuesPanel run={run} runId={id} navigate={navigate} />
         )}
 
-      {/* Tabs */}
+      {/* Tabs. Exact groups only appears once the key stage has run. */}
       <div className="tabs">
-        {["summary", "records", "diagnostics", "files", "history"].map(
-          (t) => (
-            <div
-              key={t}
-              className={"tab " + (tab === t ? "on" : "")}
-              onClick={() => setTab(t)}
-            >
-              {t[0].toUpperCase() + t.slice(1)}
-            </div>
-          )
-        )}
+        {[
+          { id: "summary", lab: "Summary" },
+          { id: "records", lab: "Records" },
+          ...(exact ? [{ id: "exact", lab: "Exact groups" }] : []),
+          { id: "diagnostics", lab: "Diagnostics" },
+          { id: "files", lab: "Files" },
+          { id: "history", lab: "History" },
+        ].map((t) => (
+          <div
+            key={t.id}
+            className={"tab " + (tab === t.id ? "on" : "")}
+            onClick={() => setTab(t.id)}
+          >
+            {t.lab}
+          </div>
+        ))}
       </div>
 
       {/* Live progress for in-progress runs */}
@@ -1663,10 +1747,21 @@ export default function RunDetailScreen() {
         <RunSummary
           run={run}
           onReview={() => navigate(`/runs/${id}/review`)}
+          onConflicts={() => {
+            setExactAgreement("conflict");
+            setTab("exact");
+          }}
         />
       )}
       <PanelErrorBoundary resetKey={`${id}:${tab}`}>
         {tab === "records" && <RecordsTable runId={id} profile={profile} />}
+        {tab === "exact" && (
+          <ExactGroupsTable
+            runId={id}
+            profile={profile}
+            initialAgreement={exactAgreement}
+          />
+        )}
         {tab === "diagnostics" && <RunDiagnostics runId={id} />}
         {tab === "files" && <RunFiles runId={id} />}
         {tab === "history" && <RunHistory runId={id} />}

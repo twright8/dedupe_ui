@@ -12,6 +12,8 @@ from pathlib import Path
 
 import duckdb
 
+from app.profiles import get_profile
+
 RECORDS_FILENAME = "records.parquet"
 
 DEFAULT_SORT = "name"
@@ -55,6 +57,29 @@ def _column_names(con, path: Path) -> list[str]:
         "SELECT * FROM read_parquet(?) LIMIT 0", [str(path)]
     )
     return [d[0] for d in cursor.description]
+
+
+def describe_columns(columns: list[str]) -> list[dict]:
+    """Label and type every column of a run's records, in frame order.
+
+    A column the profile declares is described by the profile. Everything else
+    was written by a cleaning rule, whose target name is the only label there
+    is — the user chose it, so it is the honest one to show.
+    """
+    profile_columns = {c.key: c for c in get_profile().display_columns}
+    described = []
+    for key in columns:
+        declared = profile_columns.get(key)
+        if declared is not None:
+            described.append({
+                "key": key, "label": declared.label,
+                "type": declared.type, "source": "profile",
+            })
+        else:
+            described.append({
+                "key": key, "label": key, "type": "text", "source": "cleaning",
+            })
+    return described
 
 
 def get_records(
@@ -164,4 +189,5 @@ def get_records(
         "limit": limit,
         "items": items,
         "counts": counts,
+        "columns": describe_columns(columns),
     }

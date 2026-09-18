@@ -4,7 +4,6 @@
 import asyncio
 import collections
 import contextlib
-import csv
 import json
 import logging
 import threading
@@ -31,17 +30,18 @@ GBT_DEFAULT_REVIEW = 0.10
 def _build_error_detail(exc: Exception) -> str | None:
     """Return a JSON string of structured failure detail, or None.
 
-    Structured detail lets the UI offer a targeted fix (e.g. add the unmapped
-    jurisdictions) instead of just showing an error string.
+    Structured detail lets the UI offer a targeted fix — "add these rows to the
+    lookup" — instead of just showing an error string. Each kind carries only
+    what its fix needs.
     """
-    from app.pipeline.standardise import UnmappedJurisdictionsError
+    from app.rules.engine import UnmappedLookupValuesError
 
-    if isinstance(exc, UnmappedJurisdictionsError):
-        unmapped = (
-            [{"source_dataset": "ocod", "raw_value": v} for v in exc.unmapped_ocod]
-            + [{"source_dataset": "roe", "raw_value": v} for v in exc.unmapped_roe]
-        )
-        return json.dumps({"type": "unmapped_jurisdictions", "unmapped": unmapped})
+    if isinstance(exc, UnmappedLookupValuesError):
+        return json.dumps({
+            "kind": "unmapped_lookup_values",
+            "table": exc.table,
+            "values": exc.values,
+        })
     return None
 
 
@@ -108,25 +108,24 @@ def _write_config_files(
     threshold_review: float | None = None,
     cross_jurisdiction_name_matching: bool = True,
 ) -> None:
-    """Write the four config artefacts from a config_versions DB row."""
+    """Snapshot a config version into the run's config folder.
+
+    A run must be reproducible from its own folder, so the rules it used are
+    copied beside its outputs rather than read back out of the database, which
+    the next save moves on.
+    """
     config_dir.mkdir(parents=True, exist_ok=True)
 
-    # name_rules.json
-    name_rules = json.loads(config_row["name_rules"])
-    (config_dir / "name_rules.json").write_text(
-        json.dumps(name_rules, indent=2), encoding="utf-8"
-    )
-
-    # legal_entity_tokens.json
-    legal_tokens = json.loads(config_row["legal_tokens"])
-    if isinstance(legal_tokens, list):
-        legal_tokens = {"tokens": legal_tokens}
-    (config_dir / "legal_entity_tokens.json").write_text(
-        json.dumps(legal_tokens, indent=2), encoding="utf-8"
+    # ruleset.json — already parsed by config_manager.get_version.
+    ruleset = config_row.get("ruleset")
+    if isinstance(ruleset, str):
+        ruleset = json.loads(ruleset)
+    (config_dir / "ruleset.json").write_text(
+        json.dumps(ruleset or {}, indent=2), encoding="utf-8"
     )
 
     # linkage_settings.json
-    linkage_settings = json.loads(config_row["linkage_settings"])
+    linkage_settings = json.loads(config_row["linkage_settings"] or "{}")
     if threshold_high is not None:
         linkage_settings["match_probability_threshold_high"] = threshold_high
     if threshold_review is not None:
@@ -147,18 +146,6 @@ def _write_config_files(
     (config_dir / "linkage_settings.json").write_text(
         json.dumps(linkage_settings, indent=2), encoding="utf-8"
     )
-
-    # jurisdiction_map.csv — convert JSON list-of-dicts back to CSV
-    jurisdiction_map = json.loads(config_row["jurisdiction_map"])
-    csv_path = config_dir / "jurisdiction_map.csv"
-    if jurisdiction_map:
-        fieldnames = list(jurisdiction_map[0].keys())
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(jurisdiction_map)
-    else:
-        csv_path.write_text("source_dataset,raw_value,standardised_value\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -510,9 +497,11 @@ def revert_run_to_splink(db_path: str, run_dir: str, config_dir: str, run_id: st
 # ---------------------------------------------------------------------------
 
 # The dedupe pipeline replaces the old two-dataset linkage stages one slice at a
-# time. Slice 1 runs stage 0 only; matching stages are added beside it later.
+# time. Three stages run today; the scoring stages are added beside them later.
 STAGE_NAMES = {
     0: "load",
+    1: "clean",
+    2: "exact",
 }
 
 
@@ -604,8 +593,9 @@ def _run_pipeline(
 ) -> None:
     """Execute the dedupe stages sequentially in a background thread.
 
-    Slice 1 has one stage: load the records. Matching, clustering and export
-    stages join it later, each replacing one of the old linkage stages.
+    Three stages so far: load the records, assign tracks and clean them, then
+    group them on the ruleset's match keys. Scoring, clustering and export
+    stages join them later, each replacing one of the old linkage stages.
     """
     events_path = Path(run_dir) / "events.jsonl"
 
@@ -630,6 +620,8 @@ def _run_pipeline(
     try:
         with _capture_pipeline_output(Path(run_dir)):
             from app.pipeline.dedupe.stage_0_load import run_stage_0_load
+            from app.pipeline.dedupe.stage_1_clean import run_stage_1_clean
+            from app.pipeline.dedupe.stage_2_exact import run_stage_2_exact
 
             # Count active labels before running so we know what was available.
             # Nothing consumes them yet — matching arrives in a later slice — but
@@ -645,6 +637,18 @@ def _run_pipeline(
                 input_path=input_path,
                 progress_callback=progress_callback,
             )
+            # Per-track counts are only known after the ruleset has been applied,
+            # so they replace whatever stage 0 reported.
+            counts.update(run_stage_1_clean(
+                run_dir=run_dir,
+                config_dir=config_dir,
+                progress_callback=progress_callback,
+            ))
+            counts.update(run_stage_2_exact(
+                run_dir=run_dir,
+                config_dir=config_dir,
+                progress_callback=progress_callback,
+            ))
             counts["labels_in_library"] = labels_in_library
 
             now = datetime.now(timezone.utc).isoformat()

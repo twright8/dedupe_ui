@@ -23,16 +23,14 @@ import app.auth as _auth_mod
 from app.db import write_db
 from app.services import pipeline_runner
 from app.services.pipeline_runner import NAME_CORE_BLOCKING_RULE, _write_config_files
+from tests.rulesets import default_ruleset, small_ruleset
 
 
 def _config_row(blocking_rules):
-    """A minimal config_versions-style row (JSON string fields)."""
+    """A config_versions-style row as config_manager.get_version returns one:
+    the ruleset already parsed, linkage_settings still a JSON string."""
     return {
-        "name_rules": json.dumps([{"pattern": "-", "replace": " "}]),
-        "legal_tokens": json.dumps(["LTD"]),
-        "jurisdiction_map": json.dumps(
-            [{"source_dataset": "ocod", "raw_value": "JERSEY", "standardised_value": "JERSEY"}]
-        ),
+        "ruleset": small_ruleset(),
         "linkage_settings": json.dumps({
             "blocking_rules": blocking_rules,
             "match_probability_threshold_high": 0.9,
@@ -98,9 +96,7 @@ def _seed_config(db_path):
     from app.services.config_manager import save_version
     return save_version(
         db_path, created_by="test", note="t",
-        name_rules=[{"pattern": "-", "replace": " "}],
-        jurisdiction_map=[{"source_dataset": "ocod", "raw_value": "JERSEY", "standardised_value": "JERSEY"}],
-        legal_tokens=["LTD"],
+        ruleset=default_ruleset(),
         linkage_settings={"match_probability_threshold_high": 0.9, "match_probability_threshold_review": 0.4},
     )
 

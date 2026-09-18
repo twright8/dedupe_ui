@@ -1,0 +1,271 @@
+{
+  "schema": 1,
+  "token_lists": {
+    "person_titles": {
+      "description": "Titles that come before a person's name. A title at the start of an ambiguous donor's name is the strongest sign the donor is a person.",
+      "tokens": [
+        "MR", "MRS", "MS", "MISS", "MX", "DR", "SIR", "LORD", "LADY", "DAME",
+        "PROF", "PROFESSOR", "REV", "REVD", "CLLR", "COUNCILLOR", "BARONESS",
+        "BARON", "VISCOUNT", "EARL", "HON", "RT HON", "THE RT HON",
+        "CAPT", "MAJOR", "COL"
+      ]
+    },
+    "post_nominals": {
+      "description": "Letters that come after a person's name. MS is deliberately absent: it clashes with the title, and the title is far commoner in this sheet.",
+      "tokens": [
+        "MP", "MSP", "AM", "MEP", "QC", "KC", "OBE", "MBE", "CBE", "KBE",
+        "DBE", "JP", "DL", "PC"
+      ]
+    },
+    "legal_forms": {
+      "description": "Legal forms stripped from the end of an organisation name to give name_core. Split, do not delete: the form is kept in legal_form so Ltd-versus-PLC stays answerable at decision time.",
+      "tokens": [
+        "LTD", "LIMITED", "PLC", "LLP", "LP", "CIC", "CIO", "INC", "LLC",
+        "GMBH", "SA", "BV", "NV", "AG", "CO", "COMPANY", "AND CO"
+      ]
+    },
+    "org_words": {
+      "description": "Words that mark an organisation without being a legal form. Used to sort ambiguous donors into the organisation track; never stripped from a name.",
+      "tokens": [
+        "CLUB", "ASSOCIATION", "UNION", "TRUST", "SOCIETY", "COUNCIL",
+        "PARTY", "COMMITTEE", "GROUP", "FUND", "HOLDINGS", "BRANCH",
+        "FOUNDATION", "FEDERATION", "INSTITUTE", "PARTNERS", "SERVICES"
+      ]
+    },
+    "leading_articles": {
+      "description": "Articles dropped from the start of an organisation name, so 'The Smith Trust' and 'Smith Trust' are one name.",
+      "tokens": ["THE"]
+    },
+    "null_values": {
+      "description": "Spellings of 'no value' that arrive as text. A name equal to one of these is missing, not a name.",
+      "tokens": ["N/A", "NA", "NONE", "UNKNOWN", "NOT KNOWN", "-", "."]
+    },
+    "placeholder_numbers": {
+      "description": "Company numbers that are typed in when the real one is unknown. They repeat across unrelated donors, so a match key must ignore them.",
+      "tokens": ["00000000", "00000001", "12345678", "00123456", "99999999"]
+    }
+  },
+  "lookups": {
+    "nicknames": {
+      "description": "Diminutives and spelling variants that point at one canonical forename. Ported from the deduping engine. Only add a nickname that is unambiguous — CHRIS and ALEX are deliberately absent because they are gender-ambiguous.",
+      "fallback": "passthrough",
+      "rows": [
+        {"raw": "TOM", "canonical": "THOMAS"},
+        {"raw": "TOMMY", "canonical": "THOMAS"},
+        {"raw": "BILL", "canonical": "WILLIAM"},
+        {"raw": "BILLY", "canonical": "WILLIAM"},
+        {"raw": "WILLY", "canonical": "WILLIAM"},
+        {"raw": "BOB", "canonical": "ROBERT"},
+        {"raw": "BOBBY", "canonical": "ROBERT"},
+        {"raw": "ROBBY", "canonical": "ROBERT"},
+        {"raw": "DICK", "canonical": "RICHARD"},
+        {"raw": "RICKY", "canonical": "RICHARD"},
+        {"raw": "MIKE", "canonical": "MICHAEL"},
+        {"raw": "MICK", "canonical": "MICHAEL"},
+        {"raw": "MICKEY", "canonical": "MICHAEL"},
+        {"raw": "TONY", "canonical": "ANTHONY"},
+        {"raw": "DAVE", "canonical": "DAVID"},
+        {"raw": "DAVEY", "canonical": "DAVID"},
+        {"raw": "JIM", "canonical": "JAMES"},
+        {"raw": "JIMMY", "canonical": "JAMES"},
+        {"raw": "JONNY", "canonical": "JONATHAN"},
+        {"raw": "BEN", "canonical": "BENJAMIN"},
+        {"raw": "BENNY", "canonical": "BENJAMIN"},
+        {"raw": "DAN", "canonical": "DANIEL"},
+        {"raw": "DANNY", "canonical": "DANIEL"},
+        {"raw": "MATT", "canonical": "MATTHEW"},
+        {"raw": "ED", "canonical": "EDWARD"},
+        {"raw": "EDDIE", "canonical": "EDWARD"},
+        {"raw": "EDDY", "canonical": "EDWARD"},
+        {"raw": "STEVE", "canonical": "STEPHEN"},
+        {"raw": "STEVIE", "canonical": "STEPHEN"},
+        {"raw": "PETE", "canonical": "PETER"},
+        {"raw": "FRED", "canonical": "FREDERICK"},
+        {"raw": "FREDDIE", "canonical": "FREDERICK"},
+        {"raw": "FREDDY", "canonical": "FREDERICK"},
+        {"raw": "JOSH", "canonical": "JOSHUA"},
+        {"raw": "ANDY", "canonical": "ANDREW"},
+        {"raw": "CHARLIE", "canonical": "CHARLES"},
+        {"raw": "CHARLEY", "canonical": "CHARLES"},
+        {"raw": "RAY", "canonical": "RAYMOND"},
+        {"raw": "TERRY", "canonical": "TERENCE"},
+        {"raw": "LARRY", "canonical": "LAWRENCE"},
+        {"raw": "STAN", "canonical": "STANLEY"},
+        {"raw": "WALT", "canonical": "WALTER"},
+        {"raw": "LIZ", "canonical": "ELIZABETH"},
+        {"raw": "LIZZIE", "canonical": "ELIZABETH"},
+        {"raw": "BETH", "canonical": "ELIZABETH"},
+        {"raw": "BETTY", "canonical": "ELIZABETH"},
+        {"raw": "SUE", "canonical": "SUSAN"},
+        {"raw": "SUSIE", "canonical": "SUSAN"},
+        {"raw": "SUZIE", "canonical": "SUSAN"},
+        {"raw": "MAGGIE", "canonical": "MARGARET"},
+        {"raw": "PEGGY", "canonical": "MARGARET"},
+        {"raw": "MEG", "canonical": "MARGARET"},
+        {"raw": "BECKY", "canonical": "REBECCA"},
+        {"raw": "JEN", "canonical": "JENNIFER"},
+        {"raw": "JENNY", "canonical": "JENNIFER"},
+        {"raw": "JENNIE", "canonical": "JENNIFER"},
+        {"raw": "VICKY", "canonical": "VICTORIA"},
+        {"raw": "VICKI", "canonical": "VICTORIA"},
+        {"raw": "JESS", "canonical": "JESSICA"},
+        {"raw": "JESSIE", "canonical": "JESSICA"},
+        {"raw": "DEB", "canonical": "DEBORAH"},
+        {"raw": "DEBBIE", "canonical": "DEBORAH"},
+        {"raw": "ABBY", "canonical": "ABIGAIL"},
+        {"raw": "ABBIE", "canonical": "ABIGAIL"},
+        {"raw": "ANTONY", "canonical": "ANTHONY"},
+        {"raw": "PHILLIP", "canonical": "PHILIP"},
+        {"raw": "STEVEN", "canonical": "STEPHEN"},
+        {"raw": "KATHERINE", "canonical": "CATHERINE"},
+        {"raw": "KATHRYN", "canonical": "CATHERINE"},
+        {"raw": "LAURENCE", "canonical": "LAWRENCE"},
+        {"raw": "MOHAMMAD", "canonical": "MUHAMMAD"},
+        {"raw": "MOHAMMED", "canonical": "MUHAMMAD"},
+        {"raw": "MOHAMED", "canonical": "MUHAMMAD"},
+        {"raw": "MUHAMMED", "canonical": "MUHAMMAD"},
+        {"raw": "MOUHAMED", "canonical": "MUHAMMAD"},
+        {"raw": "AHMAD", "canonical": "AHMED"},
+        {"raw": "ALEXEY", "canonical": "ALEXEI"},
+        {"raw": "DMITRY", "canonical": "DMITRI"},
+        {"raw": "ANDREI", "canonical": "ANDREY"},
+        {"raw": "ANDREJ", "canonical": "ANDREY"},
+        {"raw": "EVGENI", "canonical": "EVGENY"},
+        {"raw": "YEVGENY", "canonical": "EVGENY"},
+        {"raw": "YEVGENI", "canonical": "EVGENY"},
+        {"raw": "ANDELKO", "canonical": "ANDJELKO"}
+      ]
+    }
+  },
+  "track_rules": [
+    {
+      "id": "t1",
+      "description": "An Individual donor is a person",
+      "when": [
+        {"column": "donor_status", "op": "equals", "value": "Individual"}
+      ],
+      "track": "person"
+    },
+    {
+      "id": "t2",
+      "description": "An ambiguous donor whose name starts with a title is a person",
+      "when": [
+        {"column": "donor_status", "op": "in", "values": ["Impermissible Donor", "Other"]},
+        {"column": "name", "op": "starts_with_token", "lists": ["person_titles"]}
+      ],
+      "track": "person"
+    },
+    {
+      "id": "t3",
+      "description": "An ambiguous donor whose name carries a legal form or an organisation word is an organisation",
+      "when": [
+        {"column": "donor_status", "op": "in", "values": ["Impermissible Donor", "Other"]},
+        {"column": "name", "op": "contains_token", "lists": ["legal_forms", "org_words"]}
+      ],
+      "track": "organisation"
+    },
+    {
+      "id": "t4",
+      "description": "Any other Impermissible Donor is a person",
+      "when": [
+        {"column": "donor_status", "op": "equals", "value": "Impermissible Donor"}
+      ],
+      "track": "person"
+    }
+  ],
+  "default_track": "organisation",
+  "cleaning": {
+    "person": [
+      {"id": "p1", "description": "Upper-case the name", "op": "upper",
+       "source": "name", "target": "name_clean"},
+      {"id": "p2", "description": "Fold accents to plain letters", "op": "accent_fold",
+       "source": "name_clean", "target": "name_clean"},
+      {"id": "p3", "description": "Drop punctuation, keeping spaces and hyphens. Apostrophes go, so O'Neill, O’Neill and ONeill become one spelling",
+       "op": "strip_punctuation", "source": "name_clean", "target": "name_clean", "keep": " -"},
+      {"id": "p4", "description": "Collapse repeated spaces", "op": "collapse_spaces",
+       "source": "name_clean", "target": "name_clean"},
+      {"id": "p5", "description": "A name that is only a null spelling is missing", "op": "nullify",
+       "source": "name_clean", "target": "name_clean", "lists": ["null_values"]},
+      {"id": "p6", "description": "Remove leading titles, keeping them in title", "op": "strip_tokens",
+       "source": "name_clean", "target": "name_clean", "lists": ["person_titles"],
+       "position": "leading", "repeat": true, "keep_as": "title"},
+      {"id": "p7", "description": "Remove trailing post-nominals, keeping them in post_nominals",
+       "op": "strip_tokens", "source": "name_clean", "target": "name_clean",
+       "lists": ["post_nominals"], "position": "trailing", "repeat": true, "keep_as": "post_nominals"},
+      {"id": "p8", "description": "Split the name into forename, middle names and surname",
+       "op": "function", "name": "parse_person_name", "source": "name_clean"},
+      {"id": "p9", "description": "Map a diminutive forename to its canonical form", "op": "lookup",
+       "source": "forename", "target": "forename_canon", "table": "nicknames", "scope": "value"},
+      {"id": "p10", "description": "Phonetic key for the surname", "op": "function",
+       "name": "metaphone", "source": "surname", "target": "surname_metaphone"}
+    ],
+    "organisation": [
+      {"id": "o1", "description": "Upper-case the name", "op": "upper",
+       "source": "name", "target": "name_clean"},
+      {"id": "o2", "description": "Fold accents to plain letters", "op": "accent_fold",
+       "source": "name_clean", "target": "name_clean"},
+      {"id": "o3", "description": "Spell out the ampersand, so 'Smith & Son' and 'Smith and Son' agree",
+       "op": "regex_replace", "source": "name_clean", "target": "name_clean",
+       "pattern": "&", "replacement": " AND "},
+      {"id": "o4", "description": "Drop punctuation", "op": "strip_punctuation",
+       "source": "name_clean", "target": "name_clean", "keep": " "},
+      {"id": "o5", "description": "Collapse repeated spaces", "op": "collapse_spaces",
+       "source": "name_clean", "target": "name_clean"},
+      {"id": "o6", "description": "A name that is only a null spelling is missing", "op": "nullify",
+       "source": "name_clean", "target": "name_clean", "lists": ["null_values"]},
+      {"id": "o7", "description": "Drop a leading 'THE'", "op": "strip_tokens",
+       "source": "name_clean", "target": "name_clean", "lists": ["leading_articles"],
+       "position": "leading", "repeat": true},
+      {"id": "o8", "description": "Split the legal form off the end of the name",
+       "op": "strip_tokens", "source": "name_clean", "target": "name_core",
+       "lists": ["legal_forms"], "position": "trailing", "repeat": true, "keep_as": "legal_form"},
+      {"id": "o9", "description": "Sorted distinct tokens, to catch a different word order",
+       "op": "function", "name": "sorted_tokens", "source": "name_core", "target": "name_tokens_sorted"},
+      {"id": "o10", "description": "Reformat the postcode", "op": "function",
+       "name": "normalise_postcode", "source": "postcode", "target": "postcode_clean"},
+      {"id": "o11", "description": "The postcode district, for blocking", "op": "function",
+       "name": "postcode_district", "source": "postcode_clean", "target": "postcode_district"},
+      {"id": "o12", "description": "Pad and tidy the company number", "op": "function",
+       "name": "normalise_company_number", "source": "company_number", "target": "company_number_clean"}
+    ]
+  },
+  "match_keys": [
+    {
+      "id": "k1",
+      "name": "Company number",
+      "track": "organisation",
+      "tier": 1,
+      "columns": ["company_number_clean"],
+      "allow_null": false,
+      "applies_when": "always",
+      "guards": {
+        "blocklists": ["placeholder_numbers"],
+        "max_distinct": {"column": "name_core", "count": 1}
+      },
+      "on_guard_fail": "review"
+    },
+    {
+      "id": "k2",
+      "name": "Name and postcode",
+      "track": "organisation",
+      "tier": 2,
+      "columns": ["name_core", "postcode_clean"],
+      "allow_null": false,
+      "applies_when": "always",
+      "guards": {},
+      "on_guard_fail": "review"
+    },
+    {
+      "id": "k3",
+      "name": "Exact cleaned name",
+      "track": "person",
+      "tier": 1,
+      "columns": ["name_clean"],
+      "allow_null": false,
+      "applies_when": "always",
+      "guards": {"max_group_size": 60},
+      "on_guard_fail": "review"
+    }
+  ],
+  "vetoes": []
+}

@@ -9,7 +9,7 @@ import { Icons } from "../components/Icons";
 import { fmtNumber, fmtPct, fmtDateTime, timeAgo } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
 import { useProfile } from "../profile";
-import { hasPairCounts, hasRecordCounts, trackCountKey } from "../counts";
+import { hasExactCounts, hasPairCounts, hasRecordCounts, trackCountKey } from "../counts";
 
 // Old linkage runs report pair buckets; a run that only loaded records does not.
 // The list shows whichever set of numbers the runs actually carry.
@@ -162,6 +162,18 @@ export default function RunsScreen() {
               </div>
             </div>
           ))}
+          {hasExactCounts(latest.counts) && (
+            <div className="kpi">
+              <div className="label">Entities after exact keys</div>
+              <div className="value">{fmtNumber(latest.counts.exactEntitiesAfter)}</div>
+              <div className="delta muted">
+                {fmtNumber(latest.counts.exactMergedRecords)} records merged
+                {latest.counts.exactHeldGroups
+                  ? `, ${fmtNumber(latest.counts.exactHeldGroups)} held`
+                  : ""}
+              </div>
+            </div>
+          )}
           <div className="kpi">
             <div className="label">Unreviewed</div>
             <div className="value" style={{ color: "var(--amber)" }}>

@@ -17,8 +17,8 @@ os.environ.setdefault("SITE_PASSWORD", "testpass123")
 from app.profiles import get_profile
 from app.profiles.base import SHARED_COLUMNS, validate_records
 from app.profiles.donations import (
+    RAW_COLUMNS,
     DonationsProfile,
-    assign_track,
     build_records,
     read_input,
 )
@@ -127,46 +127,29 @@ def test_most_frequent_real_entity_id_wins():
 
 
 # ---------------------------------------------------------------------------
-# Track assignment
+# Track assignment belongs to the ruleset, not the loader
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("status,name,expected", [
-    ("Individual", "A Smith", "person"),
-    ("Individual", "Smith Holdings Ltd", "person"),      # status wins outright
-    ("Company", "A Smith", "organisation"),
-    ("Trade Union", "Unite", "organisation"),
-    ("Trust", "Smith Family Trust", "organisation"),
-    # The two ambiguous statuses, decided by name pattern
-    ("Impermissible Donor", "Mr A Smith", "person"),
-    ("Impermissible Donor", "Dr. J Patel", "person"),
-    ("Impermissible Donor", "Baroness Jones", "person"),
-    ("Impermissible Donor", "Acme Holdings Ltd", "organisation"),
-    ("Impermissible Donor", "Barnet Conservative Association", "organisation"),
-    ("Impermissible Donor", "A Smith", "person"),        # neither pattern: status default
-    ("Other", "Mrs B Brown", "person"),
-    ("Other", "West End Club", "organisation"),
-    ("Other", "Something Unclassifiable", "organisation"),  # neither pattern: status default
-])
-def test_assign_track(status, name, expected):
-    assert assign_track(status, name) == expected
-
-
-def test_title_must_be_a_whole_leading_word():
-    """'Drummond' starts with 'Dr' but is not a title."""
-    assert assign_track("Impermissible Donor", "Drummond") == "person"  # status default
-    assert assign_track("Other", "Drummond") == "organisation"          # status default
-
-
-def test_track_counts_land_in_stats():
-    _, stats = build_records(_frame([
+def test_the_loader_does_not_decide_a_track():
+    """The ruleset decides the track and stage 1 adds the column. A loader that
+    quietly did it again would make the track rules a lie."""
+    records, stats = build_records(_frame([
         _row(DonorId="1", DonorStatus="Individual"),
         _row(DonorId="2", DonorStatus="Company", DonorName="Acme Ltd"),
-        _row(DonorId="3", DonorStatus="Company", DonorName="Beta Ltd"),
     ]))
-    assert stats["records_person"] == 1
-    assert stats["records_organisation"] == 2
-    assert stats["records_total"] == 3
+    assert "track" not in records.columns
+    assert "records_person" not in stats
+    assert "records_organisation" not in stats
+    assert stats["records_total"] == 2
+
+
+def test_the_frame_matches_the_declared_raw_columns():
+    """The Config screen offers RAW_COLUMNS before any run exists, so it must
+    be exactly what the loader produces."""
+    records, _ = build_records(_frame([_row(DonorId="1")]))
+    assert list(records.columns) == RAW_COLUMNS
+    assert DonationsProfile().raw_columns == RAW_COLUMNS
 
 
 # ---------------------------------------------------------------------------
@@ -220,8 +203,7 @@ def test_optional_columns_may_be_absent():
         {"DonorId": "2", "DonorName": "Acme Ltd"},
     ]))
     assert stats["records_total"] == 2
-    # No status at all: every record falls through to the organisation default.
-    assert set(records["track"]) == {"organisation"}
+    assert list(records["donor_status"]) == ["", ""]
     assert list(records["review_state"]) == ["unreviewed", "unreviewed"]
 
 
@@ -289,8 +271,7 @@ def test_load_records_end_to_end(tmp_path):
 
     records, stats = DonationsProfile().load_records(path)
     assert stats["records_total"] == 2
-    assert stats["records_person"] == 1
-    assert stats["records_organisation"] == 1
+    assert set(records["name"]) == {"A Smith", "Acme Ltd"}
 
 
 # ---------------------------------------------------------------------------

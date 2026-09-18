@@ -1,6 +1,0 @@
-{
-  "description": "Trailing tokens stripped from name_clean to compute name_core. Stripping is iterative from the right: walk from the end, drop tokens in this set, stop at the first non-matching token. Deliberately short for donations — most donors are people or unincorporated bodies. Add forms here as the data exposes them.",
-  "tokens": [
-    "LTD", "LIMITED", "PLC", "LLP"
-  ]
-}

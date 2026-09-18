@@ -1,10 +1,10 @@
 # backend/app/pipeline/dedupe/stage_0_load.py
-"""Stage 0: load the input file into the run's records frame.
+"""Stage 0: load the input file into the run's raw records frame.
 
 The profile owns every dataset-specific decision (which columns, how to
-aggregate, how to assign a track). This stage only calls it, checks the shared
-columns are there, and writes the result where later stages and the records API
-will look for it.
+aggregate). This stage only calls it, checks the shared columns are there, and
+writes the result where stage 1 will look for it. The track is not decided here
+— the ruleset decides it, and stage 1 adds the column.
 """
 
 import time
@@ -13,7 +13,7 @@ from pathlib import Path
 from app.profiles import get_profile
 from app.profiles.base import validate_records
 
-RECORDS_FILENAME = "records.parquet"
+RECORDS_RAW_FILENAME = "records_raw.parquet"
 
 STAGE = 0
 STAGE_NAME = "load"
@@ -31,7 +31,7 @@ def run_stage_0_load(
     input_path: str,
     progress_callback=None,
 ) -> dict:
-    """Load *input_path* into ``<run_dir>/records.parquet`` and return load stats.
+    """Load *input_path* into ``<run_dir>/records_raw.parquet`` and return load stats.
 
     Parameters
     ----------
@@ -56,7 +56,7 @@ def run_stage_0_load(
     records, stats = profile.load_records(Path(input_path))
     validate_records(records)
 
-    out_path = run_dir / RECORDS_FILENAME
+    out_path = run_dir / RECORDS_RAW_FILENAME
     records.to_parquet(out_path, index=False)
 
     elapsed = time.time() - t_start

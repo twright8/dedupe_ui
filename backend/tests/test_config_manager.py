@@ -1,6 +1,7 @@
 # backend/tests/test_config_manager.py
-"""Tests for config_manager service and /api/config endpoints."""
+"""config_manager and the /api/config endpoints, on the ruleset shape."""
 
+import copy
 import json
 import os
 import sys
@@ -12,169 +13,150 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # Must be set before app.main / app.auth are imported
 os.environ.setdefault("SITE_PASSWORD", "testpass123")
 
-from app.services.config_manager import (
-    save_version,
-    get_version,
-    get_current,
-    list_versions,
-    diff_versions,
-    test_rules,
-)
+from tests.rulesets import default_ruleset, small_ruleset
+
 from app.db import query_db
+from app.services.config_manager import (
+    diff_versions,
+    get_current,
+    get_version,
+    list_versions,
+    save_version,
+)
 
 
 # ---------------------------------------------------------------------------
-# config_manager service tests
+# config_manager service
 # ---------------------------------------------------------------------------
 
 
-def test_save_and_get_version(db_path):
-    v = save_version(
-        db_path,
-        created_by="Tom",
-        note="initial",
-        name_rules=[{"pattern": "LTD", "replace": "LTD"}],
-        jurisdiction_map=[{"canonical": "JERSEY", "aliases": ["JE"]}],
-        legal_tokens=["LTD", "LLC"],
-        linkage_settings={"threshold_high": 0.70},
+def test_save_and_get_version(db_path, ruleset):
+    version = save_version(
+        db_path, created_by="Tom", note="initial",
+        ruleset=ruleset, linkage_settings={"threshold_high": 0.70},
     )
-    assert v == 1
+    assert version == 1
     got = get_version(db_path, 1)
-    assert json.loads(got["name_rules"])[0]["pattern"] == "LTD"
+    assert got["ruleset"]["default_track"] == "organisation"
+    assert got["ruleset"]["track_rules"][0]["id"] == "r1"
 
 
-def test_get_current_returns_latest(db_path):
-    save_version(
-        db_path,
-        created_by="Tom",
-        note="v1",
-        name_rules=[],
-        jurisdiction_map=[],
-        legal_tokens=[],
-        linkage_settings={},
-    )
-    save_version(
-        db_path,
-        created_by="Tom",
-        note="v2",
-        name_rules=[{"pattern": "X"}],
-        jurisdiction_map=[],
-        legal_tokens=[],
-        linkage_settings={},
-    )
-    cur = get_current(db_path)
-    assert cur["version"] == 2
+def test_ruleset_comes_back_parsed_but_settings_stay_json(db_path, ruleset):
+    """The pipeline writes linkage_settings straight to the run folder, so it
+    stays the string it was stored as."""
+    save_version(db_path, created_by="Tom", note="", ruleset=ruleset,
+                 linkage_settings={"a": 1})
+    current = get_current(db_path)
+    assert isinstance(current["ruleset"], dict)
+    assert isinstance(current["linkage_settings"], str)
+    assert json.loads(current["linkage_settings"]) == {"a": 1}
+
+
+def test_the_legacy_columns_stay_null(db_path, ruleset):
+    save_version(db_path, created_by="Tom", note="", ruleset=ruleset, linkage_settings={})
+    row = query_db(db_path, "SELECT * FROM config_versions WHERE version = 1")[0]
+    assert row["name_rules"] is None
+    assert row["jurisdiction_map"] is None
+    assert row["legal_tokens"] is None
+
+
+def test_get_current_returns_latest(db_path, ruleset):
+    save_version(db_path, created_by="Tom", note="v1", ruleset=ruleset, linkage_settings={})
+    save_version(db_path, created_by="Tom", note="v2", ruleset=ruleset, linkage_settings={})
+    assert get_current(db_path)["version"] == 2
 
 
 def test_get_current_empty(db_path):
-    cur = get_current(db_path)
-    assert cur is None
+    assert get_current(db_path) is None
 
 
-def test_list_versions(db_path):
-    save_version(
-        db_path,
-        created_by="Tom",
-        note="v1",
-        name_rules=[],
-        jurisdiction_map=[],
-        legal_tokens=[],
-        linkage_settings={},
-    )
-    save_version(
-        db_path,
-        created_by="Tom",
-        note="v2",
-        name_rules=[],
-        jurisdiction_map=[],
-        legal_tokens=[],
-        linkage_settings={},
-    )
+def test_list_versions(db_path, ruleset):
+    save_version(db_path, created_by="Tom", note="v1", ruleset=ruleset, linkage_settings={})
+    save_version(db_path, created_by="Tom", note="v2", ruleset=ruleset, linkage_settings={})
     versions = list_versions(db_path)
     assert len(versions) == 2
     assert versions[0]["version"] == 2  # DESC order
 
 
-def test_diff_versions(db_path):
-    save_version(
-        db_path,
-        created_by="Tom",
-        note="v1",
-        name_rules=[{"pattern": "A"}],
-        jurisdiction_map=[],
-        legal_tokens=["LTD"],
-        linkage_settings={"t": 0.7},
-    )
-    save_version(
-        db_path,
-        created_by="Tom",
-        note="v2",
-        name_rules=[{"pattern": "A"}, {"pattern": "B"}],
-        jurisdiction_map=[],
-        legal_tokens=["LTD"],
-        linkage_settings={"t": 0.8},
-    )
-    d = diff_versions(db_path, 1, 2)
-    assert d["name_rules"]["changed"] is True
-    assert d["linkage_settings"]["changed"] is True
-    assert d["legal_tokens"]["changed"] is False
-
-
-def test_test_rules_applies_rules():
-    rules = [
-        {"pattern": "-", "replace": " "},
-        {"pattern": "LIMITED", "replace": "LTD"},
-        {"pattern": "\\s+", "replace": " "},
-    ]
-    result = test_rules("SORA-OREWA LIMITED", rules=rules)
-    assert result["final"] == "SORA OREWA LTD"
-    assert len(result["steps"]) == 3
-    assert result["steps"][0]["after"] == "SORA OREWA LIMITED"
-
-
-def test_test_rules_uppercases_input():
-    rules = [{"pattern": "LTD", "replace": "LTD"}]
-    result = test_rules("acme ltd", rules=rules)
-    assert result["steps"][0]["before"] == "ACME LTD"
-
-
-def test_save_logs_audit_event(db_path):
-    """Saving a config version should create an audit_log entry with kind='config'."""
-    save_version(
-        db_path,
-        created_by="Tom",
-        note="audit test",
-        name_rules=[],
-        jurisdiction_map=[],
-        legal_tokens=[],
-        linkage_settings={},
-    )
+def test_save_logs_audit_event(db_path, ruleset):
+    save_version(db_path, created_by="Tom", note="audit test",
+                 ruleset=ruleset, linkage_settings={})
     rows = query_db(db_path, "SELECT * FROM audit_log WHERE kind = 'config'")
     assert len(rows) == 1
     assert rows[0]["user_name"] == "Tom"
 
 
-def test_test_rules_from_db(db_path):
-    """test_rules with rules=None should load from current config version."""
-    save_version(
-        db_path,
-        created_by="Tom",
-        note="rules test",
-        name_rules=[
-            {"pattern": "-", "replace": " "},
-            {"pattern": "LIMITED", "replace": "LTD"},
-        ],
-        jurisdiction_map=[],
-        legal_tokens=[],
-        linkage_settings={},
-    )
-    result = test_rules("ACME-LIMITED", db_path=db_path)
-    assert result["final"] == "ACME LTD"
-    assert len(result["steps"]) == 2
+# ---------------------------------------------------------------------------
+# Diff, section by section
+# ---------------------------------------------------------------------------
+
+
+def _two_versions(db_path, first, second, settings1=None, settings2=None):
+    save_version(db_path, created_by="Tom", note="v1", ruleset=first,
+                 linkage_settings=settings1 or {})
+    save_version(db_path, created_by="Tom", note="v2", ruleset=second,
+                 linkage_settings=settings2 or {})
+    return diff_versions(db_path, 1, 2)
+
+
+def test_diff_reports_an_added_track_rule(db_path, ruleset):
+    after = copy.deepcopy(ruleset)
+    after["track_rules"].append({
+        "id": "r2", "description": "", "track": "person",
+        "when": [{"column": "donor_status", "op": "equals", "value": "Other"}],
+    })
+    diff = _two_versions(db_path, ruleset, after)
+    assert diff["track_rules"] == {
+        "changed": True, "added": ["r2"], "removed": [], "modified": [],
+    }
+
+
+def test_diff_reports_a_changed_step_by_id(db_path, ruleset):
+    after = copy.deepcopy(ruleset)
+    after["cleaning"]["person"][0]["op"] = "lower"
+    diff = _two_versions(db_path, ruleset, after)
+    assert diff["cleaning.person"]["modified"] == ["p1"]
+    assert diff["cleaning.organisation"]["changed"] is False
+
+
+def test_diff_reports_token_lists_and_lookups_by_name(db_path, ruleset):
+    after = copy.deepcopy(ruleset)
+    after["token_lists"]["extra"] = {"description": "", "tokens": ["X"]}
+    del after["token_lists"]["titles"]
+    after["lookups"]["nicknames"] = {"fallback": "passthrough", "rows": []}
+    diff = _two_versions(db_path, ruleset, after)
+    assert diff["token_lists"]["added"] == ["extra"]
+    assert diff["token_lists"]["removed"] == ["titles"]
+    assert diff["lookups"]["added"] == ["nicknames"]
+
+
+def test_diff_compares_default_track_and_settings_whole(db_path, ruleset):
+    after = copy.deepcopy(ruleset)
+    after["default_track"] = "person"
+    diff = _two_versions(db_path, ruleset, after, {"t": 0.7}, {"t": 0.8})
+    assert diff["default_track"] == {"changed": True, "v1": "organisation", "v2": "person"}
+    assert diff["linkage_settings"]["changed"] is True
+    assert diff["linkage_settings"]["v2"] == {"t": 0.8}
+
+
+def test_diff_covers_every_section(db_path, ruleset):
+    diff = _two_versions(db_path, ruleset, ruleset)
+    assert set(diff) == {
+        "token_lists", "lookups", "track_rules", "default_track",
+        "cleaning.person", "cleaning.organisation", "match_keys", "vetoes",
+        "linkage_settings",
+    }
+    assert all(section["changed"] is False for section in diff.values())
+
+
+def test_diff_of_a_missing_version_raises(db_path, ruleset):
+    save_version(db_path, created_by="Tom", note="", ruleset=ruleset, linkage_settings={})
+    with pytest.raises(ValueError, match="version 9 not found"):
+        diff_versions(db_path, 1, 9)
 
 
 # ---------------------------------------------------------------------------
-# /api/config endpoint tests
+# /api/config endpoints
 # ---------------------------------------------------------------------------
 
 import app.main as _main_mod
@@ -182,9 +164,12 @@ import app.auth as _auth_mod
 
 
 @pytest.fixture
-def client(db_path, monkeypatch):
+def client(db_path, tmp_path, monkeypatch):
     """TestClient with DB wired to the tmp db_path, session auth bypassed."""
+    data_dir = tmp_path / "data"
+    (data_dir / "runs").mkdir(parents=True)
     monkeypatch.setattr(_main_mod, "DB_PATH", db_path)
+    monkeypatch.setattr(_main_mod, "DATA_DIR", data_dir)
     monkeypatch.setattr(
         _auth_mod, "_unsign", lambda token, max_age=None: {"authenticated": True}
     )
@@ -194,208 +179,141 @@ def client(db_path, monkeypatch):
     return TestClient(_main_mod.app, cookies={"session": "fake"})
 
 
+def _save(client, ruleset, note="v", settings=None):
+    return client.post("/api/config", json={
+        "ruleset": ruleset, "linkage_settings": settings or {}, "note": note,
+    })
+
+
 def test_api_config_current_empty(client):
     r = client.get("/api/config/current")
     assert r.status_code == 200
     assert r.json() is None
 
 
-def test_api_config_save_and_get_current(client, db_path):
-    r = client.post(
-        "/api/config",
-        json={
-            "name_rules": [{"pattern": "X", "replace": "Y"}],
-            "jurisdiction_map": [],
-            "legal_tokens": ["LTD"],
-            "linkage_settings": {"threshold_high": 0.7},
-            "note": "first save",
-        },
-    )
-    assert r.status_code == 200
-    body = r.json()
+def test_api_config_save_and_get_current(client, ruleset):
+    assert _save(client, ruleset, settings={"threshold_high": 0.7}).json()["version"] == 1
+
+    body = client.get("/api/config/current").json()
+    assert set(body) == {
+        "version", "created_at", "created_by", "note", "ruleset", "linkage_settings",
+    }
+    assert body["ruleset"]["default_track"] == "organisation"
+    assert body["linkage_settings"] == {"threshold_high": 0.7}
+
+
+def test_api_config_rejects_an_invalid_ruleset_with_paths(client, ruleset):
+    broken = copy.deepcopy(ruleset)
+    broken["cleaning"]["person"][0]["op"] = "explode"
+    r = _save(client, broken)
+    assert r.status_code == 422
+    errors = r.json()["detail"]["errors"]
+    assert errors == [{"path": "cleaning.person[0].op", "message": "Unknown op 'explode'"}]
+    # Nothing was stored.
+    assert client.get("/api/config/current").json() is None
+
+
+def test_saving_without_settings_keeps_the_ones_already_there(client, ruleset):
+    """The rules screen saves a ruleset. It must not wipe the thresholds."""
+    _save(client, ruleset, settings={"match_probability_threshold_high": 0.92})
+    client.post("/api/config", json={"ruleset": ruleset, "note": "rules only"})
+    assert client.get("/api/config/current").json()["linkage_settings"] == {
+        "match_probability_threshold_high": 0.92,
+    }
+
+
+def test_api_config_versions_list(client, ruleset):
+    _save(client, ruleset, note="v1")
+    _save(client, ruleset, note="v2")
+    versions = client.get("/api/config/versions").json()
+    assert [v["version"] for v in versions] == [2, 1]
+
+
+def test_api_config_get_specific_version(client, ruleset):
+    _save(client, ruleset)
+    body = client.get("/api/config/versions/1").json()
     assert body["version"] == 1
-
-    r2 = client.get("/api/config/current")
-    assert r2.status_code == 200
-    cur = r2.json()
-    # JSON fields should be parsed objects, not strings
-    assert isinstance(cur["name_rules"], list)
-    assert cur["name_rules"][0]["pattern"] == "X"
-    assert isinstance(cur["linkage_settings"], dict)
+    assert body["ruleset"]["track_rules"][0]["id"] == "r1"
 
 
-def test_api_config_versions_list(client, db_path):
-    client.post(
-        "/api/config",
-        json={
-            "name_rules": [],
-            "jurisdiction_map": [],
-            "legal_tokens": [],
-            "linkage_settings": {},
-            "note": "v1",
-        },
-    )
-    client.post(
-        "/api/config",
-        json={
-            "name_rules": [],
-            "jurisdiction_map": [],
-            "legal_tokens": [],
-            "linkage_settings": {},
-            "note": "v2",
-        },
-    )
-    r = client.get("/api/config/versions")
+def test_api_config_diff(client, ruleset):
+    after = copy.deepcopy(ruleset)
+    after["default_track"] = "person"
+    _save(client, ruleset, note="v1")
+    _save(client, after, note="v2")
+    diff = client.get("/api/config/diff/1/2").json()
+    assert diff["default_track"]["v2"] == "person"
+    assert diff["cleaning.person"]["changed"] is False
+
+
+def test_api_config_diff_missing_version_is_404(client, ruleset):
+    _save(client, ruleset)
+    assert client.get("/api/config/diff/1/7").status_code == 404
+
+
+def test_api_validate_does_not_save(client, ruleset):
+    broken = copy.deepcopy(ruleset)
+    broken["default_track"] = "banana"
+    r = client.post("/api/config/validate", json={"ruleset": broken})
     assert r.status_code == 200
-    versions = r.json()
-    assert len(versions) == 2
-    assert versions[0]["version"] == 2
+    assert r.json()["errors"][0]["path"] == "default_track"
+    assert client.get("/api/config/current").json() is None
 
 
-def test_api_config_get_specific_version(client, db_path):
-    client.post(
-        "/api/config",
-        json={
-            "name_rules": [{"pattern": "A"}],
-            "jurisdiction_map": [],
-            "legal_tokens": [],
-            "linkage_settings": {},
-            "note": "v1",
-        },
-    )
-    r = client.get("/api/config/versions/1")
-    assert r.status_code == 200
-    body = r.json()
-    assert isinstance(body["name_rules"], list)
-    assert body["name_rules"][0]["pattern"] == "A"
+def test_api_validate_accepts_the_shipped_default(client):
+    r = client.post("/api/config/validate", json={"ruleset": default_ruleset()})
+    assert r.json() == {"errors": []}
 
 
-def test_api_config_diff(client, db_path):
-    client.post(
-        "/api/config",
-        json={
-            "name_rules": [{"pattern": "A"}],
-            "jurisdiction_map": [],
-            "legal_tokens": ["LTD"],
-            "linkage_settings": {"t": 0.7},
-            "note": "v1",
-        },
-    )
-    client.post(
-        "/api/config",
-        json={
-            "name_rules": [{"pattern": "A"}, {"pattern": "B"}],
-            "jurisdiction_map": [],
-            "legal_tokens": ["LTD"],
-            "linkage_settings": {"t": 0.8},
-            "note": "v2",
-        },
-    )
-    r = client.get("/api/config/diff/1/2")
-    assert r.status_code == 200
-    d = r.json()
-    assert d["name_rules"]["changed"] is True
-    assert d["legal_tokens"]["changed"] is False
+# ---- functions ----
 
 
-def test_api_config_test_rules_with_body_rules(client):
-    r = client.post(
-        "/api/config/test-rules",
-        json={
-            "input_name": "acme-limited",
-            "rules": [
-                {"pattern": "-", "replace": " "},
-                {"pattern": "LIMITED", "replace": "LTD"},
-            ],
-        },
-    )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["final"] == "ACME LTD"
-    assert len(body["steps"]) == 2
+def test_api_functions_lists_the_library(client):
+    library = client.get("/api/config/functions").json()
+    by_name = {f["name"]: f for f in library}
+    assert "parse_person_name" in by_name
+    assert by_name["parse_person_name"]["outputs"] == [
+        "forename", "middle_names", "surname", "forename_initial",
+    ]
+    assert by_name["normalise_postcode"]["outputs"] == ["target"]
+    for spec in library:
+        assert set(spec) == {"name", "description", "outputs", "args", "example"}
+        assert spec["description"]
+        assert "input" in spec["example"] and "output" in spec["example"]
 
 
-def test_api_config_test_rules_from_current(client, db_path):
-    client.post(
-        "/api/config",
-        json={
-            "name_rules": [{"pattern": "-", "replace": " "}],
-            "jurisdiction_map": [],
-            "legal_tokens": [],
-            "linkage_settings": {},
-            "note": "rules",
-        },
-    )
-    r = client.post(
-        "/api/config/test-rules",
-        json={"input_name": "ACME-LTD"},
-    )
-    assert r.status_code == 200
-    assert r.json()["final"] == "ACME LTD"
+# ---- columns ----
 
 
-# ---------------------------------------------------------------------------
-# /api/config/jurisdictions — quick-add mappings (self-serve fix for failed runs)
-# ---------------------------------------------------------------------------
+def test_api_columns_from_the_current_ruleset(client):
+    _save(client, default_ruleset())
+    body = client.get("/api/config/columns", params={"track": "person"}).json()
 
-def _seed_one(client):
-    client.post(
-        "/api/config",
-        json={
-            "name_rules": [],
-            "jurisdiction_map": [
-                {"source_dataset": "roe", "raw_value": "JERSEY", "standardised_value": "JERSEY"},
-            ],
-            "legal_tokens": [],
-            "linkage_settings": {"match_probability_threshold_high": 0.9},
-            "note": "seed",
-        },
-    )
+    raw_keys = [c["key"] for c in body["raw"]]
+    assert "name" in raw_keys and "donor_status" in raw_keys
+    assert {"key": "name", "label": "Donor"} in body["raw"]
+    # The parse step contributes four columns at once.
+    parse = next(s for s in body["steps"] if s["step_id"] == "p8")
+    assert parse["targets"] == ["forename", "middle_names", "surname", "forename_initial"]
+    assert body["all"][:len(raw_keys)] == raw_keys
+    assert "surname_metaphone" in body["all"]
 
 
-def test_api_add_jurisdictions_appends_new_version(client, db_path):
-    _seed_one(client)
-    r = client.post(
-        "/api/config/jurisdictions",
-        json={
-            "entries": [
-                {"source_dataset": "ocod", "raw_value": "PUERTO RICO", "standardised_value": "UNITED STATES"},
-                {"source_dataset": "roe", "raw_value": "TAJIKISTAN", "standardised_value": "TAJIKISTAN"},
-            ],
-            "note": "add june jurisdictions",
-        },
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["version"] == 2
-    assert r.json()["added"] == 2
-
-    cur = client.get("/api/config/current").json()
-    jm = cur["jurisdiction_map"]
-    # Original entry preserved + 2 new, and linkage_settings carried over.
-    assert len(jm) == 3
-    assert cur["linkage_settings"]["match_probability_threshold_high"] == 0.9
-    keys = {(e["source_dataset"], e["raw_value"]) for e in jm}
-    assert ("ocod", "PUERTO RICO") in keys
-    assert ("roe", "TAJIKISTAN") in keys
+def test_api_columns_for_a_draft(client):
+    draft = small_ruleset()
+    draft["cleaning"]["organisation"].append({
+        "id": "o2", "description": "", "op": "function", "name": "sorted_tokens",
+        "source": "name_clean", "target": "name_tokens_sorted",
+    })
+    body = client.post("/api/config/columns",
+                       json={"ruleset": draft, "track": "organisation"}).json()
+    assert [s["targets"] for s in body["steps"]] == [["name_clean"], ["name_tokens_sorted"]]
 
 
-def test_api_add_jurisdictions_dedupes_case_insensitive(client, db_path):
-    _seed_one(client)
-    r = client.post(
-        "/api/config/jurisdictions",
-        json={"entries": [{"source_dataset": "roe", "raw_value": "jersey", "standardised_value": "JERSEY"}]},
-    )
-    assert r.status_code == 200
-    assert r.json()["added"] == 0  # already present (case-insensitive)
-    assert r.json()["version"] == 1  # no new version created when nothing added
-    cur = client.get("/api/config/current").json()
-    assert cur["version"] == 1
-    assert len(cur["jurisdiction_map"]) == 1
+def test_api_columns_rejects_an_unknown_track(client, ruleset):
+    _save(client, ruleset)
+    assert client.get("/api/config/columns", params={"track": "alien"}).status_code == 400
 
 
-def test_api_add_jurisdictions_requires_existing_config(client, db_path):
-    r = client.post(
-        "/api/config/jurisdictions",
-        json={"entries": [{"source_dataset": "roe", "raw_value": "X", "standardised_value": "Y"}]},
-    )
-    assert r.status_code == 400
+def test_api_columns_needs_a_config(client):
+    assert client.get("/api/config/columns", params={"track": "person"}).status_code == 400

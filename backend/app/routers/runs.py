@@ -17,6 +17,7 @@ from app.auth import current_user
 from app.db import query_db, write_db
 from app.profiles import get_profile
 from app.services.config_manager import get_version
+from app.services import exact_groups_reader
 from app.services import pipeline_runner
 from app.services import records_reader
 from app.services.audit_logger import log_event
@@ -125,7 +126,9 @@ def _top_jurisdictions_from_outputs(paths: list[Path]) -> list[dict]:
 
 # File descriptions for known output files
 _FILE_DESCRIPTIONS = {
-    "records.parquet": "Loaded records, one row per record",
+    "records_raw.parquet": "Loaded records, one row per record, before any rules",
+    "records.parquet": "Records with their track and every cleaning target",
+    "ruleset.json": "The ruleset this run used",
     "matches_exact.csv": "Phase 1 deterministic exact matches",
     "matches_high_confidence.csv": "All high-confidence matches (exact + probabilistic)",
     "matches_for_review.csv": "Probabilistic matches in the review band",
@@ -376,9 +379,21 @@ def _normalize_counts(raw):
         "recordsOrganisation": raw.get("records_organisation", 0),
         "recordsLabelled": raw.get("records_labelled", 0),
         "recordsUnreviewed": raw.get("records_unreviewed", 0),
+        # Dedupe stage 2 — what the match keys settled without a human. Precision
+        # and recall are null when the run has no labels to score against, which
+        # is a different thing from scoring zero.
+        "exactMergedGroups": raw.get("exact_merged_groups", 0),
+        "exactMergedRecords": raw.get("exact_merged_records", 0),
+        "exactHeldGroups": raw.get("exact_held_groups", 0),
+        "exactHeldRecords": raw.get("exact_held_records", 0),
+        "exactEntitiesAfter": raw.get("exact_entities_after", 0),
+        "exactConflicts": raw.get("exact_conflicts", 0),
+        "exactPairPrecision": raw.get("exact_pair_precision"),
+        "exactPairRecall": raw.get("exact_pair_recall"),
         # Every key above defaults to 0, so the frontend cannot tell "no pairs yet"
-        # from "zero pairs" by value. These two flags say which stages have run.
+        # from "zero pairs" by value. These flags say which stages have run.
         "hasRecords": "records_total" in raw,
+        "hasExact": "exact_merged_groups" in raw,
         "hasPairs": any(k in raw for k in _PAIR_COUNT_KEYS),
     }
 
@@ -980,6 +995,76 @@ def get_records(
         raise HTTPException(status_code=404, detail="Run has no records yet")
     except records_reader.InvalidQuery as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _run_dir_or_404(run_id: str) -> str:
+    """The run's directory, once we know the run itself exists."""
+    if not query_db(_db_path(), "SELECT id FROM runs WHERE id = ?", (run_id,)):
+        raise HTTPException(status_code=404, detail="Run not found")
+    return str(_data_dir_from_main() / "runs" / run_id)
+
+
+@router.get("/{run_id}/exact-groups")
+def get_exact_groups(
+    run_id: str,
+    track: str | None = Query(None, description="person | organisation"),
+    key: str | None = Query(None, description="Only groups a given match key built"),
+    status: str | None = Query(None, description="merged | held"),
+    agreement: str | None = Query(
+        None, description="consistent | conflict | extends | new (merged groups only)"
+    ),
+    q: str | None = Query(
+        None, description="Case-insensitive substring over member names, record ids and the group id"
+    ),
+    sort: str = Query(exact_groups_reader.DEFAULT_SORT, description="size | priority | name"),
+    order: str = Query("desc", description="asc | desc"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(
+        exact_groups_reader.DEFAULT_LIMIT, ge=1, le=exact_groups_reader.MAX_LIMIT
+    ),
+):
+    """One page of the groups the match keys made, merged and held.
+
+    ``total`` follows the filters; ``counts`` describe the whole run and ignore
+    them, so the tabs stay still while a search narrows the list.
+    """
+    run_dir = _run_dir_or_404(run_id)
+    try:
+        return exact_groups_reader.get_groups(
+            run_dir=run_dir, track=track, key=key, status=status,
+            agreement=agreement, q=q, sort=sort, order=order,
+            offset=offset, limit=limit,
+        )
+    except exact_groups_reader.ExactGroupsNotFound:
+        raise HTTPException(status_code=404, detail="Run has no exact groups yet")
+    except exact_groups_reader.InvalidQuery as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/{run_id}/exact-groups/{group_id}")
+def get_exact_group(run_id: str, group_id: str):
+    """One group with its member records, capped at 500."""
+    run_dir = _run_dir_or_404(run_id)
+    try:
+        group = exact_groups_reader.get_group(run_dir, group_id)
+    except exact_groups_reader.ExactGroupsNotFound:
+        raise HTTPException(status_code=404, detail="Run has no exact groups yet")
+    if group is None:
+        raise HTTPException(status_code=404, detail=f"No group '{group_id}' in this run")
+    return group
+
+
+@router.get("/{run_id}/exact-eval")
+def get_exact_eval(run_id: str):
+    """What stage 2 measured: the per-key stats, the totals, and the label scores."""
+    run_dir = _run_dir_or_404(run_id)
+    path = exact_groups_reader.eval_path(run_dir)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Run has no exact groups yet")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read the evaluation: {exc}")
 
 
 @router.get("/{run_id}/matches")

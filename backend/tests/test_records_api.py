@@ -55,14 +55,13 @@ def reset_runner_state():
 
 def _seed_config(db_path):
     from app.services.config_manager import save_version
+    from tests.rulesets import default_ruleset
 
     return save_version(
         db_path,
         created_by="test",
         note="test config",
-        name_rules=[{"pattern": "-", "replace": " "}],
-        jurisdiction_map=[],
-        legal_tokens=["LTD"],
+        ruleset=default_ruleset(),
         linkage_settings={
             "match_probability_threshold_high": 0.92,
             "match_probability_threshold_review": 0.50,

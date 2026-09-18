@@ -38,10 +38,14 @@ CREATE TABLE IF NOT EXISTS config_versions (
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     created_by      TEXT,
     note            TEXT,
+    -- The whole user-editable rules document (docs/RULESET.md).
+    ruleset         TEXT,
+    linkage_settings TEXT,
+    -- Written by the two-dataset linkage tool this app was copied from. Kept so
+    -- old rows still read; every new version leaves all three null.
     name_rules      TEXT,
     jurisdiction_map TEXT,
-    legal_tokens    TEXT,
-    linkage_settings TEXT
+    legal_tokens    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS labels (
@@ -133,6 +137,7 @@ _MIGRATIONS = [
     ("labels", "held_out", "INTEGER NOT NULL DEFAULT 0"),
     ("labels", "superseded_by", "INTEGER"),
     ("labels", "roe_name", "TEXT"),
+    ("config_versions", "ruleset", "TEXT"),
 ]
 
 

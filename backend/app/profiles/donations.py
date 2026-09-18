@@ -8,6 +8,14 @@ import pandas as pd
 
 from app.profiles.base import DEFAULT_TRACKS, DisplayColumn, InputSpec, Profile
 
+# Columns build_records produces, in frame order. The ruleset may read these and
+# may not overwrite them.
+RAW_COLUMNS = [
+    "record_id", "name", "review_state", "existing_entity_id", "is_trust",
+    "donor_status", "postcode", "company_number", "parties", "units",
+    "all_names", "first_year", "last_year", "n_donations", "total_value",
+]
+
 # The donations export ships several pivot sheets alongside the data. Prefer the
 # known sheet; fall back to the first sheet whose header carries the two columns
 # we cannot work without.
@@ -22,29 +30,6 @@ TEXT_COLUMNS = ("DonorId", "DonorIDStandardTR", "CompanyRegistrationNumber", "Po
 # these donors are the main work queue.
 UNREVIEWED_ENTITY_IDS = {"", "0", "0.0", "TR0"}
 
-# Track assignment for the two ambiguous donor statuses ("Impermissible Donor"
-# and "Other"), decided by name pattern. A later slice moves both lists into
-# user-editable rules; until then they live here, as module constants.
-PERSON_TITLE_TOKENS = (
-    "MR", "MRS", "MS", "MISS", "DR", "SIR", "LORD", "LADY", "DAME",
-    "PROF", "REV", "CLLR", "BARONESS",
-)
-ORGANISATION_TOKENS = (
-    "LTD", "LIMITED", "PLC", "LLP", "CLUB", "ASSOCIATION", "UNION", "TRUST",
-    "SOCIETY", "COUNCIL", "PARTY", "COMMITTEE", "GROUP", "FUND", "COMPANY",
-    "HOLDINGS", "BRANCH",
-)
-
-# Statuses that are a person outright, and the two decided by name pattern.
-_PERSON_STATUSES = {"individual"}
-_PATTERN_STATUSES = {"impermissible donor": "person", "other": "organisation"}
-
-_TITLE_RE = re.compile(
-    r"^(?:%s)\b\.?" % "|".join(PERSON_TITLE_TOKENS), re.IGNORECASE
-)
-_ORG_TOKEN_RE = re.compile(
-    r"\b(?:%s)\b" % "|".join(ORGANISATION_TOKENS), re.IGNORECASE
-)
 _WHITESPACE_RE = re.compile(r"\s+")
 
 # Joined into one cell so a single column can show every spelling / party.
@@ -80,29 +65,6 @@ def _clean_company_number(value) -> str:
 
 def _clean_postcode(value) -> str:
     return _id_string(value).upper()
-
-
-def assign_track(donor_status: str, name: str) -> str:
-    """Return 'person' or 'organisation' for one donor.
-
-    "Individual" is a person. "Impermissible Donor" and "Other" are decided by
-    name pattern — a personal title prefix means a person, an organisation token
-    means an organisation — and fall back to the status default. Every other
-    status (company, union, trade union, trust, unincorporated association...)
-    is an organisation.
-    """
-    status = (donor_status or "").strip().lower()
-    if status in _PERSON_STATUSES:
-        return "person"
-    if status not in _PATTERN_STATUSES:
-        return "organisation"
-
-    text = (name or "").strip()
-    if _TITLE_RE.match(text):
-        return "person"
-    if _ORG_TOKEN_RE.search(text):
-        return "organisation"
-    return _PATTERN_STATUSES[status]
 
 
 # ---------------------------------------------------------------------------
@@ -261,24 +223,15 @@ def build_records(raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         records[column] = records[column].where(records[column].fillna("") != "", None)
     records["is_trust"] = records["is_trust"].fillna(False).astype(bool)
 
-    records["track"] = [
-        assign_track(status, name)
-        for status, name in zip(records["donor_status"], records["name"])
-    ]
     # A record carries a label only if a previous review gave it an entity ID.
     labelled = records["existing_entity_id"].notna() & (records["existing_entity_id"] != "")
     records["review_state"] = labelled.map({True: "labelled", False: "unreviewed"})
     records["existing_entity_id"] = records["existing_entity_id"].where(labelled, None)
 
-    records = records[[
-        "record_id", "track", "name", "review_state", "existing_entity_id",
-        "is_trust", "donor_status", "postcode", "company_number", "parties",
-        "units", "all_names", "first_year", "last_year", "n_donations", "total_value",
-    ]].sort_values("name", kind="mergesort").reset_index(drop=True)
+    # No track here: the ruleset decides it, and stage 1 adds the column.
+    records = records[RAW_COLUMNS].sort_values("name", kind="mergesort").reset_index(drop=True)
 
     stats["records_total"] = int(len(records))
-    stats["records_person"] = int((records["track"] == "person").sum())
-    stats["records_organisation"] = int((records["track"] == "organisation").sum())
     stats["records_labelled"] = int((records["review_state"] == "labelled").sum())
     stats["records_unreviewed"] = int((records["review_state"] == "unreviewed").sum())
     return records, stats
@@ -320,6 +273,7 @@ class DonationsProfile(Profile):
                 DisplayColumn("all_names", "All spellings", "list"),
             ],
             priority_columns=["total_value"],
+            raw_columns=list(RAW_COLUMNS),
         )
 
     def load_records(self, input_path: Path) -> tuple[pd.DataFrame, dict]:

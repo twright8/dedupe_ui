@@ -1,5 +1,4 @@
 # backend/app/main.py
-import csv
 import json
 import logging
 import os
@@ -16,6 +15,7 @@ from app.routers.config import router as config_router
 from app.routers.labels import router as labels_router
 from app.routers.model import router as model_router
 from app.routers.notes import router as notes_router
+from app.routers.pipeline import router as pipeline_router
 from app.routers.profile import router as profile_router
 from app.routers.runs import router as runs_router
 from app.routers.uploads import router as uploads_router
@@ -33,8 +33,14 @@ PROFILE_DEFAULTS_DIR = Path(__file__).parent / "profiles" / "defaults"
 
 
 def _seed_initial_config() -> None:
-    """Read the profile's default config files and insert version 1 if none exist."""
-    if get_current(DB_PATH) is not None:
+    """Insert a config version from the profile's defaults when one is needed.
+
+    Two cases: no version at all (a fresh database), and a newest version with
+    no ruleset (a database from before the ruleset existed — the upgrade cannot
+    invent one, so it seeds a fresh version beside the old rows and says so).
+    """
+    current = get_current(DB_PATH)
+    if current is not None and current.get("ruleset"):
         return  # already seeded
 
     config_dir = PROFILE_DEFAULTS_DIR / get_profile().key
@@ -46,29 +52,33 @@ def _seed_initial_config() -> None:
         return
 
     try:
-        name_rules = json.loads((config_dir / "name_rules.json").read_text(encoding="utf-8"))
-        legal_tokens = json.loads((config_dir / "legal_entity_tokens.json").read_text(encoding="utf-8"))
-        linkage_settings = json.loads((config_dir / "linkage_settings.json").read_text(encoding="utf-8"))
+        ruleset = json.loads((config_dir / "ruleset.json").read_text(encoding="utf-8"))
+        linkage_settings = json.loads(
+            (config_dir / "linkage_settings.json").read_text(encoding="utf-8")
+        )
 
-        jurisdiction_map: list[dict] = []
-        with open(config_dir / "jurisdiction_map.csv", newline="", encoding="utf-8") as fh:
-            for row in csv.DictReader(fh):
-                jurisdiction_map.append({
-                    "source_dataset": row["source_dataset"],
-                    "raw_value": row["raw_value"],
-                    "standardised_value": row["standardised_value"],
-                })
+        if current is None:
+            note = f"Initial config seeded from the {get_profile().key} profile defaults"
+        else:
+            note = (
+                f"Ruleset seeded from the {get_profile().key} profile defaults — "
+                f"version {current['version']} predates the ruleset"
+            )
 
         version = save_version(
             DB_PATH,
             created_by="system",
-            note=f"Initial config seeded from the {get_profile().key} profile defaults",
-            name_rules=name_rules,
-            jurisdiction_map=jurisdiction_map,
-            legal_tokens=legal_tokens,
+            note=note,
+            ruleset=ruleset,
             linkage_settings=linkage_settings,
         )
-        logger.info("Seeded initial config as version %d.", version)
+        if current is None:
+            logger.info("Seeded initial config as version %d.", version)
+        else:
+            logger.warning(
+                "Config version %d has no ruleset; seeded version %d from the %s defaults.",
+                current["version"], version, get_profile().key,
+            )
 
     except Exception:
         logger.exception("Failed to seed initial config — the app will start without it.")
@@ -94,6 +104,7 @@ app.include_router(config_router)
 app.include_router(labels_router)
 app.include_router(model_router)
 app.include_router(notes_router)
+app.include_router(pipeline_router)
 app.include_router(profile_router)
 app.include_router(runs_router)
 app.include_router(uploads_router)

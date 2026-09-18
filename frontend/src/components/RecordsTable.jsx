@@ -12,71 +12,19 @@ import { api } from "../api";
 import { Icons } from "./Icons";
 import { fmtNumber } from "./ProbBar";
 import { Empty } from "./Empty";
+import { Cell, NUMERIC_TYPES } from "./cells";
 
 const PER_PAGE = 100;
-
-// Types that read as figures: right-aligned and in the mono face.
-const NUMERIC_TYPES = new Set(["money", "number", "year"]);
-
-// ---------- One formatted cell ----------
-function Cell({ value, type }) {
-  if (value == null || value === "") {
-    return <span className="muted">—</span>;
-  }
-
-  if (type === "money") {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return String(value);
-    return "£" + Math.round(n).toLocaleString("en-GB");
-  }
-
-  if (type === "number") {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return String(value);
-    return n.toLocaleString("en-GB");
-  }
-
-  if (type === "year") {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return String(value);
-    return String(Math.trunc(n));
-  }
-
-  if (type === "list") {
-    // The backend joins list values with " | ". Show the first, and keep the
-    // rest one hover away rather than blowing the row height out.
-    const items = String(value)
-      .split("|")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (items.length === 0) return <span className="muted">—</span>;
-    return (
-      <span title={items.join(" | ")}>
-        {items[0]}
-        {items.length > 1 && (
-          <span className="tag" style={{ marginLeft: 6 }}>
-            +{items.length - 1}
-          </span>
-        )}
-      </span>
-    );
-  }
-
-  return String(value);
-}
 
 // ---------- Main table ----------
 export default function RecordsTable({ runId, profile }) {
   // A profile always names its columns; the fallback keeps the table readable
   // if one ever arrives empty.
-  const columns =
+  const profileFallback =
     profile.display_columns && profile.display_columns.length
       ? profile.display_columns
       : [{ key: "name", label: "Name", type: "text" }];
   const tracks = profile.tracks || [];
-  const priorityColumns = (profile.priority_columns || [])
-    .map((key) => columns.find((c) => c.key === key))
-    .filter(Boolean);
 
   const [query, setQuery] = useState("");   // what is typed
   const [q, setQ] = useState("");           // what is sent, debounced
@@ -85,6 +33,13 @@ export default function RecordsTable({ runId, profile }) {
   const [sort, setSort] = useState("");
   const [order, setOrder] = useState("asc");
   const [page, setPage] = useState(0);
+  const [showCleaned, setShowCleaned] = useState(false);
+
+  // The run itself says which columns it holds, and whether each came from the
+  // profile or from a cleaning step. Kept in state so the controls stay put
+  // while the next page loads, and so an older backend that sends no columns
+  // still gets the profile's list.
+  const [columnDefs, setColumnDefs] = useState(null);
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -116,6 +71,7 @@ export default function RecordsTable({ runId, profile }) {
       .then((res) => {
         if (!alive) return;
         setData(res);
+        if (Array.isArray(res?.columns) && res.columns.length) setColumnDefs(res.columns);
         setError(null);
       })
       .catch((err) => {
@@ -155,6 +111,17 @@ export default function RecordsTable({ runId, profile }) {
     setOrder("desc");
     setPage(0);
   }
+
+  // Cleaning columns are the ones a cleaning step wrote. They stay hidden until
+  // asked for, because most of the time the profile's own columns are the point.
+  const allColumns = columnDefs || profileFallback;
+  const profileColumns = allColumns.filter((c) => c.source !== "cleaning");
+  const cleaningColumns = allColumns.filter((c) => c.source === "cleaning");
+  const columns = showCleaned ? [...profileColumns, ...cleaningColumns] : profileColumns;
+  const isCleaned = (col) => col.source === "cleaning";
+  const priorityColumns = (profile.priority_columns || [])
+    .map((key) => allColumns.find((c) => c.key === key))
+    .filter(Boolean);
 
   // counts cover the whole run; total reflects the filters in force.
   const counts = data?.counts || {};
@@ -239,6 +206,20 @@ export default function RecordsTable({ runId, profile }) {
           </button>
         ))}
 
+        {cleaningColumns.length > 0 && (
+          <button
+            className={"btn" + (showCleaned ? " primary" : "")}
+            onClick={() => setShowCleaned((v) => !v)}
+            title="Show the columns the cleaning steps wrote, beside the profile's own"
+          >
+            <Icons.table size={14} stroke={showCleaned ? "#fff" : undefined} />
+            Cleaned columns
+            <span className="muted" style={{ fontSize: 11 }}>
+              &middot; {cleaningColumns.length}
+            </span>
+          </button>
+        )}
+
         <div className="spacer" />
         <button className="btn" onClick={() => setAttempt((n) => n + 1)}>
           <Icons.refresh size={14} />
@@ -285,9 +266,13 @@ export default function RecordsTable({ runId, profile }) {
                         style={{
                           textAlign: numeric ? "right" : "left",
                           whiteSpace: "nowrap",
+                          // Cleaning columns read as secondary, so their header
+                          // stays muted and keeps the mono face of a column name.
+                          color: isCleaned(col) ? "var(--muted-2)" : undefined,
+                          fontFamily: isCleaned(col) ? "var(--font-mono)" : undefined,
                         }}
                         onClick={() => toggleSort(col.key)}
-                        title="Click to sort"
+                        title={isCleaned(col) ? "Written by a cleaning step. Click to sort." : "Click to sort"}
                       >
                         {col.label}
                         {sort === col.key ? (order === "asc" ? " ▲" : " ▼") : ""}

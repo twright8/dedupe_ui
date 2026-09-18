@@ -26,10 +26,34 @@ async function request(method, path, body) {
   const res = await fetch(apiUrl(path), opts);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`${method} ${path} ${res.status}: ${text}`);
+    // The message stays as it always was, so existing alert() call sites read
+    // the same. The parsed body rides along for callers that want the
+    // structured detail — config validation is the one that does.
+    const err = new Error(`${method} ${path} ${res.status}: ${text}`);
+    err.status = res.status;
+    try {
+      err.body = JSON.parse(text);
+    } catch {
+      err.body = null;
+    }
+    throw err;
   }
   if (res.status === 204) return null;
   return res.json();
+}
+
+/* Validation errors out of a failed save. The backend answers 422 with
+   {"detail": {"errors": [{path, message}]}}; older shapes and plain network
+   failures give back an empty list, so callers can fall back to alert(). */
+export function validationErrors(err) {
+  const body = err?.body;
+  const candidates = [body?.detail?.errors, body?.errors, body?.detail];
+  for (const list of candidates) {
+    if (Array.isArray(list) && list.every((e) => e && typeof e === "object")) {
+      return list.filter((e) => e.path || e.message);
+    }
+  }
+  return [];
 }
 
 function get(path) {
@@ -85,6 +109,16 @@ export const api = {
   getRunRecords(id, params) {
     const qs = params ? "?" + new URLSearchParams(params).toString() : "";
     return get(`/api/runs/${id}/records${qs}`);
+  },
+  getRunExactGroups(id, params) {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return get(`/api/runs/${id}/exact-groups${qs}`);
+  },
+  getRunExactGroup(id, groupId) {
+    return get(`/api/runs/${id}/exact-groups/${encodeURIComponent(groupId)}`);
+  },
+  getRunExactEval(id) {
+    return get(`/api/runs/${id}/exact-eval`);
   },
   getRunMatches(id, params) {
     const qs = params ? "?" + new URLSearchParams(params).toString() : "";
@@ -203,11 +237,31 @@ export const api = {
   saveConfig(data) {
     return post("/api/config", data);
   },
-  addJurisdictions(data) {
-    return post("/api/config/jurisdictions", data);
+  validateConfig(data) {
+    return post("/api/config/validate", data);
   },
-  testRules(data) {
-    return post("/api/config/test-rules", data);
+  configFunctions() {
+    return get("/api/config/functions");
+  },
+  configColumns(data) {
+    return post("/api/config/columns", data);
+  },
+  previewCleaning(data) {
+    return post("/api/config/preview-cleaning", data);
+  },
+  previewKeys(data) {
+    return post("/api/config/preview-keys", data);
+  },
+  previewTracks(data) {
+    return post("/api/config/preview-tracks", data);
+  },
+  addLookupRows(table, data) {
+    return post(`/api/config/lookups/${encodeURIComponent(table)}/rows`, data);
+  },
+
+  // --- Pipeline ---
+  pipelineStages() {
+    return get("/api/pipeline/stages");
   },
 
   // --- Shared notes ---

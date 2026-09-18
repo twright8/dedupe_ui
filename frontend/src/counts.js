@@ -12,6 +12,11 @@ export function hasRecordCounts(counts) {
   return !!counts && counts.hasRecords === true;
 }
 
+// Whether the exact-key stage ran and left its numbers behind.
+export function hasExactCounts(counts) {
+  return !!counts && counts.hasExact === true;
+}
+
 // Per-track record count key: "person" -> "recordsPerson".
 export function trackCountKey(trackKey) {
   return "records" + trackKey.charAt(0).toUpperCase() + trackKey.slice(1);

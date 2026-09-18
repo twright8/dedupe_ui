@@ -322,14 +322,15 @@ export default function NewRunScreen() {
     }).catch(() => {});
   }
 
-  // Label library stats
-  const [labelCount, setLabelCount] = useState(null);
+  // The stages this build's pipeline actually has, named by the backend so the
+  // card can never drift from the code that runs.
+  const [stages, setStages] = useState(null);
   useEffect(() => {
-    api.listLabels({ active: 1, per_page: 1 })
-      .then((data) => setLabelCount({ total: data.total || 0 }))
-      .catch(() => setLabelCount(null));
+    api
+      .pipelineStages()
+      .then((data) => setStages(Array.isArray(data) ? data : []))
+      .catch(() => setStages([]));
   }, []);
-  const trueLabels = labelCount?.total || 0;
 
   // Submit
   const [submitting, setSubmitting] = useState(false);
@@ -361,9 +362,9 @@ export default function NewRunScreen() {
         <div>
           <h1 className="page-title">New run</h1>
           <p className="page-sub">
-            Upload {input.label || "the input file"}. The pipeline preprocesses, runs
-            Phase&nbsp;1 (exact) and Phase&nbsp;2 (probabilistic, Splink), then writes
-            CSVs and HTML diagnostics.
+            Upload {input.label || "the input file"}. The run works through the stages listed
+            below, using the config version you pick, and writes its output files to the run
+            folder.
           </p>
         </div>
       </div>
@@ -399,67 +400,25 @@ export default function NewRunScreen() {
               <h3>Pipeline preview</h3>
             </div>
             <div className="card-b">
-              <div className="stages">
-                <div className="stage queued">
-                  <div className="st-num">0</div>
-                  <div className="st-name">Preprocess</div>
-                  <div className="st-meta">
-                    ~40s &middot; normalise names &amp; jurisdictions
-                  </div>
+              {stages === null ? (
+                <p className="muted pulse" style={{ fontSize: 12.5, margin: 0 }}>
+                  Loading stages...
+                </p>
+              ) : stages.length === 0 ? (
+                <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+                  The pipeline stages could not be loaded. The run still works.
+                </p>
+              ) : (
+                <div className="stages">
+                  {stages.map((s, i) => (
+                    <div className="stage queued" key={s.key || i}>
+                      <div className="st-num">{i}</div>
+                      <div className="st-name">{s.label || s.key}</div>
+                      <div className="st-meta">{s.description}</div>
+                    </div>
+                  ))}
                 </div>
-                <div className="stage queued">
-                  <div className="st-num">1</div>
-                  <div className="st-name">Phase 1 &mdash; Exact</div>
-                  <div className="st-meta">~25s &middot; inner join</div>
-                </div>
-                <div className="stage queued">
-                  <div className="st-num">2</div>
-                  <div className="st-name">Phase 2 &mdash; Splink</div>
-                  <div className="st-meta">
-                    {trueLabels > 0
-                      ? `~3m · unsupervised candidate generator (your ${trueLabels} label${trueLabels === 1 ? "" : "s"} train the GBT, not Splink)`
-                      : "~3m · unsupervised candidate generator"}
-                  </div>
-                </div>
-                <div className="stage queued">
-                  <div className="st-num">3</div>
-                  <div className="st-name">Evaluate &amp; Export</div>
-                  <div className="st-meta">
-                    ~40s &middot; CSVs + diagnostics
-                  </div>
-                </div>
-                <div className="stage queued">
-                  <div className="st-num">POST</div>
-                  <div className="st-name">Apply labels</div>
-                  <div className="st-meta">
-                    {trueLabels > 0
-                      ? `${trueLabels} library label${trueLabels === 1 ? "" : "s"} re-applied (resolvable ones)`
-                      : "no labels in library"}
-                  </div>
-                </div>
-              </div>
-              <div
-                style={{
-                  fontSize: 12,
-                  color: "var(--muted)",
-                  marginTop: 12,
-                }}
-              >
-                Estimated runtime:{" "}
-                <span
-                  className="mono"
-                  style={{ color: "var(--ink-2)" }}
-                >
-                  ~ 5 minutes
-                </span>{" "}
-                &middot; output size:{" "}
-                <span
-                  className="mono"
-                  style={{ color: "var(--ink-2)" }}
-                >
-                  ~ 48 MB
-                </span>
-              </div>
+              )}
             </div>
           </div>
         </div>

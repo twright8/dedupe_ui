@@ -11,14 +11,18 @@ from pathlib import Path
 
 import pandas as pd
 
-# Columns every profile's records frame MUST carry. Shared code reads only these
-# by name; all other columns are profile-defined and described by display_columns.
+# Columns every profile's RAW records frame MUST carry (stage 0). Shared code
+# reads only these by name; all other columns are profile-defined and described
+# by display_columns.
 #   record_id          str, unique within a run
-#   track              'person' | 'organisation'
 #   name               str, the display name
 #   review_state       'labelled' | 'unreviewed'
 #   existing_entity_id str or null — the entity ID a previous review already gave
-SHARED_COLUMNS = ("record_id", "track", "name", "review_state", "existing_entity_id")
+# `track` is NOT here: the ruleset decides it, and stage 1 adds it.
+SHARED_COLUMNS = ("record_id", "name", "review_state", "existing_entity_id")
+
+# What the cleaned frame carries on top of the raw one. Stage 1 writes it.
+TRACK_COLUMN = "track"
 
 # Display column types the frontend knows how to render.
 DISPLAY_TYPES = ("text", "number", "money", "year", "list")
@@ -78,6 +82,10 @@ class Profile:
     tracks: list[Track] = field(default_factory=lambda: list(DEFAULT_TRACKS))
     display_columns: list[DisplayColumn] = field(default_factory=list)
     priority_columns: list[str] = field(default_factory=list)
+    # Every column the loader produces, in frame order. A ruleset may read these
+    # and may not overwrite them, so the Config screen needs the list before any
+    # run exists.
+    raw_columns: list[str] = field(default_factory=list)
 
     def load_records(self, input_path: Path) -> tuple[pd.DataFrame, dict]:
         """Read the input file and return (records frame, load stats).
@@ -105,7 +113,10 @@ class Profile:
 def validate_records(records: pd.DataFrame) -> None:
     """Raise if a profile's records frame is missing a shared column or has
     duplicate record_ids. Cheap, and it catches a broken loader at load time
-    rather than three screens later."""
+    rather than three screens later.
+
+    ``track`` is checked only when it is present: stage 0 has none, stage 1 adds it.
+    """
     missing = [c for c in SHARED_COLUMNS if c not in records.columns]
     if missing:
         raise ValueError(
@@ -114,6 +125,7 @@ def validate_records(records: pd.DataFrame) -> None:
     if records["record_id"].duplicated().any():
         duplicated = records.loc[records["record_id"].duplicated(), "record_id"].head(3).tolist()
         raise ValueError(f"record_id must be unique — repeated: {duplicated}")
-    bad_tracks = sorted(set(records["track"].dropna().unique()) - set(TRACK_KEYS))
-    if bad_tracks:
-        raise ValueError(f"track must be one of {TRACK_KEYS} — found: {bad_tracks}")
+    if TRACK_COLUMN in records.columns:
+        bad_tracks = sorted(set(records[TRACK_COLUMN].dropna().unique()) - set(TRACK_KEYS))
+        if bad_tracks:
+            raise ValueError(f"track must be one of {TRACK_KEYS} — found: {bad_tracks}")
