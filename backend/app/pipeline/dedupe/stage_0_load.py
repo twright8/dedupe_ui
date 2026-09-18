@@ -45,9 +45,9 @@ def _place(records, out_path: Path, check_frame=None, check_file=None) -> int:
                 shutil.copyfile(source, out_path)
         if check_file is not None:
             check_file(out_path)
-        import duckdb
+        from app import duckdb_conn
 
-        con = duckdb.connect()
+        con = duckdb_conn.connect(Path(out_path).parent / "duckdb_tmp")
         try:
             return int(con.execute(
                 f"SELECT count(*) FROM read_parquet('{out_path}')"

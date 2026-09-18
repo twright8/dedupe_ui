@@ -10,6 +10,8 @@ from pathlib import Path
 
 import duckdb
 
+from app import duckdb_conn
+
 from app.profiles import get_profile
 from app.services.clusters_reader import (  # the same helpers, one definition
     MAX_EVENTS,
@@ -56,7 +58,7 @@ def _open(run_dir: str):
     records = Path(run_dir) / RECORDS_FILENAME
     if not path.is_file() or not records.is_file():
         raise EntitiesNotFound(str(path))
-    return duckdb.connect(), path, records
+    return duckdb_conn.connect(), path, records
 
 
 def _check(value, allowed, label):

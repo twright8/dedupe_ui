@@ -27,6 +27,8 @@ import time
 from pathlib import Path
 
 import duckdb
+
+from app import duckdb_conn
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -240,7 +242,7 @@ def _check_ids(path: Path) -> None:
 
     Done in DuckDB rather than by holding 16 million ids in a Python set.
     """
-    con = duckdb.connect()
+    con = duckdb_conn.connect(Path(path).parent / "duckdb_tmp")
     try:
         row = con.execute(
             f"SELECT record_id, count(*) c FROM '{path}' "

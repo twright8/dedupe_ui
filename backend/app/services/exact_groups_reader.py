@@ -18,6 +18,8 @@ from pathlib import Path
 
 import duckdb
 
+from app import duckdb_conn
+
 from app.profiles import get_profile
 
 GROUPS_FILENAME = "exact_groups.parquet"
@@ -181,7 +183,7 @@ def _open(run_dir: str):
     records = records_path(run_dir)
     if not groups.is_file() or not records.is_file():
         raise ExactGroupsNotFound(str(groups))
-    con = duckdb.connect()
+    con = duckdb_conn.connect()
     return con, groups, records
 
 

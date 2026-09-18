@@ -34,6 +34,8 @@ import zipfile
 from pathlib import Path
 
 import duckdb
+
+from app import duckdb_conn
 import pandas as pd
 
 from app.profiles.base import (
@@ -304,10 +306,22 @@ def _pump(path: Path, fifo: str, limit: int | None, box: dict) -> None:
                     pass
 
 
-def _connect() -> duckdb.DuckDBPyConnection:
+def _connect(temp_dir: Path | None = None) -> duckdb.DuckDBPyConnection:
+    """The loader's own connection: a tighter memory cap, and a bounded spill.
+
+    The memory limit here is deliberately lower than the shared default — the
+    loader streams a 13 GB JSON member and does not need the scorer's headroom.
+    The spill cap and the temp directory come from the shared helper, so this
+    connection cannot fill the disk either.
+    """
     con = duckdb.connect()
     con.execute(f"SET threads TO {DUCKDB_THREADS}")
     con.execute(f"SET memory_limit='{DUCKDB_MEMORY_LIMIT}'")
+    if temp_dir is not None:
+        temp_dir = Path(temp_dir)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        con.execute(f"SET temp_directory='{temp_dir}'")
+    con.execute(f"SET max_temp_directory_size='{duckdb_conn.max_temp()}'")
     # The order of 16 million records carries no meaning, and preserving it
     # costs the whole frame in memory.
     con.execute("SET preserve_insertion_order=false")
@@ -345,7 +359,7 @@ def extract_to_parquet(input_path: Path, out_path: Path,
         )
         pump.start()
 
-        con = _connect()
+        con = _connect(Path(out_path).parent / "duckdb_tmp")
         try:
             # One scan: a FIFO can only be read once, so the counts and the
             # parquet both come from this table.
@@ -557,7 +571,7 @@ class PscProfile(Profile):
             source, _ = self.load_records(input_path, options)
         out = Path(source).parent / "events.parquet"
         columns = ", ".join(["record_id"] + [key for key, _, _ in EVENT_COLUMNS])
-        con = _connect()
+        con = _connect(out.parent / "duckdb_tmp")
         try:
             con.execute(
                 f"COPY (SELECT {columns} FROM read_parquet('{source}')) "

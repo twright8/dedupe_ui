@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from app import duckdb_conn
 from app.pipeline.dedupe import label_overlay
 from app.pipeline.dedupe import units as units_module
 from app.pipeline.dedupe import score_eval
@@ -131,44 +132,25 @@ def _phase(label: str, progress_callback=None):
 
 
 def memory_limit() -> str:
-    return os.environ.get("SPLINK_MEMORY_LIMIT", DEFAULT_MEMORY_LIMIT)
+    return duckdb_conn.memory_limit()
 
 
 def _db_api(temp_dir: Path | None = None):
-    """A DuckDB backend with the run's memory cap already on it."""
+    """A DuckDB backend carrying the run's memory *and* spill caps.
+
+    Splink opens its own connection, so the limits go on after the fact rather
+    than at open time. The spill cap matters most here: predict and EM are where
+    this pipeline makes enough intermediate data to fill a disk.
+    """
     from splink import DuckDBAPI
 
     api = DuckDBAPI()
-    api._con.execute(f"SET memory_limit='{memory_limit()}'")
-    if temp_dir is not None:
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        api._con.execute(f"SET temp_directory='{temp_dir}'")
+    duckdb_conn.configure(api._con, temp_dir)
     return api
 
 
-def clear_duckdb_tmp(temp_dir: Path) -> int:
-    """Delete spill files left behind by an earlier run. Returns bytes freed.
-
-    DuckDB writes its overflow into ``temp_directory`` and removes it on a clean
-    shutdown — but not when the process is killed. A PSC re-score that was
-    stopped by a timeout left 53 GB of ``duckdb_temp_storage_*.tmp`` behind and
-    filled the disk, which then blocked every later run. This runs before the
-    stage opens its own connection, when nothing can be holding those files.
-
-    Only DuckDB's own spill files are touched, by name, and never the run's
-    outputs.
-    """
-    freed = 0
-    if not temp_dir.is_dir():
-        return freed
-    for path in temp_dir.glob("duckdb_temp_storage_*.tmp"):
-        try:
-            size = path.stat().st_size
-            path.unlink()
-            freed += size
-        except OSError:
-            logger.debug("Could not remove stale spill file %s", path, exc_info=True)
-    return freed
+#: Kept as a name of its own because the stage calls it before opening anything.
+clear_duckdb_tmp = duckdb_conn.clear_spill
 
 
 # ---------------------------------------------------------------------------
@@ -984,7 +966,8 @@ def run_stage_3_score(
     events = pd.read_parquet(events_path) if events_path.is_file() else None
 
     with _phase(f"Building units from {len(records):,} records", progress_callback):
-        units, members = units_module.build_units(records, groups, events)
+        units, members = units_module.build_units(
+            records, groups, events, temp_dir=run_dir / "duckdb_tmp")
         units.to_parquet(run_dir / units_module.UNITS_FILENAME, index=False)
         members.to_parquet(run_dir / units_module.UNIT_MEMBERS_FILENAME, index=False)
         write_scored_units(run_dir, units)

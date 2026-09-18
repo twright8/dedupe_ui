@@ -19,7 +19,7 @@ import pandas as pd
 
 from app.pipeline.dedupe import exact_overlay
 from app.pipeline.dedupe.stage_1_clean import RECORDS_FILENAME, load_ruleset
-from app.rules import keys, keys_eval
+from app.rules import engine, keys, keys_eval
 
 EXACT_GROUPS_FILENAME = "exact_groups.parquet"
 EXACT_EVAL_FILENAME = "exact_eval.json"
@@ -33,6 +33,58 @@ def _step(label, progress_callback=None):
     print(msg, flush=True)
     if progress_callback:
         progress_callback("log", {"message": label})
+
+
+#: Columns the stage needs whatever the ruleset says: identity, the track the
+#: keys are grouped by, and the imported id the evaluation reports against.
+ALWAYS_NEEDED = ("record_id", "track", keys_eval.LABEL_COLUMN)
+
+
+def required_columns(ruleset: dict) -> list[str]:
+    """Every column stage 2 reads, and nothing else.
+
+    A match key touches four kinds of column and no others: the key's own
+    columns, its guards (``require_any_equal`` and ``max_distinct``), the
+    columns its ``when`` conditions test, and the three in ``ALWAYS_NEEDED``.
+    Everything else in a record — the whole address, the natures of control,
+    every raw field — is carried to stage 3 untouched and never read here.
+
+    Reading only these is what makes the stage affordable at 16 million records:
+    the cleaned PSC frame is 58 columns wide and this asks for about a dozen.
+
+    ``keys.referenced_columns`` already knows the first two kinds, and it is the
+    same function the engine normalises from, so the two cannot drift apart.
+    """
+    wanted: set[str] = set(ALWAYS_NEEDED)
+    for columns in keys.referenced_columns(ruleset).values():
+        wanted.update(columns)
+    # A key may be conditional on a column no key groups by.
+    for key in engine.match_keys(ruleset):
+        for condition in (key.get("when") or []):
+            column = condition.get("column") if isinstance(condition, dict) else None
+            if isinstance(column, str):
+                wanted.add(column)
+    return sorted(wanted)
+
+
+def _columns_present(path, ruleset: dict) -> list[str]:
+    """The projection, narrowed to the columns the file actually has.
+
+    A ruleset may legally name a column the data does not carry — a key written
+    for one profile's shape, or a cleaning step that produced nothing. The key
+    engine has always treated that as "this key holds for nobody" rather than an
+    error, and reading the whole frame hid the difference. Asking Parquet for a
+    column that is not there is a hard failure, so the intersection has to
+    happen here, not in the engine.
+    """
+    import pyarrow.parquet as pq
+
+    wanted = required_columns(ruleset)
+    try:
+        available = set(pq.ParquetFile(path).schema.names)
+    except Exception:  # unreadable schema: let the normal read raise instead
+        return None
+    return [column for column in wanted if column in available]
 
 
 def build_report(
@@ -133,7 +185,9 @@ def run_stage_2_exact(
         progress_callback("stage_start", {"stage": STAGE, "name": STAGE_NAME})
 
     ruleset = load_ruleset(config_dir)
-    records = pd.read_parquet(run_dir / RECORDS_FILENAME)
+    records = pd.read_parquet(run_dir / RECORDS_FILENAME,
+                              columns=_columns_present(run_dir / RECORDS_FILENAME,
+                                                       ruleset))
 
     _step(
         f"Applying {len(keys.engine.match_keys(ruleset))} match key(s) to "

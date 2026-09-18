@@ -110,8 +110,10 @@ donations was checked and is clean.
 
 ## 4. What remains
 
-*(All of this is still open, and section 7 says why none of it could be started:
-the disk is full. Section 6's stage-3 defect is the one item now closed.)*
+*(Updated. Closed: the stage-3 defect (6), the run lock (8), the sample re-run
+(10), bounded spill (11), stage-2 projection (12). Section 7's disk blocker is
+cleared. **Still open: B4, B5, B6, C, and — new and more important than any of
+them — the date-of-birth weight in section 10.**)*
 
 - **B5, the rest.** Full-frame `pd.read_parquet` in `stage_4_cluster` (units,
   members, pairs, groups), `stage_5_entities` (clusters, members, records),
@@ -313,6 +315,179 @@ with about 10 GB of RAM.
 
 Tested with a real second process in `tests/test_run_lock.py` (9 tests) — a
 thread would prove nothing, since the bug is between processes.
+
+## 10. A: the sample re-run (done — and it says the job is not finished)
+
+Sample, 500,000 records, `CLEAN_BATCH_ROWS=100000`, `SPLINK_MEMORY_LIMIT=6GB`,
+`DUCKDB_MAX_TEMP=20GB`. **Stage 3 finished in 128.5 s.** It previously ran for
+over forty minutes and was killed. Disk went 53.8 → 53.3 GB across the whole run.
+
+| stage | time | peak RSS |
+|---|---|---|
+| 0 load | 13.8 s | 1,438 MB |
+| 1 clean | 20.5 s | 1,351 MB |
+| 2 exact | 5.2 s | 1,781 MB |
+| 3 score | 128.5 s | **8,589 MB** |
+| 4 cluster | 40.2 s | 5,742 MB |
+| 5 entities | 29.6 s | 3,051 MB |
+
+Stage 3's 8.6 GB peak is Python-side (pandas), not DuckDB's 6 GB cap, and it is
+over the server's budget. Worth measuring again before anything runs there.
+
+Counts: 499,971 records (29 super-secure dropped); 461,776 person / 38,195
+organisation; 481,364 units (449,397 / 31,967); 1,141,817 pairs scored;
+**`untrained_comparisons` = 0**; 394,436 clusters (394,366 ok, 9 too_large, 61
+weak_link, 0 conflict / mixed_ids / cross_track); **399,915 entities proposed**.
+
+Buckets — person: 249,480 accept / 242,927 review / 580,566 reject.
+Organisation: 68,307 accept / 375 review / 162 reject.
+
+Routes: person 2,409,101 of a 20M budget (pb1 306,064; pb2 166,803; pb3 567,895;
+pb4 201,820; pb5 1,164,196; pb6 2,323), training em1 1,007,328 and **em2 165,464**.
+Organisation 235,076 of 5M; training 72,642 and 65,321.
+
+### The person weights, and why this is not finished
+
+| comparison | top level | bits | disagreement | bits |
+|---|---|---|---|---|
+| postcode_clean | exact full | **+12.82** | all other | **−0.11** |
+| surname_clean | exact | +10.27 | all other | −1.14 |
+| postcode_clean | exact district | +8.80 | | |
+| forename_canon | exact | +7.10 | all other | −1.40 |
+| middle_clean | exact | +4.68 | all other | −0.28 |
+| dob_year_clean | exact | +3.02 | all other | **−0.23** |
+| dob_month_clean | exact | +1.37 | all other | −0.23 |
+
+**The date of birth is trained now and still counts for nothing.** The old fault
+was `m = None` — dead. The new fault is harder to spot, because every guard
+passes: `untrainedComparisons` is 0, the weights are real numbers, the run
+completes. But a birth-year disagreement costs **−0.23 bits** against a postcode
+worth +12.82 and a surname worth +10.27, so it cannot move anything.
+
+Read the accepted pairs and it is obvious:
+
+```
+p=1.000000  SABELO SHONGWE   1958-07  PO8 0BT
+            SABELO SHONGWE   1995-07  PO8 0BT     <- 37 years apart
+p=1.000000  OIVIND STENERSEN 1946-10  DA12 5EH
+            OIVIND STENERSEN 1936-10  DA12 5EH    <- 10 years apart
+p=1.000000  ELIYAU MAGZIMOF  1985-10  LS2 9PS
+            ELIYAU MAGZIMOF  1995-10  LS2 9PS     <- 10 years apart
+```
+
+**This is the same 37-year-apart failure section 3 reports as fixed.** Fixing the
+training rule made the comparison estimable; it did not make it matter. Same name
+plus same postcode is about +30 bits, and two −0.23s cannot touch it.
+
+**Postcode is still out of proportion**, as suspected: exact postcode beats exact
+surname by 2.5 bits, and postcode *district alone* (+8.80) beats exact forename
+(+7.10). deduping's D7 warned about precisely this.
+
+**Why the penalty is so small.** `m` for "all other" on `dob_year_clean` is
+**0.835** — EM believes 83.5% of true matches disagree on birth year, which is
+absurd for person deduplication. EM1 blocks on both name sounds, so its "match"
+class is full of *different people who share a name*, and their DOB disagreement
+is learned as normal-for-a-match. The estimate is contaminated rather than
+wrong-by-a-bug.
+
+**Smallest change I would make:** give `dob_year_clean` a graded ladder instead
+of exact/all-other, so a large gap learns its own strong penalty rather than
+being averaged in with off-by-one typos:
+
+```
+exact | within 1 year | within 2 years | all other (large gap)
+```
+
+That is deduping's `dob_joint`, which `_lost_in_translation` records as dropped
+in translation. It is one comparison definition, and it is the targeted fix: the
+present binary level cannot express "37 years apart" at all. Capping postcode at
+district would help too, but it treats the symptom.
+
+**I would not ship the person track until this is settled.** The organisation
+track looks sound (regnum and name agree on the accepts), with two things to
+note: `INHOCO FORMATIONS` / regnum `02598228` fills the top accepts, which is a
+formation agent the placeholder list should be catching (B6/C); and `CORBALLY`
+and `ST FRANCIS` — two different names — are accepted at 1.0 on a shared
+registration number `01115746`.
+
+## 11. Bounded DuckDB spill
+
+Every connection the pipeline opens now carries three limits, from one helper
+(`app/duckdb_conn.py`): `memory_limit`, `temp_directory` inside the run folder,
+and **`max_temp_directory_size`**. A runaway query fails in seconds with
+DuckDB's own error instead of filling the disk.
+
+> **For the deploy kit: the environment variable is `DUCKDB_MAX_TEMP`**, default
+> `20GB`. The server has 28 GB free, so give it something smaller — `10GB`
+> leaves room for both instances and for the OS.
+
+Applied at: Splink's own backend (`stage_3_score._db_api`), the PSC loader
+(which keeps its tighter `PSC_DUCKDB_MEMORY`), stage 0's row count, stage 1's
+uniqueness check, `build_units`' modal vote, `validate_records_file`, and the
+five reader services. `clear_spill()` still removes what a killed run left.
+
+## 12. B3: stage 2 now reads a projection (done)
+
+It did not before — `pd.read_parquet(run_dir / RECORDS_FILENAME)` took every
+column of every record. `stage_2_exact.required_columns(ruleset)` now works out
+exactly what the keys touch: their own columns, both guards
+(`require_any_equal`, `max_distinct`), the columns their `when` conditions test,
+plus `record_id`, `track` and `existing_entity_id`. It reuses
+`keys.referenced_columns`, the same function the engine normalises from, so the
+two cannot drift apart.
+
+Measured on the real sample (499,971 records, 63-column frame):
+
+| | before | after |
+|---|---|---|
+| columns read | 63 | **14** |
+| peak RSS | 1,781 MB | **1,084 MB** |
+| time | 5.2 s | 4.5 s |
+
+`exact_groups.parquet` is identical (34,773 rows, `DataFrame.equals` true) and
+`exact_eval.json` is identical. The address block, the natures of control and
+every raw field are carried to stage 3 untouched and never read here.
+
+One trap worth knowing: a ruleset may legally name a column the data does not
+carry, and the key engine has always treated that as "this key holds for
+nobody". Reading the whole frame hid the difference; asking Parquet for a
+missing column is a hard failure. `_columns_present` intersects the projection
+with the file's real schema, which is what keeps the donations recluster tests
+passing. Do not remove it.
+
+**Not yet done:** the 16-million-row tiling the brief asked for. The projection
+is proven correct and its shape is measured; what is missing is the number at
+full scale.
+
+## 13. Still open, in the order I would take them
+
+1. **The date-of-birth weight (section 10).** Bigger than anything below. The
+   person track currently accepts people born 37 years apart at p = 1.0 and
+   every automated guard says the run is fine.
+2. **B4** `build_units` at 16M. Not started. It is the heaviest step of stage 3
+   (about 75 s of the sample's 128 s) and it is where the per-column modal vote
+   lives.
+3. **B5** the remaining full-frame reads and the persisted TF-IDF. Not started —
+   see the note below, the PSC and donations builders disagree about what the
+   corpus even is, so this is a design decision before it is a refactor.
+4. **B6 + C** the full snapshot, the token lists, full-scale pricing and
+   `max_block_size`. Not started.
+
+**A B5 finding worth having before anyone starts it.** The two feature builders
+do not agree on what "corpus" means, and only one of them is right:
+
+- `donations_features._tfidf_cosine` fits over **every unit in the frame**, on
+  purpose and documented — which is why `model_explanation` still reads the
+  whole units file.
+- `psc_features._tfidf_cosine` fits over **only the units named in the pairs it
+  was handed** (`subset`). So the same PSC pair already scores differently
+  depending on how many pairs it was built with, and a one-pair explanation
+  cannot reproduce a scoring run's number today.
+
+Persisting the fitted vocabulary and IDF at scoring time fixes both, but note
+that it is a **behaviour change for PSC** (its numbers will move) and a
+**no-op for donations** (its numbers must not). Whoever does it should assert
+exactly that.
 
 ## 9. One stale test, fixed in passing
 

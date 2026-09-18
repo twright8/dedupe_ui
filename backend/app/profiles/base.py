@@ -412,9 +412,9 @@ def validate_records_file(path) -> None:
     DuckDB does the work, so a 16-million-record parquet is checked by scanning
     two columns rather than by materialising every one of them.
     """
-    import duckdb
+    from app import duckdb_conn
 
-    con = duckdb.connect()
+    con = duckdb_conn.connect(Path(path).parent / "duckdb_tmp")
     try:
         columns = {
             row[0] for row in

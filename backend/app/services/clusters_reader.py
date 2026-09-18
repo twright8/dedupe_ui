@@ -16,6 +16,8 @@ from pathlib import Path
 
 import duckdb
 
+from app import duckdb_conn
+
 from app.profiles import get_profile
 from app.services.records_reader import describe_columns
 
@@ -97,7 +99,7 @@ def _open(run_dir: str):
     units = Path(run_dir) / UNITS_FILENAME
     if not path.is_file() or not units.is_file():
         raise ClustersNotFound(str(path))
-    return duckdb.connect(), path, units
+    return duckdb_conn.connect(), path, units
 
 
 def _priority_columns(unit_columns: list[str]) -> list[str]:
@@ -216,7 +218,7 @@ def attribute_tie_clusters(run_dir: str) -> set:
     path = Path(run_dir) / ENTITIES_FILENAME
     if not path.is_file():
         return set()
-    con = duckdb.connect()
+    con = duckdb_conn.connect()
     try:
         columns = _column_names(con, path)
         basis = [c for c in columns if c.endswith("_entity_basis")]

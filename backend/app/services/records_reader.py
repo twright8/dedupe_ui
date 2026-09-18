@@ -13,6 +13,8 @@ from pathlib import Path
 
 import duckdb
 
+from app import duckdb_conn
+
 from app.profiles import get_profile
 
 RECORDS_FILENAME = "records.parquet"
@@ -139,7 +141,7 @@ def get_records(
     limit = max(1, min(int(limit), MAX_LIMIT))
     offset = max(0, int(offset))
 
-    con = duckdb.connect()
+    con = duckdb_conn.connect()
     try:
         columns = _column_names(con, path)
 

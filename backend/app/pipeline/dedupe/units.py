@@ -15,6 +15,8 @@ Nothing loops over groups. The whole build is a handful of groupbys, so the
 """
 
 import duckdb
+
+from app import duckdb_conn
 import numpy as np
 import pandas as pd
 
@@ -61,7 +63,8 @@ def _quote(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
 
-def representatives(joined: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+def representatives(joined: pd.DataFrame, columns: list[str],
+                    temp_dir=None) -> pd.DataFrame:
     """The representative value of every column, for every unit, in one pass.
 
     The rule (`docs/LINKAGE.md`) is the most frequent non-null value, ties going
@@ -79,7 +82,9 @@ def representatives(joined: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     if not len(joined) or not columns:
         return result
 
-    con = duckdb.connect()
+    # The per-column modal vote is the heaviest thing this module does and
+    # it grows with the record count, so it gets the shared caps too.
+    con = duckdb_conn.connect(temp_dir)
     try:
         con.register("j", joined)
         frames = []
@@ -216,7 +221,8 @@ def _modal(frame: pd.DataFrame, column: str) -> pd.Series:
 
 
 def build_units(
-    records: pd.DataFrame, groups: pd.DataFrame, events: pd.DataFrame | None = None
+    records: pd.DataFrame, groups: pd.DataFrame, events: pd.DataFrame | None = None,
+    temp_dir=None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """``(units, unit_members)`` for *records* grouped by *groups*.
 
@@ -251,7 +257,7 @@ def build_units(
     units.index.name = "unit_id"
     # A unit of one is its own representative — most of a donations run and
     # nearly all of a PSC one — so only the pooled units are voted on.
-    modal = representatives(many, represented) if len(many) else None
+    modal = representatives(many, represented, temp_dir) if len(many) else None
     for column in represented:
         column_values = pd.Series(index=sizes.index, dtype="object")
         if len(lone):

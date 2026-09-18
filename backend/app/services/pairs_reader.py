@@ -18,6 +18,8 @@ from pathlib import Path
 
 import duckdb
 
+from app import duckdb_conn
+
 from app.profiles import get_profile
 from app.services.records_reader import describe_columns
 
@@ -117,7 +119,7 @@ def _open(run_dir: str):
     units = units_path(run_dir)
     if not pairs.is_file() or not units.is_file():
         raise PairsNotFound(str(pairs))
-    return duckdb.connect(), pairs, units
+    return duckdb_conn.connect(), pairs, units
 
 
 # ---------------------------------------------------------------------------
@@ -652,7 +654,7 @@ def unit_summary(run_dir: str, unit_ids: list[str]) -> dict[str, dict]:
     units = units_path(run_dir)
     if not units.is_file():
         raise PairsNotFound(str(units))
-    con = duckdb.connect()
+    con = duckdb_conn.connect()
     try:
         columns = _column_names(con, units)
         name = "CAST(name AS VARCHAR)" if "name" in columns else "CAST(NULL AS VARCHAR)"
@@ -744,7 +746,7 @@ def model_explanation(run_dir: str, left_id: str, right_id: str,
         # One pair and its evidence, fetched by key in DuckDB. Reading the whole
         # pairs and events files to explain a single pair was affordable at
         # 52,000 donations and is not at 16 million PSC records.
-        con = duckdb.connect()
+        con = duckdb_conn.connect()
         try:
             row = con.execute(
                 "SELECT * FROM read_parquet(?) WHERE CAST(unit_id_l AS VARCHAR) = ? "
