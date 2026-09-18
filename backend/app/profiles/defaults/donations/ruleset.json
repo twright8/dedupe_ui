@@ -137,7 +137,7 @@
   },
   "lookups": {
     "nicknames": {
-      "description": "Diminutives and spelling variants that point at one canonical forename. Ported from the deduping engine. Only add a nickname that is unambiguous \u2014 CHRIS and ALEX are deliberately absent because they are gender-ambiguous.",
+      "description": "Diminutives and spelling variants that point at one canonical forename. Ported from the deduping engine. Only add a nickname that is unambiguous — CHRIS and ALEX are deliberately absent because they are gender-ambiguous.",
       "fallback": "passthrough",
       "rows": [
         {
@@ -569,7 +569,7 @@
       },
       {
         "id": "p3",
-        "description": "Drop punctuation, keeping spaces and hyphens. Apostrophes go, so O'Neill, O\u2019Neill and ONeill become one spelling",
+        "description": "Drop punctuation, keeping spaces and hyphens. Apostrophes go, so O'Neill, O’Neill and ONeill become one spelling",
         "op": "strip_punctuation",
         "source": "name_clean",
         "target": "name_clean",
@@ -775,14 +775,34 @@
       "target": "donor_status_std",
       "description": "The donor status corrected from the company number. The Electoral Commission's status is often wrong at source: companies are filed as unincorporated associations and LLPs as companies. Only the five statuses that get confused with each other are overridable, so an incorporated political party stays a party.",
       "default_from": "donor_status",
-      "tracks": ["organisation"],
+      "tracks": [
+        "organisation"
+      ],
       "rules": [
         {
           "id": "d1r1",
           "description": "A company number starting OC, SO or NC belongs to a limited liability partnership",
           "when": [
-            {"column": "company_number_clean", "op": "starts_with", "values": ["OC", "SO", "NC"]},
-            {"column": "donor_status", "op": "in", "values": ["Company", "Limited Liability Partnership", "Unincorporated Association", "Other", "Trust"]}
+            {
+              "column": "company_number_clean",
+              "op": "starts_with",
+              "values": [
+                "OC",
+                "SO",
+                "NC"
+              ]
+            },
+            {
+              "column": "donor_status",
+              "op": "in",
+              "values": [
+                "Company",
+                "Limited Liability Partnership",
+                "Unincorporated Association",
+                "Other",
+                "Trust"
+              ]
+            }
           ],
           "value": "Limited Liability Partnership"
         },
@@ -790,8 +810,25 @@
           "id": "d1r2",
           "description": "A company number starting IP or SP belongs to a registered society, which the Commission calls a friendly society",
           "when": [
-            {"column": "company_number_clean", "op": "starts_with", "values": ["IP", "SP"]},
-            {"column": "donor_status", "op": "in", "values": ["Company", "Limited Liability Partnership", "Unincorporated Association", "Other", "Trust"]}
+            {
+              "column": "company_number_clean",
+              "op": "starts_with",
+              "values": [
+                "IP",
+                "SP"
+              ]
+            },
+            {
+              "column": "donor_status",
+              "op": "in",
+              "values": [
+                "Company",
+                "Limited Liability Partnership",
+                "Unincorporated Association",
+                "Other",
+                "Trust"
+              ]
+            }
           ],
           "value": "Friendly Society"
         },
@@ -799,8 +836,25 @@
           "id": "d1r3",
           "description": "A company number starting SC or NI is a Scottish or Northern Irish company",
           "when": [
-            {"column": "company_number_clean", "op": "starts_with", "values": ["SC", "NI"]},
-            {"column": "donor_status", "op": "in", "values": ["Company", "Limited Liability Partnership", "Unincorporated Association", "Other", "Trust"]}
+            {
+              "column": "company_number_clean",
+              "op": "starts_with",
+              "values": [
+                "SC",
+                "NI"
+              ]
+            },
+            {
+              "column": "donor_status",
+              "op": "in",
+              "values": [
+                "Company",
+                "Limited Liability Partnership",
+                "Unincorporated Association",
+                "Other",
+                "Trust"
+              ]
+            }
           ],
           "value": "Company"
         },
@@ -808,8 +862,22 @@
           "id": "d1r4",
           "description": "A company number that is all digits is an England and Wales company",
           "when": [
-            {"column": "company_number_clean", "op": "matches", "pattern": "^[0-9]"},
-            {"column": "donor_status", "op": "in", "values": ["Company", "Limited Liability Partnership", "Unincorporated Association", "Other", "Trust"]}
+            {
+              "column": "company_number_clean",
+              "op": "matches",
+              "pattern": "^[0-9]"
+            },
+            {
+              "column": "donor_status",
+              "op": "in",
+              "values": [
+                "Company",
+                "Limited Liability Partnership",
+                "Unincorporated Association",
+                "Other",
+                "Trust"
+              ]
+            }
           ],
           "value": "Company"
         },
@@ -817,8 +885,15 @@
           "id": "d1r5",
           "description": "A donor with a company number of any other kind is not a trust",
           "when": [
-            {"column": "donor_status", "op": "equals", "value": "Trust"},
-            {"column": "company_number_clean", "op": "not_null"}
+            {
+              "column": "donor_status",
+              "op": "equals",
+              "value": "Trust"
+            },
+            {
+              "column": "company_number_clean",
+              "op": "not_null"
+            }
           ],
           "value": "Company"
         }
@@ -904,7 +979,7 @@
     {
       "id": "dv2",
       "track": "organisation",
-      "description": "Two different company numbers, both present, are two companies. Review and not reject: a number is mistyped often enough that a human should see the pair. Measured against the September 2026 sheet: it vetoes 293 pairs, 139 of which the run would otherwise have accepted, and it moves score_only organisation precision from 0.965094 to 0.965416 for 0.000054 of recall.",
+      "description": "Two different company numbers are two companies. Send to review, because a number is mistyped often enough that a person should look.",
       "when": [
         {
           "column": "company_number_clean",
@@ -912,7 +987,8 @@
         }
       ],
       "action": "review",
-      "reason": "Company numbers {left} and {right}"
+      "reason": "Company numbers {left} and {right}",
+      "_measured": "Two different company numbers, both present, are two companies. Review and not reject: a number is mistyped often enough that a human should see the pair. Measured against the September 2026 sheet: it vetoes 293 pairs, 139 of which the run would otherwise have accepted, and it moves score_only organisation precision from 0.965094 to 0.965416 for 0.000054 of recall."
     }
   ],
   "_vetoes_measured_and_not_shipped": [

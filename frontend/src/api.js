@@ -311,6 +311,9 @@ export const api = {
   previewDerived(data) {
     return post("/api/config/preview-derived", data);
   },
+  previewVetoes(data) {
+    return post("/api/config/preview-vetoes", data);
+  },
   previewKeys(data) {
     return post("/api/config/preview-keys", data);
   },

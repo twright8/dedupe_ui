@@ -32,17 +32,78 @@ export function BucketTag({ bucket, decidedBy }) {
   }[bucket] || { cls: "", text: bucket || "—" };
   const by = {
     score: "decided by the score",
+    model: "decided by the model",
+    veto: "a rule stopped this pair being accepted",
     import: "accepted because both sides carry the same earlier entity ID",
     human: "decided by a reviewer",
   }[decidedBy];
+  const suffix = { veto: "rule", import: "import", human: "human", model: "model" }[decidedBy];
   return (
     <span className={"tag " + meta.cls} title={by}>
       <span className="dot" />
       {meta.text}
-      {decidedBy && decidedBy !== "score" && (
-        <span style={{ marginLeft: 4, opacity: 0.8 }}>· {decidedBy}</span>
-      )}
+      {suffix && <span style={{ marginLeft: 4, opacity: 0.8 }}>· {suffix}</span>}
     </span>
+  );
+}
+
+/* ------------------------------------------------------------
+   Vetoes. A veto is a rule about the pair that stops the scorer
+   accepting it. The reason is shown wherever it is set, including
+   on a pair the earlier grouping accepted anyway — that is the
+   case a reviewer most needs to see.
+   ------------------------------------------------------------ */
+
+// The short form, for a table cell or a list row.
+export function VetoTag({ pair }) {
+  if (!pair?.vetoed_by && !pair?.veto_reason) return null;
+  return (
+    <div style={{ marginTop: 3 }}>
+      <span className="tag amber" title={pair.veto_reason || undefined}>
+        Stopped by a rule
+      </span>
+      {pair.veto_reason && (
+        <div style={{ fontSize: 11, color: "var(--amber)", whiteSpace: "normal" }}>
+          {pair.veto_reason}
+        </div>
+      )}
+      {pair.veto_conflicts_import && (
+        <div style={{ marginTop: 3 }}>
+          <span
+            className="tag red"
+            title="An earlier grouping accepted a pair a rule says is impossible."
+          >
+            A rule and the earlier grouping disagree
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The long form, above the pair in the diff view.
+export function VetoBanner({ pair }) {
+  if (!pair?.vetoed_by && !pair?.veto_reason) return null;
+  return (
+    <div
+      style={{
+        background: "var(--amber-50)",
+        border: "1px solid var(--amber)",
+        borderRadius: 5,
+        padding: "8px 12px",
+        fontSize: 12.5,
+        lineHeight: 1.55,
+      }}
+    >
+      A rule stopped this pair from being accepted
+      {pair.veto_reason ? ": " + pair.veto_reason : ""}. Your label still overrules it.
+      {pair.veto_conflicts_import && (
+        <div style={{ marginTop: 4, color: "var(--ti-red)" }}>
+          A rule and the earlier grouping disagree. The earlier grouping put these two together and
+          the rule says they cannot be the same thing.
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -23,6 +23,7 @@ import {
   DescriptionInput,
   MoveButtons,
   RowErrors,
+  RowWarnings,
   errorsAtIndex,
   moveItem,
 } from "./shared";
@@ -192,7 +193,14 @@ function SqlBuilder({ sql, onChange, columnOptions, advanced, setAdvanced }) {
 }
 
 /* ---------- the track ---------- */
-export default function LinkageTrack({ track, settings, setSettings, errors, columnOptions }) {
+export default function LinkageTrack({
+  track,
+  settings,
+  setSettings,
+  errors,
+  warnings,
+  columnOptions,
+}) {
   const t = settings.tracks[track] || {
     blocking_rules: [],
     comparisons: [],
@@ -349,9 +357,20 @@ export default function LinkageTrack({ track, settings, setSettings, errors, col
             <tbody>
               {t.comparisons.map((c, i) => {
                 const rowErrors = errorsAtIndex(errors, `${base}.comparisons`, i);
+                // A comparison no training rule lets vary comes back with no
+                // weight at all, which is a warning, not an error.
+                const rowWarnings = errorsAtIndex(warnings, `${base}.comparisons`, i);
                 const spec = comparisonSpec(c.splink_function);
                 return [
-                  <tr key={c.id || i} className={rowErrors.length ? "selected" : ""}>
+                  <tr
+                    key={c.id || i}
+                    className={rowErrors.length ? "selected" : ""}
+                    style={
+                      !rowErrors.length && rowWarnings.length
+                        ? { background: "var(--amber-50)" }
+                        : undefined
+                    }
+                  >
                     <td className="mono muted" style={{ verticalAlign: "top", paddingTop: 14 }}>
                       {i + 1}
                     </td>
@@ -447,6 +466,7 @@ export default function LinkageTrack({ track, settings, setSettings, errors, col
                         </div>
                       )}
 
+                      {!spec?.noTermFrequency && (
                       <label
                         style={{
                           fontSize: 12,
@@ -470,6 +490,7 @@ export default function LinkageTrack({ track, settings, setSettings, errors, col
                         />
                         Rare values count for more (term frequency)
                       </label>
+                      )}
                     </td>
                     <td style={{ verticalAlign: "top", paddingTop: 11 }}>
                       <button
@@ -482,6 +503,7 @@ export default function LinkageTrack({ track, settings, setSettings, errors, col
                     </td>
                   </tr>,
                   <RowErrors key={(c.id || i) + "_err"} errors={rowErrors} colSpan={4} />,
+                  <RowWarnings key={(c.id || i) + "_warn"} warnings={rowWarnings} colSpan={4} />,
                 ];
               })}
             </tbody>

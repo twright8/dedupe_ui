@@ -244,18 +244,25 @@ function RecordKpis({ c }) {
 function BlockingBudgetPanel({ run, navigate }) {
   const detail = run.error_detail || {};
   const rules = Array.isArray(detail.rules) ? detail.rules : [];
+  // Two different sets of rules can blow the budget, and the fix is in a
+  // different box on the tab, so the panel says which.
+  const training = detail.phase === "training";
+  const where = training ? "while pricing the training rules" : "while pricing the scoring rules";
+  const which = training ? "EM training block" : "blocking rule";
 
   return (
     <div className="card" style={{ borderColor: "var(--ti-red-200, #f3c2c2)", marginBottom: 16 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
         <Icons.alert size={16} />
-        <h3 style={{ margin: 0 }}>The blocking rules would have made too many pairs</h3>
+        <h3 style={{ margin: 0 }}>
+          The {training ? "training rules" : "blocking rules"} would have made too many pairs
+        </h3>
       </div>
       <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
-        On the <strong>{detail.track}</strong> track the rules would compare{" "}
+        The run stopped {where}. On the <strong>{detail.track}</strong> track they would compare{" "}
         <span className="mono">{fmtNumber(detail.total)}</span> pairs against a budget of{" "}
-        <span className="mono">{fmtNumber(detail.budget)}</span>, so the run stopped before scoring
-        anything. Tighten the worst rule, or raise that track's pair budget.
+        <span className="mono">{fmtNumber(detail.budget)}</span>, so nothing was scored. Tighten the
+        worst {which}, or raise that track's pair budget.
       </p>
       {rules.length > 0 && (
         <div className="tbl-wrap" style={{ marginBottom: 10 }}>
@@ -297,6 +304,38 @@ function BlockingBudgetPanel({ run, navigate }) {
       )}
       <button className="btn primary" onClick={() => navigate("/config")}>
         <Icons.config size={14} stroke="#fff" /> Open Thresholds &amp; Splink
+      </button>
+    </div>
+  );
+}
+
+// ---------- Untrained comparisons callout ----------
+// Splink cannot learn a comparison whose column every training rule holds equal.
+// The level comes back with no weight and counts for nothing, quietly. That is
+// worth saying on the run, because the fix is in the config.
+function UntrainedComparisonsNote({ count, navigate }) {
+  if (!count) return null;
+  return (
+    <div
+      style={{
+        background: "var(--amber-50)",
+        border: "1px solid var(--amber)",
+        borderRadius: 5,
+        padding: "10px 14px",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        flexWrap: "wrap",
+      }}
+    >
+      <Icons.alert size={15} />
+      <span style={{ fontSize: 13, lineHeight: 1.55 }}>
+        <strong>{fmtNumber(count)}</strong> comparison{count === 1 ? "" : "s"} came back untrained —
+        they are counting for nothing in this run. Every training rule holds that column equal, so
+        the model had no disagreement to learn from.
+      </span>
+      <button className="btn sm" style={{ marginLeft: "auto" }} onClick={() => navigate("/config")}>
+        <Icons.config size={13} /> Open Thresholds &amp; Splink
       </button>
     </div>
   );
@@ -522,8 +561,9 @@ export function decidedBy(counts) {
 
 // ---------- Scoring KPI strip ----------
 // The third row on the summary, once stage 3 has scored the pairs.
-function ScoreKpis({ c, onReview }) {
+function ScoreKpis({ c, onReview, onVetoed }) {
   const disagrees = c.pairsImportDisagrees || 0;
+  const vetoed = c.pairsVetoed || 0;
   return (
     <div className="kpi-grid">
       <div className="kpi">
@@ -577,6 +617,27 @@ function ScoreKpis({ c, onReview }) {
         </div>
         <div className="delta muted">a flag for sorting, never a decision</div>
       </div>
+      {/* Only shown when a rule actually stopped something. An empty card is
+          worse than no card. */}
+      {vetoed > 0 && (
+        <div
+          className="kpi"
+          onClick={onVetoed}
+          style={{ cursor: "pointer" }}
+          title="Open the review queue, filtered to the pairs a rule stopped"
+        >
+          <div className="label">Stopped by rules</div>
+          <div className="value" style={{ color: "var(--amber)" }}>
+            {fmtNumber(vetoed)}
+          </div>
+          <div className="delta muted">
+            {fmtNumber(c.pairsVetoedFromAccept || 0)} would have been accepted
+            {c.vetoConflictsImport
+              ? ` · ${fmtNumber(c.vetoConflictsImport)} the earlier grouping accepted anyway`
+              : ""}
+          </div>
+        </div>
+      )}
       <div className="kpi">
         <div className="label">Pair precision</div>
         <div className="value">
@@ -718,8 +779,9 @@ class PanelErrorBoundary extends Component {
   }
 }
 
-function RunSummary({ run, onReview, onConflicts, onQueue }) {
+function RunSummary({ run, onReview, onVetoed, onConflicts, onQueue }) {
   const c = run.counts;
+  const navigate = useNavigate();
   const [diagData, setDiagData] = useState(null);
   const [labelStats, setLabelStats] = useState(null);
   const [scoreEval, setScoreEval] = useState(null);
@@ -762,9 +824,10 @@ function RunSummary({ run, onReview, onConflicts, onQueue }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       {contradictions > 0 && <ContradictionsPanel runId={run.id} count={contradictions} />}
+      <UntrainedComparisonsNote count={c.untrainedComparisons} navigate={navigate} />
       <RecordKpis c={c} />
       {exact && <ExactKpis c={c} onConflicts={onConflicts} />}
-      {pairs && <ScoreKpis c={c} onReview={onReview} />}
+      {pairs && <ScoreKpis c={c} onReview={onReview} onVetoed={onVetoed} />}
       {entities && <EntityKpis c={c} onQueue={onQueue} />}
       {entities && <VersusEarlierIds scoreEval={scoreEval} />}
       <div className="card">
@@ -893,7 +956,7 @@ function SplinkCharts({ runId, tracks }) {
 }
 
 // ---------- Diagnostics tab ----------
-function RunDiagnostics({ runId }) {
+function RunDiagnostics({ runId, untrained }) {
   const navigate = useNavigate();
   const profile = useProfile();
   const tracks = profile.tracks || [];
@@ -945,6 +1008,8 @@ function RunDiagnostics({ runId }) {
     <div
       style={{ display: "flex", flexDirection: "column", gap: 16 }}
     >
+      <UntrainedComparisonsNote count={untrained} navigate={navigate} />
+
       {/* The review screen draws this distribution properly: every scored pair by
           bucket, the lines, the import split, the model score and a brush. One
           chart, in one place, rather than a second empty one here. */}
@@ -1448,6 +1513,7 @@ export default function RunDetailScreen() {
         <RunSummary
           run={run}
           onReview={() => navigate(`/runs/${id}/review`)}
+          onVetoed={() => navigate(`/runs/${id}/review?vetoed=yes`)}
           onConflicts={() => {
             setExactAgreement("conflict");
             setTab("exact");
@@ -1466,7 +1532,9 @@ export default function RunDetailScreen() {
         )}
         {tab === "entities" && <EntitiesTable runId={id} profile={profile} />}
         {tab === "publish" && <PublishPanel runId={id} run={run} profile={profile} />}
-        {tab === "diagnostics" && <RunDiagnostics runId={id} />}
+        {tab === "diagnostics" && (
+          <RunDiagnostics runId={id} untrained={run.counts?.untrainedComparisons} />
+        )}
         {tab === "files" && <RunFiles runId={id} />}
         {tab === "history" && <RunHistory runId={id} />}
       </PanelErrorBoundary>

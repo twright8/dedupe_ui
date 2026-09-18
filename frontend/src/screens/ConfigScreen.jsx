@@ -23,6 +23,7 @@ import CleaningTab from "./config/CleaningTab";
 import DerivedTab from "./config/DerivedTab";
 import TablesTab from "./config/TablesTab";
 import MatchKeysTab from "./config/MatchKeysTab";
+import VetoesTab from "./config/VetoesTab";
 import ThresholdsTab from "./config/ThresholdsTab";
 import VersionHistoryTab from "./config/VersionHistoryTab";
 import { normalizeLinkage, isLegacyLinkage } from "./config/linkage";
@@ -109,6 +110,21 @@ const TABS = [
         ruleset={ctx.ruleset}
         setRuleset={ctx.setRuleset}
         errors={ctx.errorsFor("keys")}
+        warnings={ctx.warningsFor("keys")}
+        profile={ctx.profile}
+      />
+    ),
+  },
+  {
+    id: "vetoes",
+    lab: "Vetoes",
+    count: (rs) => (rs.vetoes || []).length,
+    render: (ctx) => (
+      <VetoesTab
+        ruleset={ctx.ruleset}
+        setRuleset={ctx.setRuleset}
+        errors={ctx.errorsFor("vetoes")}
+        warnings={ctx.warningsFor("vetoes")}
         profile={ctx.profile}
       />
     ),
@@ -124,6 +140,7 @@ const TABS = [
         ruleset={ctx.ruleset}
         profile={ctx.profile}
         errors={ctx.errorsFor("thresholds")}
+        warnings={ctx.warningsFor("thresholds")}
         converted={ctx.linkageConverted}
       />
     ),
@@ -164,7 +181,10 @@ export default function ConfigScreen() {
   const [dirty, setDirty] = useState(false);
 
   // Validation: live from /api/config/validate, plus whatever a failed save said.
+  // Warnings come back beside the errors. They are legal rules that will not do
+  // what the author meant, so they are shown in amber and never block a save.
   const [liveErrors, setLiveErrors] = useState([]);
+  const [liveWarnings, setLiveWarnings] = useState([]);
   const [saveErrors, setSaveErrors] = useState([]);
   const [saving, setSaving] = useState(false);
 
@@ -235,11 +255,15 @@ export default function ConfigScreen() {
     api
       .validateConfig(settledBody)
       .then((res) => {
-        if (alive) setLiveErrors(Array.isArray(res?.errors) ? res.errors : []);
+        if (!alive) return;
+        setLiveErrors(Array.isArray(res?.errors) ? res.errors : []);
+        setLiveWarnings(Array.isArray(res?.warnings) ? res.warnings : []);
       })
       .catch(() => {
         // A validate call that itself fails must not block editing.
-        if (alive) setLiveErrors([]);
+        if (!alive) return;
+        setLiveErrors([]);
+        setLiveWarnings([]);
       });
     return () => {
       alive = false;
@@ -249,6 +273,7 @@ export default function ConfigScreen() {
   const errors = saveErrors.length
     ? [...saveErrors, ...liveErrors.filter((e) => !saveErrors.some((s) => s.path === e.path))]
     : liveErrors;
+  const warnings = liveWarnings;
 
   function nextVersionLabel() {
     if (!versions.length) return "v1";
@@ -355,10 +380,14 @@ export default function ConfigScreen() {
     currentVersion,
     onRestore: handleRestore,
     errorsFor: (tabId) => errorsForTab(errors, tabId),
+    warningsFor: (tabId) => errorsForTab(warnings, tabId),
   };
 
   const active = TABS.find((t) => t.id === tab) || TABS[0];
   const homeless = errors.filter((e) => !TABS.some((t) => errorsForTab([e], t.id).length));
+  const homelessWarnings = warnings.filter(
+    (w) => !TABS.some((t) => errorsForTab([w], t.id).length)
+  );
 
   return (
     <div className="content">
@@ -404,6 +433,7 @@ export default function ConfigScreen() {
         {TABS.map((t) => {
           const n = t.count ? t.count(ruleset, ctx) : null;
           const bad = errorsForTab(errors, t.id).length;
+          const soft = errorsForTab(warnings, t.id).length;
           return (
             <div key={t.id} className={"tab " + (tab === t.id ? "on" : "")} onClick={() => setTab(t.id)}>
               {t.lab}{" "}
@@ -417,12 +447,21 @@ export default function ConfigScreen() {
                   {bad}
                 </span>
               )}
+              {soft > 0 && (
+                <span
+                  className="tag amber"
+                  style={{ marginLeft: 6 }}
+                  title={`${soft} warning${soft === 1 ? "" : "s"}`}
+                >
+                  {soft}
+                </span>
+              )}
             </div>
           );
         })}
       </div>
 
-      {/* Errors from a section no tab owns yet — vetoes, which arrive with scoring. */}
+      {/* Anything from a section no tab owns, so a message is never swallowed. */}
       {homeless.length > 0 && (
         <div
           style={{
@@ -441,6 +480,29 @@ export default function ConfigScreen() {
                 {e.path}
               </span>
               {e.message}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {homelessWarnings.length > 0 && (
+        <div
+          style={{
+            background: "var(--amber-50)",
+            border: "1px solid var(--amber)",
+            borderRadius: 5,
+            padding: "8px 12px",
+            fontSize: 12.5,
+            marginBottom: 16,
+            lineHeight: 1.5,
+          }}
+        >
+          {homelessWarnings.map((w, i) => (
+            <div key={i}>
+              <span className="mono" style={{ marginRight: 6 }}>
+                {w.path}
+              </span>
+              {w.message}
             </div>
           ))}
         </div>

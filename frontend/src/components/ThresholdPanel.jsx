@@ -427,6 +427,14 @@ function ScoreEvalStrip({ scoreEval, earlier }) {
       help: "Without the pairs the earlier labels accepted. The honest number for tuning.",
     },
     {
+      // Only worth a row once a rule has actually stopped something. With no
+      // vetoes in the ruleset this line repeats the one above it exactly.
+      key: "without_vetoes",
+      label: "The scorer on its own, before the rules",
+      value: scoreEval.vetoes?.vetoed > 0 ? scoreEval.without_vetoes?.score_only : null,
+      help: "The same again with every veto rule taken out. The gap between these two lines is what the rules cost in recall and bought in precision.",
+    },
+    {
       key: "splink_only",
       label: "The Splink score on its own",
       value: scoreEval.splink_only,

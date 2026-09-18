@@ -16,7 +16,7 @@ import { api } from "../api";
 import { Icons } from "../components/Icons";
 import { ProbBar, fmtProb, fmtNumber } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
-import { DiffHero, BucketTag, entityIds } from "../components/DiffHero";
+import { DiffHero, BucketTag, VetoTag, VetoBanner, entityIds } from "../components/DiffHero";
 import { PairExplain } from "../components/PairExplain";
 import { PairEvidence } from "../components/PairEvidence";
 import { ModelExplain } from "../components/ModelExplain";
@@ -73,11 +73,20 @@ export default function ReviewScreen() {
   const [committing, setCommitting] = useState(false);
 
   // Filters — every one of these is a query parameter.
-  const [bucket, setBucket] = useState("review");
+  // A link that asks for the vetoed pairs wants all of them, not only the ones
+  // already sitting in the review bucket.
+  const [bucket, setBucket] = useState(() =>
+    searchParams.get("vetoed") === "yes" ? "all" : "review"
+  );
   const [track, setTrack] = useState("all");
   const [decidedBy, setDecidedBy] = useState("all");
   const [importFilter, setImportFilter] = useState("all");
   const [labelled, setLabelled] = useState("all");
+  // Every pair a veto rule hit. Wider than decided_by=veto: a vetoed pair the
+  // earlier grouping accepted reads "import" and is still vetoed.
+  const [vetoed, setVetoed] = useState(() =>
+    searchParams.get("vetoed") === "yes" ? "yes" : "all"
+  );
   const [held, setHeld] = useState("hide");
   const [query, setQuery] = useState(() => searchParams.get("search") || "");
   const [q, setQ] = useState(() => searchParams.get("search") || "");
@@ -153,12 +162,13 @@ export default function ReviewScreen() {
     if (decidedBy !== "all") p.decided_by = decidedBy;
     if (importFilter !== "all") p.import = importFilter;
     if (labelled !== "all") p.labelled = labelled;
+    if (vetoed !== "all") p.vetoed = vetoed;
     if (held !== "both") p.held = held;
     if (q) p.q = q;
     if (brushLo != null) p[brushOnModel ? "min_gbt" : "min_score"] = brushLo;
     if (brushHi != null) p[brushOnModel ? "max_gbt" : "max_score"] = brushHi;
     return p;
-  }, [page, sort, order, bucket, track, decidedBy, importFilter, labelled, held, q, brushLo, brushHi, brushOnModel]);
+  }, [page, sort, order, bucket, track, decidedBy, importFilter, labelled, vetoed, held, q, brushLo, brushHi, brushOnModel]);
 
   useEffect(() => {
     if (!runId) return;
@@ -321,10 +331,11 @@ export default function ReviewScreen() {
     if (track !== "all") parts.push(`track: ${tracks.find((t) => t.key === track)?.label || track}`);
     if (decidedBy !== "all") parts.push(`decided by: ${decidedBy}`);
     if (importFilter !== "all") parts.push(`earlier labels: ${importFilter}`);
+    if (vetoed === "yes") parts.push("stopped by a rule");
     if (held !== "both") parts.push(held === "hide" ? "held groups hidden" : "held groups only");
     if (q) parts.push(`search: "${q}"`);
     return parts;
-  }, [bucket, brushLo, brushHi, brushOnModel, track, decidedBy, importFilter, held, q, tracks]);
+  }, [bucket, brushLo, brushHi, brushOnModel, track, decidedBy, importFilter, vetoed, held, q, tracks]);
 
   const stageSlice = useCallback(
     (verdict) => {
@@ -684,16 +695,22 @@ export default function ReviewScreen() {
 
         <div className="seg" title="What put this pair in its bucket">
           <button
-            className={decidedBy === "all" ? "on" : ""}
-            onClick={() => resetPage(setDecidedBy, "all")}
+            className={decidedBy === "all" && vetoed === "all" ? "on" : ""}
+            onClick={() => {
+              resetPage(setDecidedBy, "all");
+              setVetoed("all");
+            }}
           >
             Any decision
           </button>
           {DECIDED_BY.filter((d) => d.id !== "import" || showEarlier).map((d) => (
             <button
               key={d.id}
-              className={decidedBy === d.id ? "on" : ""}
-              onClick={() => resetPage(setDecidedBy, d.id)}
+              className={decidedBy === d.id && vetoed === "all" ? "on" : ""}
+              onClick={() => {
+                resetPage(setDecidedBy, d.id);
+                setVetoed("all");
+              }}
               title={d.help}
             >
               {d.lab}
@@ -702,6 +719,23 @@ export default function ReviewScreen() {
               </span>
             </button>
           ))}
+          {/* Every pair a rule hit, not only the ones a rule decided. A pair the
+              earlier grouping accepted anyway is still stopped by the rule. */}
+          {counts.vetoed > 0 && (
+            <button
+              className={vetoed === "yes" ? "on" : ""}
+              onClick={() => {
+                resetPage(setDecidedBy, "all");
+                setVetoed(vetoed === "yes" ? "all" : "yes");
+              }}
+              title="A veto rule hit this pair, so the run will not accept it on the score alone."
+            >
+              Stopped by a rule
+              <span className="muted" style={{ fontSize: 11 }}>
+                &middot; {fmtNumber(counts.vetoed)}
+              </span>
+            </button>
+          )}
         </div>
 
         {showEarlier && (
@@ -746,6 +780,13 @@ export default function ReviewScreen() {
           ))}
         </div>
       </div>
+
+      {vetoed === "yes" && counts.veto_conflicts_import > 0 && showEarlier && (
+        <p style={{ fontSize: 11.5, margin: "0 0 12px", color: "var(--amber)" }}>
+          {fmtNumber(counts.veto_conflicts_import)} of these were put together by the earlier
+          grouping anyway. A rule and the earlier grouping disagree about them.
+        </p>
+      )}
 
       {held === "hide" && (
         <p className="muted" style={{ fontSize: 11.5, margin: "0 0 12px" }}>
@@ -936,6 +977,7 @@ function ReviewTable({
                   </td>
                   <td style={{ verticalAlign: "top", whiteSpace: "normal" }}>
                     <BucketTag bucket={m.bucket} decidedBy={m.decided_by} />
+                    <VetoTag pair={m} />
                     {m.import_disagrees && (
                       <div style={{ marginTop: 3 }}>
                         <span className="tag amber" title="The two sides carry different earlier entity IDs">
@@ -1264,6 +1306,7 @@ function ReviewDiff({
       {/* The pair */}
       <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
         <DiffHero pair={pair} high={threshold} review={reviewLow} />
+        <VetoBanner pair={pair} />
         <FocusStrip
           pair={pair}
           profile={profile}

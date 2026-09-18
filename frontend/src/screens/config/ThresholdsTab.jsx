@@ -14,7 +14,13 @@ import { Icons } from "../../components/Icons";
 import { fmtNumber } from "../../components/ProbBar";
 import LinkageTrack from "./LinkageTrack";
 import { DEFAULT_EM_ITERATIONS, orderedThresholds } from "./linkage";
-import { SectionErrors, useColumns, allColumnNames, errorsOnSection } from "./shared";
+import {
+  SectionErrors,
+  SectionWarnings,
+  useColumns,
+  allColumnNames,
+  errorsOnSection,
+} from "./shared";
 
 function countBandsFromHistogram(histogram, high, review) {
   const hist = Array.isArray(histogram) ? histogram : [];
@@ -60,7 +66,15 @@ function ThresholdSlider({ label, value, min, max, onChange, help, colour }) {
   );
 }
 
-export default function ThresholdsTab({ settings, setSettings, ruleset, profile, errors, converted }) {
+export default function ThresholdsTab({
+  settings,
+  setSettings,
+  ruleset,
+  profile,
+  errors,
+  warnings,
+  converted,
+}) {
   const tracks = profile.tracks || [];
   const [track, setTrack] = useState(tracks[0]?.key || "person");
   const cols = useColumns(ruleset, track);
@@ -81,6 +95,15 @@ export default function ThresholdsTab({ settings, setSettings, ruleset, profile,
   const trackErrorCount = (key) =>
     (errors || []).filter((e) => String(e.path || "").startsWith(`linkage_settings.tracks.${key}`))
       .length;
+  // Warnings are counted the same way and shown in amber. They never block a
+  // save: the run works, it just does less than the author thinks.
+  const topWarnings = (warnings || []).filter(
+    (w) => !String(w.path || "").startsWith("linkage_settings.tracks")
+  );
+  const trackWarningCount = (key) =>
+    (warnings || []).filter((w) =>
+      String(w.path || "").startsWith(`linkage_settings.tracks.${key}`)
+    ).length;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -102,6 +125,7 @@ export default function ThresholdsTab({ settings, setSettings, ruleset, profile,
       )}
 
       <SectionErrors errors={errorsOnSection(topErrors, "linkage_settings")} />
+      <SectionWarnings warnings={errorsOnSection(topWarnings, "linkage_settings")} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16 }}>
         <div className="card" style={{ minWidth: 0 }}>
@@ -210,6 +234,7 @@ export default function ThresholdsTab({ settings, setSettings, ruleset, profile,
         <div className="seg" title="Which track these rules score">
           {tracks.map((t) => {
             const bad = trackErrorCount(t.key);
+            const soft = trackWarningCount(t.key);
             return (
               <button
                 key={t.key}
@@ -223,6 +248,11 @@ export default function ThresholdsTab({ settings, setSettings, ruleset, profile,
                 {bad > 0 && (
                   <span className="tag red" style={{ marginLeft: 4 }}>
                     {bad}
+                  </span>
+                )}
+                {soft > 0 && (
+                  <span className="tag amber" style={{ marginLeft: 4 }}>
+                    {soft}
                   </span>
                 )}
               </button>
@@ -241,6 +271,7 @@ export default function ThresholdsTab({ settings, setSettings, ruleset, profile,
         settings={settings}
         setSettings={setSettings}
         errors={errors}
+        warnings={warnings}
         columnOptions={columnOptions}
       />
     </div>

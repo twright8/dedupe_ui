@@ -1007,10 +1007,22 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
                 <span className="mono" style={{ fontWeight: 600, minWidth: 44 }}>
                   {fmtProb(e.match_probability)}
                 </span>
-                <span className="mono muted">
+                {/* A rule stopped this pair, so it joins nothing however high
+                    the score reads. Struck through, with the reason beside it. */}
+                <span
+                  className="mono muted"
+                  style={e.decided_by === "veto" ? { textDecoration: "line-through" } : undefined}
+                >
                   {e.unit_id_l} &harr; {e.unit_id_r}
                 </span>
-                {e.source ? (
+                {e.decided_by === "veto" ? (
+                  <span
+                    className="tag amber"
+                    title={e.veto_reason || "A rule says these two cannot be the same thing."}
+                  >
+                    Stopped by a rule{e.veto_reason ? ": " + e.veto_reason : ""}
+                  </span>
+                ) : e.source ? (
                   <span
                     className={
                       "tag " +

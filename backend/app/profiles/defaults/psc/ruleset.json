@@ -900,18 +900,54 @@
       "description": "Roman numerals as digits, so FUND II and FUND 2 carry the same suffix. Passthrough, because a suffix that is already a number stays one.",
       "fallback": "passthrough",
       "rows": [
-        { "raw": "I", "canonical": "1" },
-        { "raw": "II", "canonical": "2" },
-        { "raw": "III", "canonical": "3" },
-        { "raw": "IV", "canonical": "4" },
-        { "raw": "V", "canonical": "5" },
-        { "raw": "VI", "canonical": "6" },
-        { "raw": "VII", "canonical": "7" },
-        { "raw": "VIII", "canonical": "8" },
-        { "raw": "IX", "canonical": "9" },
-        { "raw": "X", "canonical": "10" },
-        { "raw": "XI", "canonical": "11" },
-        { "raw": "XII", "canonical": "12" }
+        {
+          "raw": "I",
+          "canonical": "1"
+        },
+        {
+          "raw": "II",
+          "canonical": "2"
+        },
+        {
+          "raw": "III",
+          "canonical": "3"
+        },
+        {
+          "raw": "IV",
+          "canonical": "4"
+        },
+        {
+          "raw": "V",
+          "canonical": "5"
+        },
+        {
+          "raw": "VI",
+          "canonical": "6"
+        },
+        {
+          "raw": "VII",
+          "canonical": "7"
+        },
+        {
+          "raw": "VIII",
+          "canonical": "8"
+        },
+        {
+          "raw": "IX",
+          "canonical": "9"
+        },
+        {
+          "raw": "X",
+          "canonical": "10"
+        },
+        {
+          "raw": "XI",
+          "canonical": "11"
+        },
+        {
+          "raw": "XII",
+          "canonical": "12"
+        }
       ]
     }
   },
@@ -972,7 +1008,7 @@
       },
       {
         "id": "p2",
-        "description": "Fold accents so L\u00d6WE and LOWE meet",
+        "description": "Fold accents so LÖWE and LOWE meet",
         "op": "accent_fold",
         "source": "surname_clean",
         "target": "surname_clean"
@@ -1223,7 +1259,7 @@
       },
       {
         "id": "o4",
-        "description": "Drop anything in brackets \u2014 it is a note, not the name",
+        "description": "Drop anything in brackets — it is a note, not the name",
         "op": "regex_replace",
         "source": "name_clean",
         "target": "name_clean",
@@ -1670,7 +1706,7 @@
     {
       "id": "v1",
       "track": "person",
-      "description": "Birth years more than one year apart are different people. The 500,000-record sample accepted SABELO SHONGWE born 1958-07 against SABELO SHONGWE born 1995-07 at p = 1.000000: a birth-year disagreement cost 0.23 bits against a postcode worth 12.82 and a surname worth 10.27, so the score could never express it. One year of slack is left for an off-by-one filing.",
+      "description": "Birth years more than one year apart are different people, whatever the name and address say.",
       "when": [
         {
           "column": "dob_year_clean",
@@ -1679,12 +1715,13 @@
         }
       ],
       "action": "reject",
-      "reason": "Born {left} and {right}"
+      "reason": "Born {left} and {right}",
+      "_measured": "Birth years more than one year apart are different people. The 500,000-record sample accepted SABELO SHONGWE born 1958-07 against SABELO SHONGWE born 1995-07 at p = 1.000000: a birth-year disagreement cost 0.23 bits against a postcode worth 12.82 and a surname worth 10.27, so the score could never express it. One year of slack is left for an off-by-one filing."
     },
     {
       "id": "v2",
       "track": "person",
-      "description": "Two clearly different forenames are siblings or spouses at one address, not one person. Review and not reject: a filing may carry a middle name where another carries a first name, and the nickname lookup has already had its chance, so a human decides.",
+      "description": "Two clearly different forenames at one address are siblings or spouses, not one person. Send to review, because a nickname can look different.",
       "when": [
         {
           "column": "forename_canon",
@@ -1697,12 +1734,13 @@
         }
       ],
       "action": "review",
-      "reason": "Forenames {left} and {right}"
+      "reason": "Forenames {left} and {right}",
+      "_measured": "Two clearly different forenames are siblings or spouses at one address, not one person. Review and not reject: a filing may carry a middle name where another carries a first name, and the nickname lookup has already had its chance, so a human decides."
     },
     {
       "id": "ov1",
       "track": "organisation",
-      "description": "Two different registration numbers, both present, are two registrations. deduping's corporate veto set, ported.",
+      "description": "Two different registration numbers are two registrations.",
       "when": [
         {
           "column": "regnum_clean",
@@ -1710,12 +1748,13 @@
         }
       ],
       "action": "reject",
-      "reason": "Registered as {left} and {right}"
+      "reason": "Registered as {left} and {right}",
+      "_measured": "Two different registration numbers, both present, are two registrations. deduping's corporate veto set, ported."
     },
     {
       "id": "ov4",
       "track": "organisation",
-      "description": "Fund II is not Fund III (deduping's veto B), over the cleaned numeric suffix with roman numerals read as digits.",
+      "description": "Fund II is not Fund III: a different number at the end of the name is a different entity.",
       "when": [
         {
           "column": "numeric_suffix",
@@ -1723,7 +1762,8 @@
         }
       ],
       "action": "reject",
-      "reason": "Numbered {left} and {right}"
+      "reason": "Numbered {left} and {right}",
+      "_measured": "Fund II is not Fund III (deduping's veto B), over the cleaned numeric suffix with roman numerals read as digits."
     }
   ],
   "_vetoes_measured_and_not_shipped": [

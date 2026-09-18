@@ -54,6 +54,13 @@ export const COMPARISON_TYPES = [
   },
   { fn: "cl.PostcodeComparison", label: "Postcode comparison" },
   {
+    fn: "custom.NumericDifferenceAtThresholds",
+    label: "Numeric difference",
+    arg: "thresholds",
+    kind: "gap",
+    noTermFrequency: true,
+  },
+  {
     fn: "cl.ArrayIntersectAtSizes",
     label: "Array overlap",
     arg: "size_threshold_or_thresholds",
@@ -69,11 +76,14 @@ export function comparisonSpec(fn) {
 function defaultThresholds(kind) {
   if (kind === "distance") return [1, 2];
   if (kind === "size") return [1];
+  if (kind === "gap") return [0, 1];
   return [0.92, 0.88];
 }
 
 // What the arguments list means in plain words, for the line under the boxes.
 export function thresholdHelp(kind) {
+  if (kind === "gap")
+    return "Makes a level for equal, within 1, within 2 and so on, so a large gap gets its own weight. Whole numbers, smallest first.";
   if (kind === "distance")
     return "Edit distances to compare at, closest first. One level per value.";
   if (kind === "size") return "How many shared items count as a level, largest first.";

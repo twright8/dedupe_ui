@@ -274,6 +274,13 @@ export default function MethodologyScreen() {
               yours to move. Out come the scored pairs. When a trained model is in use, stage 6
               re-scores them and its score sets the buckets instead.
             </p>
+            <p>
+              A veto is a plain rule about a pair that stops the tool accepting something a person
+              would never accept. Two people born thirty years apart are not one person, even when
+              the name and the postcode agree. A veto either sends the pair to you or rejects it,
+              and the reason it gives is shown beside the pair on the review screen. An earlier
+              grouping can still overrule a veto, and your own answer overrules everything.
+            </p>
           </Stage>
 
           <Stage
@@ -524,6 +531,12 @@ export default function MethodologyScreen() {
           <dt>bucket</dt>
           <dd>
             Where a scored pair lands. A pair is accepted, sent to you for review, or rejected.
+          </dd>
+
+          <dt>veto</dt>
+          <dd>
+            A rule about a pair that stops the tool accepting it, whatever the score says. It sends
+            the pair to you or rejects it, and it says why.
           </dd>
 
           <dt>label</dt>

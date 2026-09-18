@@ -15,6 +15,7 @@ import { api } from "../../api";
 import { Icons } from "../../components/Icons";
 import { fmtNumber, fmtPct } from "../../components/ProbBar";
 import { Empty } from "../../components/Empty";
+import { ConditionList } from "./RuleList";
 import {
   DescriptionInput,
   EDITOR_GRID,

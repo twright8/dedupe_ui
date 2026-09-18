@@ -71,8 +71,9 @@ export function tabForPath(path) {
   if (p.startsWith("token_lists") || p.startsWith("lookups")) return "tables";
   if (p.startsWith("derived_columns")) return "derived";
   if (p.startsWith("match_keys")) return "keys";
+  if (p.startsWith("vetoes")) return "vetoes";
   if (p.startsWith("linkage_settings")) return "thresholds";
-  return null; // vetoes have no tab yet — they arrive with scoring
+  return null; // anything the tabs do not own yet
 }
 
 export function errorsForTab(errors, tabId) {
@@ -107,12 +108,74 @@ export function pathTail(path) {
 
 // ---------- small shared components ----------
 
+/* Warnings read exactly like errors, in amber. A warning never blocks a save:
+   it says the rule will work and do less than the author expects. */
+export function RowWarnings({ warnings, colSpan }) {
+  if (!warnings || warnings.length === 0) return null;
+  return (
+    <tr>
+      <td
+        colSpan={colSpan}
+        style={{
+          paddingTop: 0,
+          borderTop: 0,
+          whiteSpace: "normal",
+          overflowWrap: "anywhere",
+        }}
+      >
+        {warnings.map((w, i) => (
+          <div key={i} style={{ fontSize: 12, color: "var(--amber)" }}>
+            <span className="mono" style={{ marginRight: 6 }}>
+              {pathTail(w.path)}
+            </span>
+            {w.message}
+          </div>
+        ))}
+      </td>
+    </tr>
+  );
+}
+
+export function SectionWarnings({ warnings }) {
+  if (!warnings || warnings.length === 0) return null;
+  return (
+    <div
+      style={{
+        background: "var(--amber-50)",
+        border: "1px solid var(--amber)",
+        borderRadius: 5,
+        padding: "8px 12px",
+        fontSize: 12.5,
+        marginBottom: 12,
+        lineHeight: 1.5,
+      }}
+    >
+      {warnings.map((w, i) => (
+        <div key={i}>
+          <span className="mono" style={{ marginRight: 6 }}>
+            {w.path}
+          </span>
+          {w.message}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // The red line under a table row that carries a rule's validation messages.
 export function RowErrors({ errors, colSpan }) {
   if (!errors || errors.length === 0) return null;
   return (
     <tr>
-      <td colSpan={colSpan} style={{ paddingTop: 0, borderTop: 0 }}>
+      <td
+        colSpan={colSpan}
+        style={{
+          paddingTop: 0,
+          borderTop: 0,
+          whiteSpace: "normal",
+          overflowWrap: "anywhere",
+        }}
+      >
         {errors.map((e, i) => (
           <div key={i} style={{ fontSize: 12, color: "var(--ti-red)" }}>
             <span className="mono" style={{ marginRight: 6 }}>
