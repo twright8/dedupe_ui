@@ -66,6 +66,30 @@ CREATE TABLE IF NOT EXISTS labels (
     superseded_by         INTEGER                    -- id of the label row that replaced this one
 );
 
+-- Human decisions about two RECORDS of one dataset (docs/LINKAGE.md, D10).
+-- Append-only: a new decision on the same pair deactivates the old row and
+-- points its superseded_by at the new one, so disagreement stays on record.
+-- record_id_a is always the smaller of the two ids compared as strings.
+CREATE TABLE IF NOT EXISTS pair_labels (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id_a     TEXT NOT NULL,
+    record_id_b     TEXT NOT NULL,
+    track           TEXT,
+    is_match        TEXT NOT NULL,             -- 'TRUE' | 'FALSE'
+    provenance      TEXT,                      -- manual | bulk_range | llm | import
+    held_out        INTEGER NOT NULL DEFAULT 0,-- 1 = frozen eval set, excluded from training
+    reviewer        TEXT,
+    notes           TEXT,
+    evidence_url    TEXT,                      -- a source link for outside evidence (D13a)
+    name_a          TEXT,
+    name_b          TEXT,
+    run_id          TEXT,
+    config_version  INTEGER,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    active          INTEGER NOT NULL DEFAULT 1,
+    superseded_by   INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
@@ -116,6 +140,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_labels_raw_key_unique
 
 CREATE INDEX IF NOT EXISTS idx_labels_active_reviewer
     ON labels (active, reviewer);
+
+-- At most one ACTIVE decision per pair of records. The ids are normalised on
+-- the way in (pair_labels.pair_key), so this index is the last line of defence
+-- against two live opinions on one pair.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pair_labels_active_key
+    ON pair_labels (record_id_a, record_id_b)
+    WHERE active = 1;
+
+CREATE INDEX IF NOT EXISTS idx_pair_labels_active
+    ON pair_labels (active, id DESC);
 
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp
     ON audit_log (timestamp DESC);

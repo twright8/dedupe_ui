@@ -227,22 +227,39 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
   const [error, setError] = useState(null);
   const [attempt, setAttempt] = useState(0);
 
-  // The keys this run used, for the filter and the Keys column.
+  // The keys this run used, for the filter and the Keys column. The same
+  // response carries per-track figures, which give the track chips their counts
+  // when the groups endpoint does not report them.
   const [runKeys, setRunKeys] = useState([]);
+  const [evalTracks, setEvalTracks] = useState({});
   useEffect(() => {
     let alive = true;
     api
       .getRunExactEval(runId)
       .then((d) => {
-        if (alive) setRunKeys((d?.keys || []).map((k) => ({ id: k.id, name: k.name || k.id })));
+        if (!alive) return;
+        setRunKeys((d?.keys || []).map((k) => ({ id: k.id, name: k.name || k.id })));
+        setEvalTracks(d?.by_track && typeof d.by_track === "object" ? d.by_track : {});
       })
       .catch(() => {
-        if (alive) setRunKeys([]);
+        if (!alive) return;
+        setRunKeys([]);
+        setEvalTracks({});
       });
     return () => {
       alive = false;
     };
   }, [runId]);
+
+  // Per-key group counts cannot simply be summed — keys that share a record are
+  // united into one group — so the count only appears when the evaluation
+  // reports it for the track outright.
+  function trackCount(key) {
+    const t = evalTracks[key];
+    if (!t || typeof t !== "object") return null;
+    const n = t.merged_groups ?? t.groups ?? null;
+    return typeof n === "number" ? n : null;
+  }
 
   // A deep link from the summary lands here already filtered.
   useEffect(() => {
@@ -345,9 +362,9 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
               onClick={() => choose(setTrack, t.key)}
             >
               {t.label}
-              {counts[t.key] != null && (
+              {(counts[t.key] ?? trackCount(t.key)) != null && (
                 <span className="muted" style={{ fontSize: 11 }}>
-                  &middot; {fmtNumber(counts[t.key])}
+                  &middot; {fmtNumber(counts[t.key] ?? trackCount(t.key))}
                 </span>
               )}
             </button>

@@ -16,6 +16,7 @@ Matching is case-insensitive everywhere. A null input stays null unless a step s
   "track_rules": [ TrackRule ],
   "default_track": "organisation",
   "cleaning":    { "person": [ Step ], "organisation": [ Step ] },
+  "derived_columns": [ DerivedColumn ],
   "match_keys":  [ MatchKey ],
   "vetoes":      []
 }
@@ -89,6 +90,32 @@ In `GET /api/config/functions`, a single-output function reports `outputs: ["tar
 
 All ops and functions run on the distinct values of the source column and map the results back. That keeps a 16-million-row PSC run practical.
 
+## Derived columns
+
+Implements D8a, stage 1. A derived column standardises a category with ordered rules. It has the same form as the track rules, but it runs **after** cleaning, so its conditions may read raw columns and cleaning targets.
+
+```json
+"derived_columns": [
+  { "id": "d1", "target": "donor_status_std", "description": "Standard donor status",
+    "default_from": "donor_status", "tracks": ["organisation"],
+    "rules": [
+      { "id": "d1r1", "description": "An OC, SO or NC company number is an LLP",
+        "when": [ { "column": "company_number_clean", "op": "starts_with", "values": ["OC", "SO", "NC"] },
+                  { "column": "donor_status", "op": "in", "values": ["Company", "Limited Liability Partnership", "Unincorporated Association", "Other", "Trust"] } ],
+        "value": "Limited Liability Partnership" }
+    ] }
+]
+```
+
+- Rules are tried in order. The first rule whose conditions all hold sets `target` to its `value`. If none holds, `target` takes the value of the `default_from` column.
+- `tracks` limits the derived column to those tracks. Records in other tracks get the `default_from` value. Omitted means every track.
+- The stage also writes `<target>_rule`: the id of the rule that set the value, or null when the default applied. The entity stage uses it, because a value set by a rule beats a raw value (D8a, stage 2).
+- `target` must be a new column. It may not be a raw column or a cleaning target.
+- Derived columns run in document order. A later one may read an earlier target.
+- New condition operator, valid in track rules too: `starts_with` with `values` — true when the value starts with any of them, case-insensitive. `matches_digit_start` is not needed: use `matches` with `^[0-9]`.
+
+Preview: `POST /api/config/preview-derived` body `{ruleset?, run_id}` returns, per derived column, `{id, target, total, changed, transitions: [{from, to, count}], rules: [{id, description, value, hits, examples: [{record_id, name, from, ...columns the conditions read}]}]}`, with a final rule entry `id: "default"`.
+
 ## Match keys
 
 ```json
@@ -153,6 +180,7 @@ The donations labels have a known bias (`DESIGN.md`, D13): reviewers merged 99.6
 | `GET /api/runs/{id}/exact-groups` | one page of the groups stage 2 made |
 | `GET /api/runs/{id}/exact-groups/{group_id}` | one group plus its member records |
 | `GET /api/runs/{id}/exact-eval` | the run's `exact_eval.json`: `{keys, overall, eval}` |
+| `GET /api/runs/{id}/pairs`, `/pairs/{pair_id}`, `/pairs/histogram`, `/score-eval`, `/blocking-report` | what stage 3 scored. Written out in `PAIRS_API.md` |
 
 `preview-keys` reruns the whole chain in memory on a run's `records_raw.parquet` with the DRAFT ruleset — track assignment, cleaning, keys, evaluation — so editing a cleaning step shows its effect on the groups. An invalid draft returns 422 in the same shape as `POST /api/config`. A run of more than 1,000,000 records returns 400; previewing a sample of one is a later slice. Each entry of `keys` is that key's stats plus `examples`: up to 8 groups, largest first, as `{group_id, size, status, guard, names}`. `eval` carries `{pair_precision, pair_recall, conflicts, by_agreement}`. `baseline` is the `{overall, eval}` the run itself saved, so the screen can show a delta, and is null for a run made before stage 2 existed.
 

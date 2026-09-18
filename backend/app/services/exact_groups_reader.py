@@ -22,12 +22,14 @@ from app.profiles import get_profile
 
 GROUPS_FILENAME = "exact_groups.parquet"
 RECORDS_FILENAME = "records.parquet"
+EVENTS_FILENAME = "events.parquet"
 EVAL_FILENAME = "exact_eval.json"
 
 DEFAULT_SORT = "size"
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 MAX_MEMBERS = 500
+MAX_EVENTS = 200
 
 TRACKS = ("person", "organisation")
 STATUSES = ("merged", "held")
@@ -297,9 +299,35 @@ def get_groups(
     }
 
 
-def get_group(run_dir: str, group_id: str) -> dict | None:
-    """One group with its member records, or None when there is no such group."""
+def _group_events(con, groups: Path, run_dir: str, group_id: str) -> tuple[list[dict], bool]:
+    """The evidence rows behind a group's members, newest first (D13b)."""
+    events = Path(run_dir) / EVENTS_FILENAME
+    if not events.is_file():
+        return [], False
+    cursor = con.execute(
+        """SELECT e.* FROM read_parquet(?) g
+           JOIN read_parquet(?) e
+             ON CAST(e.record_id AS VARCHAR) = CAST(g.record_id AS VARCHAR)
+           WHERE g.group_id = ?
+           ORDER BY e.date DESC NULLS LAST, CAST(e.record_id AS VARCHAR)
+           LIMIT ?""",
+        [str(groups), str(events), group_id, MAX_EVENTS + 1],
+    )
+    rows = _rows(cursor)
+    return [{k: _json_safe(v) for k, v in row.items()} for row in rows[:MAX_EVENTS]], \
+        len(rows) > MAX_EVENTS
+
+
+def get_group(run_dir: str, group_id: str, with_events: bool = False) -> dict | None:
+    """One group with its member records, or None when there is no such group.
+
+    *with_events* adds the profile's evidence rows for those members. They are
+    off by default: the group list does not need them, and a large group carries
+    a great many.
+    """
     con, groups, records = _open(run_dir)
+    events: list[dict] = []
+    events_truncated = False
     try:
         record_columns = _column_names(con, records)
         priority = _priority_columns(record_columns)
@@ -325,9 +353,17 @@ def get_group(run_dir: str, group_id: str) -> dict | None:
             {name: _json_safe(value) for name, value in zip(names, row)}
             for row in cursor.fetchall()
         ]
+        if with_events:
+            events, events_truncated = _group_events(con, groups, run_dir, group_id)
     finally:
         con.close()
 
     item["members_truncated"] = len(members) > MAX_MEMBERS
     item["members"] = members[:MAX_MEMBERS]
+    if with_events:
+        item["events"] = events
+        item["events_truncated"] = events_truncated
+        item["event_columns"] = [
+            column.as_dict() for column in getattr(get_profile(), "event_columns", [])
+        ]
     return item

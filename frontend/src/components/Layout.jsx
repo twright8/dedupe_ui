@@ -80,7 +80,8 @@ const navItems = [
   { to: "/runs/new",     label: "New run",         icon: Icons.upload },
   { group: "Review" },
   { to: "/review",       label: "Review queue",    icon: Icons.review },
-  { to: "/ambiguous",    label: "Ambiguous",       icon: Icons.ambiguous },
+  // The cluster screen replaces this in slice 4; the route and file stay in place.
+  // { to: "/ambiguous",    label: "Ambiguous",       icon: Icons.ambiguous },
   { group: "Config" },
   { to: "/labels",       label: "Label library",   icon: Icons.review },
   { to: "/config",       label: "Config & rules",  icon: Icons.config },

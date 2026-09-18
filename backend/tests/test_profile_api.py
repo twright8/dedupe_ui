@@ -58,7 +58,7 @@ def test_display_columns_are_in_order_and_typed(client):
     assert [c["key"] for c in columns] == [
         "name", "donor_status", "postcode", "company_number", "parties",
         "first_year", "last_year", "n_donations", "total_value",
-        "existing_entity_id", "all_names",
+        "median_value", "modal_value", "existing_entity_id", "all_names",
     ]
     by_key = {c["key"]: c for c in columns}
     assert by_key["parties"]["type"] == "list"
@@ -67,6 +67,8 @@ def test_display_columns_are_in_order_and_typed(client):
     assert by_key["total_value"]["type"] == "money"
     assert by_key["first_year"]["type"] == "year"
     assert by_key["name"]["type"] == "text"
+    assert by_key["median_value"]["type"] == "money"
+    assert by_key["modal_value"]["type"] == "money"
     assert all(c["label"] for c in columns)
 
 

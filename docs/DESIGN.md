@@ -53,6 +53,13 @@ Each decision has a number so that later notes can refer to it.
 
 Every rule can be scoped to a track. The live preview runs the real pipeline code. (`roe_ui`'s preview skips one hard-coded step at `standardise.py:67`. `dedupe_ui` does not copy that flaw.)
 
+**D8a. Standardising a category is two stages** (added 2026-09-18, from Tom). Donor status is often wrong at source: companies marked as unincorporated associations, LLPs as companies.
+
+1. *Record level.* A fifth rule type, "derived column" rules: ordered conditions, first match sets the value, written to a new column (donations: `donor_status_std`). They run after cleaning, so they can read the cleaned company number. Defaults: an `OC`, `SO` or `NC` prefix means LLP; an `SC` or `NI` prefix, or a number starting with a digit, means Company; an `IP` or `SP` prefix means Friendly Society (a registered society); a record with a company number cannot be a Trust. The company-number rules may only change a status in the overridable set: Company, LLP, Unincorporated Association, Other, Trust. They never change Registered Political Party, Trade Union, Friendly Society, Public Fund or Individual, so an incorporated political party stays a party. Tom agreed both on 2026-09-18. Every rule can be edited or switched off in the UI.
+2. *Entity level.* After entity IDs exist, a status set by a rule beats a raw status, otherwise the majority among the entity's members applies. A tie keeps the raw value and flags the entity for review.
+
+The export carries the standard status and the standard ID, each with how it was decided. The model uses the standardised status as its donor-type feature. PSC can reuse both stages, for example for the PSC kind.
+
 ### Labels and models
 
 **D9. Labels train the GBT only.** Splink stays unsupervised and supplies candidates and a prior score. This is `roe_ui`'s rule and it carries over unchanged.
@@ -69,6 +76,10 @@ Every rule can be scoped to a track. The live preview runs the real pipeline cod
 **D12. Name rarity comes from outside the donations sheet.** The Electoral Commission often gives a repeat donor a new `DonorId`, so a frequent name inside the sheet usually means one frequent donor. A UK name-frequency table built from the PSC individuals feeds Splink's term-frequency adjustment and the GBT's rarity features.
 
 **D13. Same decision process in every profile.** Score thresholds set accept, review, and reject. There is no donation-value rule. Each profile names priority columns that the review table can sort by (donations: total donated by the pair; PSC: for example, number of companies controlled). Sorting changes the order of review and nothing else.
+
+**D13a. Evidence the reviewers use for individuals** (added 2026-09-18, from Tom). Beyond the name, the team judges two things by hand. (1) The size pattern of donations, for example a donor who always gives £10,000. This becomes a GBT feature family: typical single donation, shared exact amounts, share of round amounts, and distance between the two amount distributions. The review screen also shows each side's donation history, so the reviewer sees the same evidence. (2) Public reporting, for example a journalist confirming that one person gave to several parties. This cannot be computed. A label therefore carries notes and a source link, so the evidence is recorded with the decision.
+
+**D13b. Evidence rows.** A profile may supply child rows for each record, shown when a pair or group is opened. Donations: the individual donations (date, amount, recipient, local unit, type). PSC: the companies a person controls, with dates. Feature builders may read them.
 
 Known limit: the existing donations labels were made almost entirely on the name. Reviewers merged 99.6% of identical-name pairs of individuals, even across different parties. The labels therefore cannot show when two people with the same name are different. New "keep apart" labels from the UI are the fix. Context features (party, local unit, year gap, title and middle-initial conflict) are built in, and their value will show once such labels exist.
 

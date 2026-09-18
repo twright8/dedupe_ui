@@ -1,2 +1,5 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: trains a real Splink model. A second or two each, so keep them few and small.",
+]

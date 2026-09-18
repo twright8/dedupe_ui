@@ -13,17 +13,19 @@
    is what routes them back to a tab and a row.
    ============================================================ */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { api, validationErrors } from "../api";
 import { Icons } from "../components/Icons";
 import { Empty } from "../components/Empty";
 import { useProfile } from "../profile";
 import TracksTab from "./config/TracksTab";
 import CleaningTab from "./config/CleaningTab";
+import DerivedTab from "./config/DerivedTab";
 import TablesTab from "./config/TablesTab";
 import MatchKeysTab from "./config/MatchKeysTab";
-import ThresholdsTab, { readThresholds, readSplinkParams } from "./config/ThresholdsTab";
+import ThresholdsTab from "./config/ThresholdsTab";
 import VersionHistoryTab from "./config/VersionHistoryTab";
+import { normalizeLinkage, isLegacyLinkage } from "./config/linkage";
 import { normalizeRuleset, errorsForTab, useDebounced } from "./config/shared";
 
 // ---------- helpers ----------
@@ -74,6 +76,19 @@ const TABS = [
     ),
   },
   {
+    id: "derived",
+    lab: "Derived columns",
+    count: (rs) => rs.derived_columns.length,
+    render: (ctx) => (
+      <DerivedTab
+        ruleset={ctx.ruleset}
+        setRuleset={ctx.setRuleset}
+        errors={ctx.errorsFor("derived")}
+        profile={ctx.profile}
+      />
+    ),
+  },
+  {
     id: "tables",
     lab: "Tables",
     count: (rs) => Object.keys(rs.token_lists).length + Object.keys(rs.lookups).length,
@@ -104,11 +119,12 @@ const TABS = [
     count: null,
     render: (ctx) => (
       <ThresholdsTab
-        thresh={ctx.thresh}
-        setThresh={ctx.setThresh}
-        reviewLow={ctx.reviewLow}
-        setReviewLow={ctx.setReviewLow}
-        splinkParams={ctx.splinkParams}
+        settings={ctx.linkage}
+        setSettings={ctx.setLinkage}
+        ruleset={ctx.ruleset}
+        profile={ctx.profile}
+        errors={ctx.errorsFor("thresholds")}
+        converted={ctx.linkageConverted}
       />
     ),
   },
@@ -133,12 +149,13 @@ export default function ConfigScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // The draft. Every tab edits this one object.
+  // The draft: the ruleset, and the linkage settings beside it. Every tab edits
+  // one of these two objects and nothing else.
   const [ruleset, setRulesetState] = useState(() => normalizeRuleset(null));
-  const [rawLinkageSettings, setRawLinkageSettings] = useState({});
-  const [thresh, setThreshState] = useState(0.92);
-  const [reviewLow, setReviewLowState] = useState(0.5);
-  const [splinkParams, setSplinkParams] = useState([]);
+  const [linkage, setLinkageState] = useState(() => normalizeLinkage(null, []));
+  // True when the loaded version stored one flat set of blocking rules and
+  // comparisons, which the tab says out loud.
+  const [linkageConverted, setLinkageConverted] = useState(false);
 
   // Versions
   const [versions, setVersions] = useState([]);
@@ -153,16 +170,18 @@ export default function ConfigScreen() {
 
   // Take a loaded config into the draft. Used by the first load, by the version
   // selector in the header, and by Version history's restore.
-  const applyConfig = useCallback((cfg) => {
-    const settings = cfg?.linkage_settings || {};
-    const thresholds = readThresholds(settings);
-    setRulesetState(normalizeRuleset(cfg?.ruleset));
-    setRawLinkageSettings(settings);
-    setThreshState(thresholds.high);
-    setReviewLowState(thresholds.review);
-    setSplinkParams(readSplinkParams(settings));
-    setSaveErrors([]);
-  }, []);
+  const trackKeys = (profile.tracks || []).map((t) => t.key);
+  const trackKeySignature = trackKeys.join(",");
+  const applyConfig = useCallback(
+    (cfg) => {
+      const keys = trackKeySignature ? trackKeySignature.split(",") : [];
+      setRulesetState(normalizeRuleset(cfg?.ruleset));
+      setLinkageState(normalizeLinkage(cfg?.linkage_settings, keys));
+      setLinkageConverted(isLegacyLinkage(cfg?.linkage_settings));
+      setSaveErrors([]);
+    },
+    [trackKeySignature]
+  );
 
   const fetchConfig = useCallback(() => {
     setLoading(true);
@@ -195,23 +214,26 @@ export default function ConfigScreen() {
     setSaveErrors([]);
   }, []);
 
-  function setThresh(value) {
-    setThreshState(value);
+  const setLinkage = useCallback((update) => {
+    setLinkageState((s) => (typeof update === "function" ? update(s) : update));
     setDirty(true);
-  }
+    setSaveErrors([]);
+  }, []);
 
-  function setReviewLow(value) {
-    setReviewLowState(value);
-    setDirty(true);
-  }
-
-  // Live validation, so a bad rule shows up before the user reaches Save.
-  const settledRuleset = useDebounced(ruleset, 500);
+  // Live validation, so a bad rule shows up before the user reaches Save. Both
+  // halves of the draft go, because a linkage setting can name a column the
+  // cleaning rules no longer produce. A backend that only reads the ruleset
+  // ignores the rest.
+  const validateBody = useMemo(
+    () => ({ ruleset, linkage_settings: linkage }),
+    [ruleset, linkage]
+  );
+  const settledBody = useDebounced(validateBody, 500);
   useEffect(() => {
     if (loading) return; // don't validate the blank draft that exists before the load
     let alive = true;
     api
-      .validateConfig({ ruleset: settledRuleset })
+      .validateConfig(settledBody)
       .then((res) => {
         if (alive) setLiveErrors(Array.isArray(res?.errors) ? res.errors : []);
       })
@@ -222,7 +244,7 @@ export default function ConfigScreen() {
     return () => {
       alive = false;
     };
-  }, [settledRuleset, loading]);
+  }, [settledBody, loading]);
 
   const errors = saveErrors.length
     ? [...saveErrors, ...liveErrors.filter((e) => !saveErrors.some((s) => s.path === e.path))]
@@ -241,11 +263,7 @@ export default function ConfigScreen() {
     api
       .saveConfig({
         ruleset,
-        linkage_settings: {
-          ...rawLinkageSettings,
-          match_probability_threshold_high: thresh,
-          match_probability_threshold_review: reviewLow,
-        },
+        linkage_settings: linkage,
         note: note || "No note",
       })
       .then(() => {
@@ -329,12 +347,10 @@ export default function ConfigScreen() {
   const ctx = {
     ruleset,
     setRuleset,
+    linkage,
+    setLinkage,
+    linkageConverted,
     profile,
-    thresh,
-    setThresh,
-    reviewLow,
-    setReviewLow,
-    splinkParams,
     versions,
     currentVersion,
     onRestore: handleRestore,

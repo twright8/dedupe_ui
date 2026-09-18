@@ -18,6 +18,7 @@ from app.db import query_db, write_db
 from app.profiles import get_profile
 from app.services.config_manager import get_version
 from app.services import exact_groups_reader
+from app.services import pairs_reader
 from app.services import pipeline_runner
 from app.services import records_reader
 from app.services.audit_logger import log_event
@@ -128,6 +129,11 @@ def _top_jurisdictions_from_outputs(paths: list[Path]) -> list[dict]:
 _FILE_DESCRIPTIONS = {
     "records_raw.parquet": "Loaded records, one row per record, before any rules",
     "records.parquet": "Records with their track and every cleaning target",
+    "units.parquet": "One representative row per unit — a merged group or a single record",
+    "unit_members.parquet": "Which records make up each unit",
+    "pairs.parquet": "Every scored pair, with its bucket and how it was decided",
+    "blocking_report.json": "Pairs each blocking rule would make, per track, against the budget",
+    "score_eval.json": "What the exact groups plus the accepted pairs do to the existing labels",
     "ruleset.json": "The ruleset this run used",
     "matches_exact.csv": "Phase 1 deterministic exact matches",
     "matches_high_confidence.csv": "All high-confidence matches (exact + probabilistic)",
@@ -297,6 +303,7 @@ def create_run(body: CreateRunRequest, user_name: str = Depends(current_user)):
         config_version=body.config_version,
         threshold_high=t_high,
         threshold_review=t_review,
+        render_diagnostics=body.render_diagnostics,
     )
 
     # Return the run row
@@ -390,11 +397,43 @@ def _normalize_counts(raw):
         "exactConflicts": raw.get("exact_conflicts", 0),
         "exactPairPrecision": raw.get("exact_pair_precision"),
         "exactPairRecall": raw.get("exact_pair_recall"),
+        # Dedupe stage 3 — the units the exact keys left and what Splink made of
+        # them. Precision and recall are for the exact groups plus the accepted
+        # pairs together, so they sit next to the exact-only pair above.
+        "unitsTotal": raw.get("units_total", 0),
+        "unitsPerson": raw.get("units_person", 0),
+        "unitsOrganisation": raw.get("units_organisation", 0),
+        "pairsScored": raw.get("pairs_scored", 0),
+        "pairsAccept": raw.get("pairs_accept", 0),
+        "pairsReview": raw.get("pairs_review", 0),
+        "pairsReject": raw.get("pairs_reject", 0),
+        "pairsDecidedByImport": raw.get("pairs_decided_by_import", 0),
+        "pairsImportDisagrees": raw.get("pairs_import_disagrees", 0),
+        "entitiesAfterScore": raw.get("entities_after_score", 0),
+        "scorePairPrecision": raw.get("score_pair_precision"),
+        "scorePairRecall": raw.get("score_pair_recall"),
+        # Slice 3b — what the reviewers have decided about this run's pairs, and
+        # what the run looks like once their decisions are applied.
+        "labelsTotal": raw.get("labels_total", 0),
+        "labelsTrue": raw.get("labels_true", 0),
+        "labelsFalse": raw.get("labels_false", 0),
+        "labelsSatisfied": raw.get("labels_satisfied", 0),
+        "labelsForced": raw.get("labels_forced", 0),
+        "labelContradictions": raw.get("label_contradictions", 0),
+        "entitiesAfterHuman": raw.get("entities_after_human",
+                                      raw.get("entities_after_score", 0)),
+        "humanPairPrecision": raw.get("human_pair_precision",
+                                      raw.get("score_pair_precision")),
+        "humanPairRecall": raw.get("human_pair_recall", raw.get("score_pair_recall")),
         # Every key above defaults to 0, so the frontend cannot tell "no pairs yet"
         # from "zero pairs" by value. These flags say which stages have run.
         "hasRecords": "records_total" in raw,
         "hasExact": "exact_merged_groups" in raw,
-        "hasPairs": any(k in raw for k in _PAIR_COUNT_KEYS),
+        # True once the score stage has run. The legacy keys are still read so a
+        # run made by the two-dataset pipeline keeps its review screen.
+        "hasPairs": "pairs_scored" in raw or any(k in raw for k in _PAIR_COUNT_KEYS),
+        "hasUnits": "units_total" in raw,
+        "hasLabels": bool(raw.get("labels_total", 0)),
     }
 
 
@@ -1004,6 +1043,16 @@ def _run_dir_or_404(run_id: str) -> str:
     return str(_data_dir_from_main() / "runs" / run_id)
 
 
+def _read_json_or_404(path, missing: str):
+    """A JSON file a stage wrote, or a 404 saying the stage has not run."""
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=missing)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read {path.name}: {exc}")
+
+
 @router.get("/{run_id}/exact-groups")
 def get_exact_groups(
     run_id: str,
@@ -1042,11 +1091,15 @@ def get_exact_groups(
 
 
 @router.get("/{run_id}/exact-groups/{group_id}")
-def get_exact_group(run_id: str, group_id: str):
+def get_exact_group(
+    run_id: str,
+    group_id: str,
+    events: int = Query(0, ge=0, le=1, description="1 adds the members' evidence rows"),
+):
     """One group with its member records, capped at 500."""
     run_dir = _run_dir_or_404(run_id)
     try:
-        group = exact_groups_reader.get_group(run_dir, group_id)
+        group = exact_groups_reader.get_group(run_dir, group_id, with_events=bool(events))
     except exact_groups_reader.ExactGroupsNotFound:
         raise HTTPException(status_code=404, detail="Run has no exact groups yet")
     if group is None:
@@ -1065,6 +1118,261 @@ def get_exact_eval(run_id: str):
         return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         raise HTTPException(status_code=500, detail=f"Could not read the evaluation: {exc}")
+
+
+@router.get("/{run_id}/pairs/histogram")
+def get_pairs_histogram(
+    run_id: str,
+    track: str | None = Query(None, description="person | organisation"),
+    bins: int = Query(pairs_reader.DEFAULT_BINS, ge=1, le=pairs_reader.MAX_BINS),
+):
+    """The scored pairs as a histogram, split by bucket and by import agreement.
+
+    This is what the threshold panel draws, so moving a line can be previewed
+    before it is committed.
+    """
+    run_dir = _run_dir_or_404(run_id)
+    try:
+        return pairs_reader.get_histogram(run_dir, track=track, bins=bins,
+                                          labels=_run_labels(_db_path()))
+    except pairs_reader.PairsNotFound:
+        raise HTTPException(status_code=404, detail="Run has no scored pairs yet")
+    except pairs_reader.InvalidQuery as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/{run_id}/pairs")
+def get_pairs(
+    run_id: str,
+    track: str | None = Query(None, description="person | organisation"),
+    bucket: str | None = Query(None, description="accept | review | reject"),
+    decided_by: str | None = Query(None, description="score | import | human"),
+    import_state: str | None = Query(
+        None, alias="import", description="agrees | disagrees | unknown"
+    ),
+    labelled: str | None = Query(None, description="yes | no"),
+    held: str | None = Query(None, description="hide | only"),
+    min_score: float | None = Query(None, ge=0, le=1),
+    max_score: float | None = Query(None, ge=0, le=1),
+    q: str | None = Query(
+        None, description="Case-insensitive substring over either side's name or unit id"
+    ),
+    sort: str = Query(pairs_reader.DEFAULT_SORT, description="score | priority | name"),
+    order: str = Query("desc", description="asc | desc"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(pairs_reader.DEFAULT_LIMIT, ge=1, le=pairs_reader.MAX_LIMIT),
+):
+    """One page of the pairs stage 3 scored, both units side by side.
+
+    ``total`` follows the filters; ``counts`` describe the whole run and ignore
+    them, so the chips stay still while a search narrows the list.
+    """
+    run_dir = _run_dir_or_404(run_id)
+    try:
+        return pairs_reader.get_pairs(
+            run_dir=run_dir, track=track, bucket=bucket, decided_by=decided_by,
+            import_state=import_state, held=held, min_score=min_score,
+            max_score=max_score, q=q, sort=sort, order=order,
+            offset=offset, limit=limit, labelled=labelled,
+            labels=_run_labels(_db_path()),
+        )
+    except pairs_reader.PairsNotFound:
+        raise HTTPException(status_code=404, detail="Run has no scored pairs yet")
+    except pairs_reader.InvalidQuery as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/{run_id}/pairs/{pair_id}")
+def get_pair(run_id: str, pair_id: str):
+    """One pair with its members, its evidence rows and a per-comparison explanation."""
+    run_dir = _run_dir_or_404(run_id)
+    try:
+        pair = pairs_reader.get_pair(run_dir, pair_id,
+                                     labels=_run_labels(_db_path()))
+    except pairs_reader.PairsNotFound:
+        raise HTTPException(status_code=404, detail="Run has no scored pairs yet")
+    except pairs_reader.InvalidQuery as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if pair is None:
+        raise HTTPException(status_code=404, detail=f"No pair '{pair_id}' in this run")
+    return pair
+
+
+class LabelItem(BaseModel):
+    pair_id: str
+    is_match: str
+    notes: str | None = None
+    evidence_url: str | None = None
+
+
+class LabelBatch(BaseModel):
+    labels: list[LabelItem]
+    provenance: str = "manual"
+
+
+def _run_labels(db_path: str):
+    from app.services import pair_labels
+
+    return pair_labels.labels_frame(db_path)
+
+
+def _refresh_after_labels(db_path: str, run_dir: str, run_id: str) -> dict:
+    """Redo a run's counts and evaluation after its labels changed.
+
+    ``pairs.parquet`` is left exactly as scoring left it: it holds the score and
+    the import overlay, and the human overlay is joined on wherever the pairs
+    are read. Only the derived numbers have to move.
+    """
+    from app.pipeline.dedupe.stage_3_score import refresh_after_labels
+
+    stored: dict = {}
+    rows = query_db(db_path, "SELECT counts_json FROM runs WHERE id = ?", (run_id,))
+    if rows and rows[0]["counts_json"]:
+        try:
+            stored = json.loads(rows[0]["counts_json"])
+        except (ValueError, TypeError):
+            stored = {}
+    counts = {**stored, **refresh_after_labels(run_dir, _run_labels(db_path))}
+    write_db(db_path, "UPDATE runs SET counts_json = ? WHERE id = ?",
+             (json.dumps(counts), run_id))
+    return counts
+
+
+@router.post("/{run_id}/labels")
+def save_labels(run_id: str, body: LabelBatch, user_name: str = Depends(current_user)):
+    """Record a human decision on up to 500 pairs of this run.
+
+    Append-only: a new decision supersedes the old one and the old row stays, so
+    who said what is never lost. The pairs file is not rewritten — only the
+    run's counts and its evaluation move.
+    """
+    from app.services import pair_labels
+
+    db_path = _db_path()
+    run_dir = _run_dir_or_404(run_id)
+    if len(body.labels) > pair_labels.MAX_BATCH:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"At most {pair_labels.MAX_BATCH} labels per request; "
+                    f"got {len(body.labels)}"),
+        )
+    if not body.labels:
+        raise HTTPException(status_code=400, detail="No labels to save")
+
+    row = query_db(db_path, "SELECT config_version FROM runs WHERE id = ?", (run_id,))
+    config_version = row[0]["config_version"] if row else None
+
+    try:
+        provenance = pair_labels.normalise_provenance(
+            body.provenance, pair_labels.HUMAN_PROVENANCES
+        )
+        parsed = [(*pair_labels.split_pair_id(item.pair_id), item)
+                  for item in body.labels]
+    except pair_labels.LabelError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        units = pairs_reader.unit_summary(
+            run_dir, [value for left, right, _ in parsed for value in (left, right)]
+        )
+    except pairs_reader.PairsNotFound:
+        raise HTTPException(status_code=404, detail="Run has no scored pairs yet")
+
+    saved = superseded = 0
+    for left, right, item in parsed:
+        missing = [value for value in (left, right) if value not in units]
+        if missing:
+            raise HTTPException(
+                status_code=400, detail=f"Unit '{missing[0]}' is not in run {run_id}"
+            )
+        try:
+            label, replaced = pair_labels.save_label(
+                db_path, left, right, item.is_match,
+                reviewer=user_name, provenance=provenance,
+                notes=item.notes, evidence_url=item.evidence_url,
+                track=units[left]["track"],
+                name_a=units[left]["name"], name_b=units[right]["name"],
+                run_id=run_id, config_version=config_version,
+            )
+        except pair_labels.LabelError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        saved += 1
+        superseded += replaced
+        log_event(
+            db_path, user=user_name or "unknown", kind="label",
+            description=(f"Marked {label['is_match']} · "
+                         f"{units[left]['name']} ↔ {units[right]['name']}"),
+            metadata={"label_id": label["id"], "run_id": run_id,
+                      "pair_id": f"{left}|{right}", "is_match": label["is_match"],
+                      "provenance": provenance},
+        )
+
+    counts = _refresh_after_labels(db_path, run_dir, run_id)
+    return {"saved": saved, "superseded": superseded,
+            "counts": _normalize_counts(counts)}
+
+
+@router.delete("/{run_id}/labels/{pair_id}")
+def delete_label(run_id: str, pair_id: str, user_name: str = Depends(current_user)):
+    """Withdraw the active decision on one pair, keeping the row on record."""
+    from app.services import pair_labels
+
+    db_path = _db_path()
+    run_dir = _run_dir_or_404(run_id)
+    try:
+        left, right = pair_labels.split_pair_id(pair_id)
+    except pair_labels.LabelError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    label = pair_labels.withdraw_label(db_path, left, right)
+    if label is None:
+        raise HTTPException(
+            status_code=404, detail=f"No active label on pair '{left}|{right}'"
+        )
+    log_event(
+        db_path, user=user_name or "unknown", kind="label",
+        description=f"Withdrew the {label['is_match']} label on {left} ↔ {right}",
+        metadata={"label_id": label["id"], "run_id": run_id,
+                  "pair_id": f"{left}|{right}"},
+    )
+
+    counts = _refresh_after_labels(db_path, run_dir, run_id)
+    # What the pair falls back to now the decision is gone.
+    pair = pairs_reader.get_pair(run_dir, f"{left}|{right}",
+                                 labels=_run_labels(db_path))
+    return {
+        "pair_id": f"{left}|{right}",
+        "bucket": pair["bucket"] if pair else None,
+        "decided_by": pair["decided_by"] if pair else None,
+        "counts": _normalize_counts(counts),
+    }
+
+
+@router.get("/{run_id}/contradictions")
+def get_contradictions(run_id: str):
+    """FALSE labels an exact match key has since overruled."""
+    run_dir = _run_dir_or_404(run_id)
+    return _read_json_or_404(
+        Path(run_dir) / "contradictions.json", "Run has no scored pairs yet"
+    )
+
+
+@router.get("/{run_id}/score-eval")
+def get_score_eval(run_id: str):
+    """What stage 3 measured: buckets, entities, and the label scores."""
+    run_dir = _run_dir_or_404(run_id)
+    return _read_json_or_404(
+        pairs_reader.score_eval_path(run_dir), "Run has no scored pairs yet"
+    )
+
+
+@router.get("/{run_id}/blocking-report")
+def get_blocking_report(run_id: str):
+    """Pairs each blocking rule would make, per track, against the budget."""
+    run_dir = _run_dir_or_404(run_id)
+    return _read_json_or_404(
+        pairs_reader.blocking_report_path(run_dir), "Run has no blocking report yet"
+    )
 
 
 @router.get("/{run_id}/matches")
@@ -1166,6 +1474,29 @@ def re_bucket(run_id: str, body: ReBucketRequest, user_name: str = Depends(curre
         raise HTTPException(status_code=404, detail="Run not found")
     if not (config_dir / "linkage_settings.json").is_file():
         raise HTTPException(status_code=400, detail="Run has no config to re-bucket")
+
+    # A dedupe run keeps every pair down to the candidate floor, so a new bucket
+    # line is a re-read of pairs.parquet. A run from the two-dataset pipeline
+    # still goes through the old path.
+    if pairs_reader.pairs_path(str(run_dir)).is_file():
+        from app.services.pipeline_runner import rebucket_pairs
+
+        try:
+            counts = rebucket_pairs(
+                db_path, str(run_dir), str(config_dir), run_id=run_id,
+                threshold_high=body.threshold_high,
+                threshold_review=body.threshold_review,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        log_event(
+            db_path, user=user_name or "unknown", kind="threshold",
+            description=(f"Re-bucketed run {run_id} "
+                         f"(high={body.threshold_high}, review={body.threshold_review})"),
+            metadata={"run_id": run_id, "threshold_high": body.threshold_high,
+                      "threshold_review": body.threshold_review, "counts": counts},
+        )
+        return {"ok": True, "counts": _normalize_counts(counts)}
 
     from app.services.pipeline_runner import rebucket_run
 

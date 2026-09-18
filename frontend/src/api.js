@@ -120,6 +120,36 @@ export const api = {
   getRunExactEval(id) {
     return get(`/api/runs/${id}/exact-eval`);
   },
+
+  // --- Scored pairs (stage 3) ---
+  getRunPairs(id, params) {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return get(`/api/runs/${id}/pairs${qs}`);
+  },
+  // A pair id carries a bar between its two unit ids, so it is encoded here once.
+  getRunPair(id, pairId) {
+    return get(`/api/runs/${id}/pairs/${encodeURIComponent(pairId)}`);
+  },
+  getRunPairsHistogram(id, params) {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return get(`/api/runs/${id}/pairs/histogram${qs}`);
+  },
+  getRunScoreEval(id) {
+    return get(`/api/runs/${id}/score-eval`);
+  },
+  getRunBlockingReport(id) {
+    return get(`/api/runs/${id}/blocking-report`);
+  },
+  getRunContradictions(id) {
+    return get(`/api/runs/${id}/contradictions`);
+  },
+  saveRunLabels(id, data) {
+    return post(`/api/runs/${id}/labels`, data);
+  },
+  deleteRunLabel(id, pairId) {
+    return del(`/api/runs/${id}/labels/${encodeURIComponent(pairId)}`);
+  },
+
   getRunMatches(id, params) {
     const qs = params ? "?" + new URLSearchParams(params).toString() : "";
     return get(`/api/runs/${id}/matches${qs}`);
@@ -185,11 +215,12 @@ export const api = {
   setLabelsRole(ids, heldOut) {
     return post("/api/labels/role", { ids, held_out: heldOut ? 1 : 0 });
   },
-  labelsExportUrl() {
-    return apiUrl("/api/labels/export.csv");
+  labelsExportUrl(params) {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return apiUrl(`/api/labels/export.csv${qs}`);
   },
-  importLabelsCsv(csvText) {
-    return post("/api/labels/import-csv", { csv: csvText });
+  importLabels(csvText) {
+    return post("/api/labels/import", { csv: csvText });
   },
 
   // --- Model (GBT) ---
@@ -248,6 +279,9 @@ export const api = {
   },
   previewCleaning(data) {
     return post("/api/config/preview-cleaning", data);
+  },
+  previewDerived(data) {
+    return post("/api/config/preview-derived", data);
   },
   previewKeys(data) {
     return post("/api/config/preview-keys", data);

@@ -1,463 +1,368 @@
 /* ============================================================
    Screen: Review queue — table + diff view, threshold control,
-   keyboard nav, live re-bucketing, feature breakdown
+   keyboard nav, live re-bucketing, per-comparison explanation
+   ------------------------------------------------------------
+   The cockpit keeps roe_ui's shape: brush a band on the histogram,
+   mark the band TRUE or FALSE, fix the exceptions in the list, then
+   save. What changed is the data: both sides of a pair are units of
+   the same dataset, filtering and paging happen on the server, and
+   the evidence a reviewer judges on (DESIGN.md D13a) sits in the
+   diff view under the explanation.
    ============================================================ */
 
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { Icons } from "../components/Icons";
-import { ProbBar, BandTag, fmtProb, fmtNumber } from "../components/ProbBar";
+import { ProbBar, fmtProb, fmtNumber } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
-import { DiffHero } from "../components/DiffHero";
-import { AddressPanel } from "../components/AddressPanel";
-import { FeatureBreakdown, FeaturePopover } from "../components/FeatureBreakdown";
-import { GbtExplain } from "../components/GbtExplain";
+import { DiffHero, BucketTag, entityIds } from "../components/DiffHero";
+import { PairExplain } from "../components/PairExplain";
+import { PairEvidence } from "../components/PairEvidence";
 import { ThresholdPanel } from "../components/ThresholdPanel";
+import { Cell, NUMERIC_TYPES } from "../components/cells";
 import MethodologyNotes from "../components/MethodologyNotes";
-import { useLabels } from "../hooks/useLabels";
 import { useKeyboardNav } from "../hooks/useKeyboardNav";
+import { useProfile } from "../profile";
 
-// ---------- Normalise API match item to a consistent shape ----------
-function normaliseItem(m) {
-  const bucket = m.bucket || m._bucket || null;
-  const band =
-    m.band ||
-    (bucket === "high" || bucket === "exact"
-      ? "auto-accept"
-      : bucket === "review"
-        ? "review"
-        : bucket === "ambiguous"
-          ? "ambiguous"
-          : null);
-  return {
-    id: m.match_id || m.id,
-    ocod_name_raw: m.ocod_name_raw || "",
-    ocod_name_clean: m.ocod_name_clean || m.ocod_name_raw || "",
-    roe_name_raw: m.roe_name_raw || "",
-    roe_name_clean: m.roe_name_clean || m.roe_name_raw || "",
-    roe_company_number: m.roe_company_number || "",
-    matched_name_type: m.matched_name_type || "current",
-    roe_name_matched_raw: m.roe_name_matched_raw || "",
-    ocod_id: m.ocod_id || "",
-    jurisdiction_clean: m.jurisdiction_clean || "",
-    ocod_jurisdiction_raw: m.ocod_jurisdiction_raw || m.jurisdiction_clean || "",
-    match_probability: m.match_probability ?? m.prob ?? 0,
-    match_method: m.match_method || m.method || "probabilistic",
-    features: m.features || {},
-    label: m.label || null,
-    label_reviewer: m.label_reviewer || null,
-    // Side-by-side address block (display + review signal only; never a score input).
-    address: m.address || null,
-    band,
-    bucket,
-    run_id: m.run_id || "",
-    // Keep raw for API body
-    _raw: m,
-  };
+const PER_PAGE = 50;
+const BULK_LIMIT = 500; // the API's own cap, and the batch size for saving
+
+// The bucket tabs, in the order a reviewer works through them.
+const BUCKETS = [
+  { id: "review", lab: "Review", count: "review" },
+  { id: "accept", lab: "Auto-accepted", count: "accept" },
+  { id: "reject", lab: "Rejected", count: "reject" },
+  { id: "all", lab: "All", count: "all" },
+];
+
+const DECIDED_BY = [
+  { id: "score", lab: "Score", count: "score", help: "The score alone put this pair where it is." },
+  {
+    id: "import",
+    lab: "Imported labels",
+    count: "import",
+    help: "Accepted because both sides already carry the same earlier entity ID.",
+  },
+  { id: "human", lab: "Human", count: "human", help: "A reviewer decided this pair." },
+];
+
+function isHttpUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return true; // empty is fine
+  return /^https?:\/\/\S+$/i.test(text);
 }
 
-function companiesHouseUrl(companyNumber) {
-  if (!companyNumber) return null;
-  return `https://find-and-update.company-information.service.gov.uk/company/${encodeURIComponent(companyNumber)}`;
-}
-
-// ---------- Main screen component ----------
+// ---------- main screen ----------
 export default function ReviewScreen() {
   const { id: runId } = useParams();
   const navigate = useNavigate();
+  const profile = useProfile();
   const [searchParams] = useSearchParams();
 
-  // View mode
   const [mode, setMode] = useState("table");
-  const [groupByEntity, setGroupByEntity] = useState(false);
 
-  // Thresholds (initialised from diagnostics on load)
+  // Thresholds, seeded from the run and applied by the re-bucket call.
   const [threshold, setThreshold] = useState(0.92);
-  const [reviewLow, setReviewLow] = useState(0.50);
-  const [pipelineThreshold, setPipelineThreshold] = useState(null);
-  const [committedThreshold, setCommittedThreshold] = useState(null);
-
-  // Filters & sorting
-  const [filter, setFilter] = useState("review");
-  const [jurFilter, setJurFilter] = useState("all");
-  const [search, setSearch] = useState(() => searchParams.get("search") || "");
-  const [sortCol, setSortCol] = useState("prob");
-  const [sortAsc, setSortAsc] = useState(false);
-  const [hideLabelled, setHideLabelled] = useState(false);
-  // Former-name matches are shown inline (badged) by default; this isolates them.
-  const [formerOnly, setFormerOnly] = useState(false);
-
-  // Selection
-  const [selectedId, setSelectedId] = useState(null);
-
-  // Probabilistic items (loaded on mount — the 726 Phase 2 scored pairs)
-  const [probItems, setProbItems] = useState([]);
-  const [histogram, setHistogram] = useState([]);
-  const [scoreSource, setScoreSource] = useState("simple matcher");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [reloadToken, setReloadToken] = useState(0);
+  const [reviewLow, setReviewLow] = useState(0.5);
+  const [committed, setCommitted] = useState(null);
   const [committing, setCommitting] = useState(false);
 
-  // Cockpit: brushed score window + bulk-on-slice staging
+  // Filters — every one of these is a query parameter.
+  const [bucket, setBucket] = useState("review");
+  const [track, setTrack] = useState("all");
+  const [decidedBy, setDecidedBy] = useState("all");
+  const [importFilter, setImportFilter] = useState("all");
+  const [labelled, setLabelled] = useState("all");
+  const [held, setHeld] = useState("hide");
+  const [query, setQuery] = useState(() => searchParams.get("search") || "");
+  const [q, setQ] = useState(() => searchParams.get("search") || "");
+  const [sort, setSort] = useState("score");
+  const [order, setOrder] = useState("desc");
+  const [page, setPage] = useState(0);
   const [brushLo, setBrushLo] = useState(null);
   const [brushHi, setBrushHi] = useState(null);
-  const [staged, setStaged] = useState(() => ({})); // id -> provisional 'TRUE' | 'FALSE'
+
+  const [data, setData] = useState(null);
+  const [histogram, setHistogram] = useState(null);
+  const [scoreEval, setScoreEval] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [attempt, setAttempt] = useState(0);
+
+  const [selectedId, setSelectedId] = useState(null);
+
+  // Labels the user has set this session, over whatever the API returned.
+  const [labels, setLabels] = useState({}); // pair_id -> {is_match, notes, evidence_url} | null
+  const [saving, setSaving] = useState(new Set());
+  const [liveCounts, setLiveCounts] = useState(null);
+
+  // Bulk staging: nothing saves until the banner's Save is pressed.
+  const [staged, setStaged] = useState({});
   const [stageOnlyUnlabelled, setStageOnlyUnlabelled] = useState(true);
+  const [stagingBusy, setStagingBusy] = useState(false);
   const [committingBulk, setCommittingBulk] = useState(false);
 
-  // Exact items (lazy-loaded when Exact tab selected)
-  const [exactItems, setExactItems] = useState([]);
-  const [exactPage, setExactPage] = useState(1);
-  const [exactTotal, setExactTotal] = useState(0);
-  const [exactLoading, setExactLoading] = useState(false);
+  const tracks = profile.tracks || [];
+  const eventColumns = profile.event_columns || [];
 
-  // Ambiguous count for the link button
-  const [ambiguousCount, setAmbiguousCount] = useState(0);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setQ(query.trim());
+      setPage(0);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [query]);
 
-  // Labels hook
-  const { labels, notes, setLabel, setNote, pending } = useLabels([]);
-
-  // ---------- Load probabilistic data + diagnostics ----------
+  // The run's own thresholds seed the sliders.
   useEffect(() => {
     if (!runId) return;
+    api
+      .getRun(runId)
+      .then((run) => {
+        const high = run?.threshold_high;
+        const low = run?.threshold_review;
+        if (high != null) setThreshold(+high);
+        if (low != null) setReviewLow(+low);
+        setCommitted({ high: +(high ?? 0.92), review: +(low ?? 0.5) });
+      })
+      .catch(() => {});
+  }, [runId]);
+
+  // Histogram and score-eval follow the track filter, not the rest.
+  useEffect(() => {
+    if (!runId) return;
+    const params = track === "all" ? undefined : { track };
+    api.getRunPairsHistogram(runId, params).then(setHistogram).catch(() => setHistogram(null));
+    api.getRunScoreEval(runId).then(setScoreEval).catch(() => setScoreEval(null));
+  }, [runId, track, attempt]);
+
+  const listParams = useMemo(() => {
+    const p = { offset: page * PER_PAGE, limit: PER_PAGE, sort, order };
+    if (bucket !== "all") p.bucket = bucket;
+    if (track !== "all") p.track = track;
+    if (decidedBy !== "all") p.decided_by = decidedBy;
+    if (importFilter !== "all") p.import = importFilter;
+    if (labelled !== "all") p.labelled = labelled;
+    if (held !== "both") p.held = held;
+    if (q) p.q = q;
+    if (brushLo != null) p.min_score = brushLo;
+    if (brushHi != null) p.max_score = brushHi;
+    return p;
+  }, [page, sort, order, bucket, track, decidedBy, importFilter, labelled, held, q, brushLo, brushHi]);
+
+  useEffect(() => {
+    if (!runId) return;
+    let alive = true;
     setLoading(true);
-    setError(null);
-
-    Promise.all([
-      api.getRunMatches(runId, { bucket: "review", per_page: 10000 }),
-      api.getRunMatches(runId, { bucket: "high", per_page: 10000, match_method: "probabilistic" }),
-      api.getRunDiagnostics(runId),
-    ])
-      .then(([reviewData, highProbData, diagData]) => {
-        const reviewItems = (reviewData.items || []).map(normaliseItem);
-        const highItems = (highProbData.items || []).map(normaliseItem);
-        const items = [...highItems, ...reviewItems];
-        setProbItems(items);
-
-        const bc = reviewData.bucket_counts || highProbData.bucket_counts || {};
-        setAmbiguousCount(bc.ambiguous || 0);
-        setExactTotal(bc.exact || 0);
-
-        if (diagData && diagData.histogram) {
-          setHistogram(diagData.histogram);
-        } else if (diagData && diagData.probability_histogram) {
-          setHistogram(diagData.probability_histogram);
+    api
+      .getRunPairs(runId, listParams)
+      .then((res) => {
+        if (!alive) return;
+        setData(res);
+        setError(null);
+        if (res?.items?.length && !res.items.some((it) => it.pair_id === selectedId)) {
+          setSelectedId(res.items[0].pair_id);
         }
-        setScoreSource(diagData?.score_column === "gbt_score" ? "trained model" : "simple matcher");
-        if (diagData?.thresholds) {
-          if (diagData.thresholds.threshold_high != null) {
-            setThreshold(+diagData.thresholds.threshold_high);
-            setCommittedThreshold(+diagData.thresholds.threshold_high);
-          }
-          if (diagData.thresholds.threshold_review != null) {
-            setReviewLow(+diagData.thresholds.threshold_review);
-            setPipelineThreshold(+diagData.thresholds.threshold_review);
-          }
-        }
-
-        for (const item of items) {
-          if (item.label) {
-            setLabel(item.id, item.label, "", null);
-          }
-        }
-
-        const reviewItem = items.find((m) => m.band === "review");
-        if (reviewItem) setSelectedId(reviewItem.id);
-        else if (items.length > 0) setSelectedId(items[0].id);
-
-        setLoading(false);
       })
       .catch((err) => {
-        setError(err.message || "Failed to load review data");
-        setLoading(false);
-      });
-  }, [runId, reloadToken]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ---------- Lazy-load exact matches when tab selected ----------
-  useEffect(() => {
-    if (filter !== "exact" || !runId) return;
-    setExactLoading(true);
-    api
-      .getRunMatches(runId, { bucket: "exact", page: exactPage, per_page: 50 })
-      .then((data) => {
-        setExactItems((data.items || []).map(normaliseItem));
-        setExactTotal(data.total || 0);
+        if (!alive) return;
+        setData(null);
+        setError(err.message);
       })
-      .catch(() => setExactItems([]))
-      .finally(() => setExactLoading(false));
-  }, [filter, exactPage, runId]);
-
-  // ---------- Re-bucket probabilistic items per current thresholds ----------
-  const bucketed = useMemo(
-    () =>
-      probItems.map((m) => {
-        const band = +m.match_probability >= threshold ? "auto-accept" : "review";
-        return { ...m, band };
-      }),
-    [probItems, threshold]
-  );
-
-  // Entities that already have a chosen match: once one candidate of an OCOD entity is
-  // marked TRUE, the siblings are "resolved" — they can't also be the match (one per
-  // entity), so we grey them out rather than auto-writing them as FALSE (a losing
-  // candidate isn't a real hard-negative; see the model's unit_mismatch handling).
-  const entitiesWithTrue = useMemo(() => {
-    const s = new Set();
-    const scan = (arr) => arr.forEach((m) => { if (labels[m.id] === "TRUE") s.add(entityKeyOf(m)); });
-    scan(bucketed); scan(exactItems);
-    return s;
-  }, [bucketed, exactItems, labels]);
-
-  // ---------- Filter & sort ----------
-  const filtered = useMemo(() => {
-    const source = filter === "exact" ? exactItems : bucketed;
-    const out = source.filter((m) => {
-      if (filter === "review" && m.band !== "review") return false;
-      if (filter === "accepted" && m.band !== "auto-accept") return false;
-      if (jurFilter !== "all" && m.jurisdiction_clean !== jurFilter) return false;
-      if (brushLo != null && brushHi != null) {
-        const p = +m.match_probability;
-        if (!(p >= brushLo && p <= brushHi)) return false;
-      }
-      if (
-        search &&
-        !(
-          m.ocod_name_raw.toLowerCase().includes(search.toLowerCase()) ||
-          m.roe_name_raw.toLowerCase().includes(search.toLowerCase())
-        )
-      )
-        return false;
-      if (hideLabelled && (labels[m.id] || entitiesWithTrue.has(entityKeyOf(m)))) return false;
-      if (formerOnly && m.matched_name_type !== "former") return false;
-      return true;
-    });
-
-    const dir = sortAsc ? 1 : -1;
-    out.sort((a, b) => {
-      let av, bv;
-      if (sortCol === "prob") {
-        av = +a.match_probability || 0;
-        bv = +b.match_probability || 0;
-      } else if (sortCol === "ocod") {
-        av = (a.ocod_name_raw || "").toLowerCase();
-        bv = (b.ocod_name_raw || "").toLowerCase();
-      } else if (sortCol === "roe") {
-        av = (a.roe_name_raw || "").toLowerCase();
-        bv = (b.roe_name_raw || "").toLowerCase();
-      } else if (sortCol === "jur") {
-        av = (a.jurisdiction_clean || "").toLowerCase();
-        bv = (b.jurisdiction_clean || "").toLowerCase();
-      } else {
-        return 0;
-      }
-      if (av < bv) return -dir;
-      if (av > bv) return dir;
-      return 0;
-    });
-    return out;
-  }, [bucketed, exactItems, filter, jurFilter, search, sortCol, sortAsc, brushLo, brushHi, hideLabelled, formerOnly, labels, entitiesWithTrue]);
-
-  // ---------- Counts (live from slider re-bucketing) ----------
-  const counts = useMemo(() => {
-    const review = bucketed.filter((m) => m.band === "review").length;
-    const accepted = bucketed.filter((m) => m.band === "auto-accept").length;
-    return {
-      review,
-      accepted,
-      all: probItems.length,
-      exact: exactTotal,
-      ambiguous: ambiguousCount,
-      pending: bucketed.filter((m) => m.band === "review" && !labels[m.id]).length,
-      labelled: Object.keys(labels).length,
-      former: (filter === "exact" ? exactItems : bucketed).filter((m) => m.matched_name_type === "former").length,
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
     };
-  }, [bucketed, probItems, exactTotal, ambiguousCount, labels, filter, exactItems]);
+    // selectedId is deliberately out: picking a row must not refetch the page.
+  }, [runId, listParams, attempt]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ---------- Unique jurisdictions for filter dropdown ----------
-  const jurisdictions = useMemo(() => {
-    const set = new Set();
-    const source = filter === "exact" ? exactItems : probItems;
-    for (const m of source) {
-      if (m.jurisdiction_clean) set.add(m.jurisdiction_clean);
-    }
-    return [...set].sort();
-  }, [probItems, exactItems, filter]);
+  const items = data?.items || [];
+  const counts = liveCounts || data?.counts || {};
+  const columns = data?.columns || [];
+  const priorityKey = (data?.priority_columns || profile.priority_columns || [])[0];
+  const priorityColumn =
+    (columns.find((c) => c.key === priorityKey)) ||
+    (profile.display_columns || []).find((c) => c.key === priorityKey);
+  const total = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 
-  // ---------- Currently selected item ----------
-  const current = useMemo(() => {
-    return (
-      filtered.find((m) => m.id === selectedId) ||
-      filtered[0] ||
-      null
-    );
-  }, [filtered, selectedId]);
-
-  // ---------- Label handler (wraps hook with raw data) ----------
-  const handleLabel = useCallback(
-    (matchId, value) => {
-      const all = [...probItems, ...exactItems];
-      const item = all.find((m) => m.id === matchId);
-      const noteText = notes[matchId] || "";
-      setLabel(matchId, value, noteText, item ? { ...item._raw, run_id: runId } : null);
-    },
-    [probItems, exactItems, notes, setLabel, runId]
+  // What the row shows: the session's label if there is one, else the API's.
+  const labelOf = useCallback(
+    (item) => (item.pair_id in labels ? labels[item.pair_id] : item.label || null),
+    [labels]
   );
 
+  const current = useMemo(
+    () => items.find((m) => m.pair_id === selectedId) || items[0] || null,
+    [items, selectedId]
+  );
+
+  // ---------- labelling ----------
+  const applyLabel = useCallback(
+    (pairId, verdict, extra) => {
+      const before = labels[pairId];
+      const optimistic =
+        verdict == null ? null : { is_match: verdict, reviewer: "you", ...(extra || {}) };
+      setLabels((prev) => ({ ...prev, [pairId]: optimistic }));
+      setSaving((prev) => new Set(prev).add(pairId));
+
+      const done = () =>
+        setSaving((prev) => {
+          const next = new Set(prev);
+          next.delete(pairId);
+          return next;
+        });
+
+      const request =
+        verdict == null
+          ? api.deleteRunLabel(runId, pairId)
+          : api.saveRunLabels(runId, {
+              labels: [{ pair_id: pairId, is_match: verdict, ...(extra || {}) }],
+              provenance: "manual",
+            });
+
+      request
+        .then((res) => {
+          if (res?.counts) setLiveCounts(res.counts);
+        })
+        .catch((err) => {
+          // Put the row back the way it was rather than lie about what is saved.
+          setLabels((prev) => ({ ...prev, [pairId]: before ?? undefined }));
+          alert("Could not save that label: " + err.message);
+        })
+        .finally(done);
+    },
+    [labels, runId]
+  );
+
+  const handleLabel = useCallback(
+    (pairId, verdict) => {
+      const item = items.find((m) => m.pair_id === pairId);
+      const existing = item ? labelOf(item) : null;
+      // Pressing the same verdict again clears it, as the old screen does.
+      const next = existing && existing.is_match === verdict ? null : verdict;
+      applyLabel(pairId, next, existing ? { notes: existing.notes, evidence_url: existing.evidence_url } : null);
+    },
+    [items, labelOf, applyLabel]
+  );
+
+  // ---------- thresholds ----------
   const handleCommitThresholds = useCallback(() => {
     setCommitting(true);
     api
       .reBucketRun(runId, { threshold_high: threshold, threshold_review: reviewLow })
-      .then(() => {
-        setPipelineThreshold(reviewLow);
-        setCommittedThreshold(threshold);
-        setReloadToken((token) => token + 1);
+      .then((res) => {
+        setCommitted({ high: threshold, review: reviewLow });
+        if (res?.counts) setLiveCounts(res.counts);
+        setAttempt((n) => n + 1);
       })
       .catch((err) => alert(err.message))
       .finally(() => setCommitting(false));
   }, [runId, threshold, reviewLow]);
 
-  // ---------- Brush (labelling window) ----------
+  // ---------- brush ----------
   const onBrush = useCallback((lo, hi) => {
-    setBrushLo(lo); setBrushHi(hi);
-    // Surface the most-likely-wrong first: lowest scores in the band (the ones to
-    // flip FALSE when you've bulk-marked a high band TRUE).
-    setSortCol("prob"); setSortAsc(true);
+    setBrushLo(lo);
+    setBrushHi(hi);
+    setPage(0);
+    // Surface the most-likely-wrong first, as roe_ui does.
+    setSort("score");
+    setOrder("asc");
   }, []);
-  const clearBrush = useCallback(() => { setBrushLo(null); setBrushHi(null); }, []);
+  const clearBrush = useCallback(() => {
+    setBrushLo(null);
+    setBrushHi(null);
+    setPage(0);
+    setOrder("desc");
+  }, []);
 
-  // ---------- Bulk-on-slice staging ----------
-  const stagedCount = Object.keys(staged).length;
-  const previewDelta = useMemo(() => {
-    if (committedThreshold == null) return null;
-    const committedAccepted = probItems.filter((m) => +m.match_probability >= committedThreshold).length;
-    const committedReview = probItems.length - committedAccepted;
-    return {
-      threshold,
-      committed: committedThreshold,
-      acceptedDelta: counts.accepted - committedAccepted,
-      reviewDelta: counts.review - committedReview,
-      changed: bucketed.filter((m) => {
-        const now = +m.match_probability >= threshold;
-        const before = +m.match_probability >= committedThreshold;
-        return now !== before;
-      }).length,
-    };
-  }, [bucketed, committedThreshold, counts.accepted, counts.review, probItems, threshold]);
-
+  // ---------- bulk on the slice ----------
   const sliceParts = useMemo(() => {
-    const parts = [];
-    const bucketLabel = {
-      review: "bucket: Review",
-      accepted: "bucket: Auto-accepted",
-      all: "bucket: All probabilistic",
-      exact: "bucket: Exact",
-    }[filter];
-    if (bucketLabel) parts.push(bucketLabel);
-    if (brushLo != null && brushHi != null) {
-      parts.push(`score: ${brushLo.toFixed(2)}-${brushHi.toFixed(2)}`);
-    }
-    if (jurFilter !== "all") parts.push(`jurisdiction: ${jurFilter}`);
-    if (search.trim()) parts.push(`search: "${search.trim()}"`);
+    const parts = [`bucket: ${BUCKETS.find((b) => b.id === bucket)?.lab || bucket}`];
+    if (brushLo != null) parts.push(`score: ${brushLo.toFixed(2)}–${brushHi.toFixed(2)}`);
+    if (track !== "all") parts.push(`track: ${tracks.find((t) => t.key === track)?.label || track}`);
+    if (decidedBy !== "all") parts.push(`decided by: ${decidedBy}`);
+    if (importFilter !== "all") parts.push(`earlier labels: ${importFilter}`);
+    if (held !== "both") parts.push(held === "hide" ? "held groups hidden" : "held groups only");
+    if (q) parts.push(`search: "${q}"`);
     return parts;
-  }, [filter, brushLo, brushHi, jurFilter, search]);
+  }, [bucket, brushLo, brushHi, track, decidedBy, importFilter, held, q, tracks]);
 
-  const stageSlice = useCallback((verdict) => {
-    setStaged((prev) => {
-      const next = { ...prev };
-      for (const m of filtered) {
-        if (stageOnlyUnlabelled && labels[m.id]) continue;
-        next[m.id] = verdict;
-      }
-      return next;
-    });
-  }, [filtered, stageOnlyUnlabelled, labels]);
-  const toggleStaged = useCallback((id, verdict) => {
-    setStaged((prev) => ({ ...prev, [id]: verdict }));
+  const stageSlice = useCallback(
+    (verdict) => {
+      setStagingBusy(true);
+      // Stage the whole slice, not just the page on screen — up to the API's cap.
+      api
+        .getRunPairs(runId, { ...listParams, offset: 0, limit: BULK_LIMIT })
+        .then((res) => {
+          const next = {};
+          for (const it of res.items || []) {
+            if (stageOnlyUnlabelled && (it.pair_id in labels ? labels[it.pair_id] : it.label)) continue;
+            next[it.pair_id] = verdict;
+          }
+          setStaged((prev) => ({ ...prev, ...next }));
+        })
+        .catch((err) => alert(err.message))
+        .finally(() => setStagingBusy(false));
+    },
+    [runId, listParams, stageOnlyUnlabelled, labels]
+  );
+
+  const stagedCount = Object.keys(staged).length;
+  const toggleStaged = useCallback((pairId, verdict) => {
+    setStaged((prev) => ({ ...prev, [pairId]: verdict }));
   }, []);
   const cancelStaging = useCallback(() => setStaged({}), []);
+
   const commitStaged = useCallback(async () => {
     const entries = Object.entries(staged);
-    if (entries.length === 0) return;
-    const byId = new Map([...probItems, ...exactItems].map((m) => [m.id, m]));
-    const lbls = [];
-    for (const [id, verdict] of entries) {
-      const m = byId.get(id);
-      const r = (m && m._raw) || {};
-      if (!r.roe_company_number) continue;
-      lbls.push({
-        _ocodKey: `${(r.ocod_name_clean || r.ocod_name_raw || "").toUpperCase()}|${(r.jurisdiction_clean || "").toUpperCase()}`,
-        _score: +(m.match_probability) || 0,
-        ocod_name_clean: r.ocod_name_clean || r.ocod_name_raw,
-        jurisdiction_clean: r.jurisdiction_clean,
-        roe_company_number: r.roe_company_number,
-        roe_name: r.roe_name_raw || r.roe_name,
-        ocod_name_raw: r.ocod_name_raw,
-        ocod_jurisdiction_raw: r.ocod_jurisdiction_raw || r.jurisdiction_clean,
-        is_true_match: verdict,
-        reviewer_notes: "Bulk-labelled by score range",
-        provenance: "bulk_range",
-        run_id: runId,
-      });
-    }
-    // One TRUE per OCOD: if a band marked several candidates of the same entity TRUE,
-    // keep only the HIGHEST-scored as TRUE and demote the rest to FALSE (a useful hard
-    // negative). The store enforces this anyway; doing it here makes the *kept* one the
-    // best candidate rather than whatever the batch happened to process last.
-    const bestTrue = {};
-    for (const l of lbls) {
-      if (l.is_true_match !== "TRUE") continue;
-      if (!bestTrue[l._ocodKey] || l._score > bestTrue[l._ocodKey]._score) bestTrue[l._ocodKey] = l;
-    }
-    let demoted = 0;
-    for (const l of lbls) {
-      if (l.is_true_match === "TRUE" && bestTrue[l._ocodKey] !== l) {
-        l.is_true_match = "FALSE";
-        l.reviewer_notes = "Auto-FALSE: a higher-scored candidate was chosen for this entity";
-        l.provenance = "implied_negative";
-        demoted += 1;
-      }
-    }
-    const payload = lbls.map(({ _ocodKey, _score, ...rest }) => rest);
+    if (!entries.length) return;
     setCommittingBulk(true);
     try {
-      for (let i = 0; i < payload.length; i += 500) {
-        await api.createLabelsBatch({ labels: payload.slice(i, i + 500) });
+      for (let i = 0; i < entries.length; i += BULK_LIMIT) {
+        const slice = entries.slice(i, i + BULK_LIMIT);
+        const res = await api.saveRunLabels(runId, {
+          labels: slice.map(([pair_id, is_match]) => ({
+            pair_id,
+            is_match,
+            notes: "Marked in bulk by score band",
+          })),
+          provenance: "bulk_range",
+        });
+        if (res?.counts) setLiveCounts(res.counts);
       }
+      setLabels((prev) => {
+        const next = { ...prev };
+        for (const [pairId, verdict] of entries) {
+          next[pairId] = { is_match: verdict, reviewer: "you", provenance: "bulk_range" };
+        }
+        return next;
+      });
       setStaged({});
-      setReloadToken((t) => t + 1);
     } catch (err) {
       alert(err.message);
     } finally {
       setCommittingBulk(false);
     }
-  }, [staged, probItems, exactItems, runId]);
+  }, [staged, runId]);
 
-  // ---------- Keyboard navigation ----------
   useKeyboardNav({
-    items: filtered,
-    selectedId: current?.id,
+    items,
+    selectedId: current?.pair_id,
     setSelectedId,
     onLabel: handleLabel,
     enabled: mode === "diff",
   });
 
-  // ---------- Loading / error states ----------
-  if (loading) {
-    return (
-      <div className="content">
-        <div className="page-head">
-          <div>
-            <h1 className="page-title">Review queue</h1>
-            <p className="page-sub muted pulse">Loading match data...</p>
-          </div>
-        </div>
-      </div>
-    );
+  function resetPage(setter, value) {
+    setter(value);
+    setPage(0);
   }
 
-  if (error) {
+  if (error && !data) {
     return (
       <div className="content">
         <div className="page-head">
@@ -466,11 +371,11 @@ export default function ReviewScreen() {
           </div>
         </div>
         <Empty
-          title="Failed to load review data"
+          title="No scored pairs for this run"
           sub={error}
           action={
-            <button className="btn primary" onClick={() => window.location.reload()}>
-              <Icons.refresh size={14} /> Retry
+            <button className="btn primary" onClick={() => navigate(`/runs/${runId}`)}>
+              Back to the run
             </button>
           }
         />
@@ -478,9 +383,10 @@ export default function ReviewScreen() {
     );
   }
 
+  const pendingReview = counts.review ?? 0;
+
   return (
     <div className="content" style={{ maxWidth: "none", paddingRight: 28 }}>
-      {/* Page header */}
       <div className="page-head">
         <div>
           {runId && (
@@ -490,405 +396,424 @@ export default function ReviewScreen() {
           )}
           <h1 className="page-title">Review queue</h1>
           <p className="page-sub">
-            {counts.pending} pairs the computer wasn't sure about. <strong>Drag a band on the
-            chart</strong> to grab a group of similar scores, <strong>mark them all</strong> TRUE or
-            FALSE, fix the exceptions in the list, then save. Scores come from the{" "}
-            <strong>{scoreSource}</strong> (0 = probably not a match, 1 = probably a match).
+            {fmtNumber(pendingReview)} pairs the scorer was not sure about.{" "}
+            <strong>Drag a band on the chart</strong> to grab a group of similar scores,{" "}
+            <strong>mark them all</strong> TRUE or FALSE, fix the exceptions in the list, then save.
+            0 means probably not the same, 1 means probably the same.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div className="seg">
-            <button
-              className={mode === "table" ? "on" : ""}
-              onClick={() => setMode("table")}
-            >
-              <Icons.table size={13} />Table
+            <button className={mode === "table" ? "on" : ""} onClick={() => setMode("table")}>
+              <Icons.table size={13} />
+              Table
             </button>
-            <button
-              className={mode === "diff" ? "on" : ""}
-              onClick={() => setMode("diff")}
-            >
-              <Icons.diff size={13} />Diff
+            <button className={mode === "diff" ? "on" : ""} onClick={() => setMode("diff")}>
+              <Icons.diff size={13} />
+              Diff
             </button>
           </div>
-          <a className="btn" href={api.runFileUrl(runId, "matches_for_review.csv")} download>
-            <Icons.download size={14} />Export queue
+          <a className="btn" href={api.labelsExportUrl({ run_id: runId })} download>
+            <Icons.download size={14} />
+            Export labels
           </a>
-          <button
-            className="btn primary"
-            onClick={() => api.applyLabels(runId).then(() => alert("Library labels applied to this run.")).catch((err) => alert(err.message))}
-            title="Re-apply the durable label library to this run's outputs; this does not commit staged review labels."
-          >
-            <Icons.check size={14} stroke="#fff" />Apply library labels to run
-          </button>
         </div>
       </div>
 
-      {/* Shared methodology notes — persistent across users */}
       <MethodologyNotes />
 
-      {/* Threshold panel — only shown for probabilistic tabs */}
-      {filter !== "exact" && (
-        <>
-          <ThresholdPanel
-            threshold={threshold}
-            setThreshold={setThreshold}
-            reviewLow={reviewLow}
-            setReviewLow={setReviewLow}
-            counts={counts}
-            histogram={histogram}
-            pipelineThreshold={pipelineThreshold}
-            previewDelta={previewDelta}
-            brushLo={brushLo}
-            brushHi={brushHi}
-            onBrush={onBrush}
-            isGbt={scoreSource === "trained model"}
-            scoreLabel={scoreSource === "trained model" ? "calibrated model score" : "simple-matcher score"}
-          />
-          {/* SECONDARY · output cutoff (changes the download; not labelling) */}
-          <div
-            style={{
-              display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-              margin: "-2px 0 16px", padding: "8px 12px",
-              background: "var(--surface-sub)", border: "1px solid var(--line)",
-              borderRadius: "var(--r-md)", fontSize: 12,
-            }}
-          >
-            <span className="eyebrow" style={{ margin: 0 }}>Output cutoff</span>
-            <span className="muted">
-              Ships <span className="mono">&ge; {threshold.toFixed(2)}</span>, drops{" "}
-              <span className="mono">&le; {reviewLow.toFixed(2)}</span> — to the downloaded file, a
-              provisional rule re-checked every run. It{" "}
-              <strong>saves no answers and teaches nothing</strong>.
-              {previewDelta && previewDelta.acceptedDelta !== 0 && (
-                <> Moving the line would shift{" "}
-                  <span className="mono">{previewDelta.acceptedDelta > 0 ? "+" : ""}{fmtNumber(previewDelta.acceptedDelta)}</span>{" "}
-                  pairs into auto-accept.</>
-              )}
-            </span>
-            <span style={{ marginLeft: "auto" }} />
-            <button className="btn sm" onClick={handleCommitThresholds} disabled={committing}>
-              {committing ? "Applying…" : "Apply cutoffs to the run"}
+      <ThresholdPanel
+        threshold={threshold}
+        setThreshold={setThreshold}
+        reviewLow={reviewLow}
+        setReviewLow={setReviewLow}
+        histogram={histogram}
+        counts={counts}
+        committed={committed}
+        onCommit={handleCommitThresholds}
+        committing={committing}
+        brushLo={brushLo}
+        brushHi={brushHi}
+        onBrush={onBrush}
+        scoreEval={scoreEval}
+      />
+
+      {/* PRIMARY · label these pairs */}
+      <div className="card" style={{ margin: "12px 0", borderColor: "var(--line-strong)" }}>
+        <div className="card-h" style={{ paddingBottom: 6 }}>
+          <Icons.check size={15} />
+          <h3 style={{ margin: 0 }}>Label these pairs</h3>
+          <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
+            your answers — saved for good, and what teaches the model
+          </span>
+        </div>
+        <div className="card-b" style={{ paddingTop: 10 }}>
+          <div style={{ fontSize: 13, marginBottom: 10 }}>
+            {brushLo != null ? (
+              <>
+                Band{" "}
+                <span className="mono">
+                  {brushLo.toFixed(2)}–{brushHi.toFixed(2)}
+                </span>{" "}
+                selected on the chart —{" "}
+              </>
+            ) : (
+              <>Whole current view (drag a band on the chart to narrow) — </>
+            )}
+            <strong>{fmtNumber(Math.min(total, BULK_LIMIT))}</strong> pairs will be marked
+            {total > BULK_LIMIT && (
+              <span className="muted"> (the first {BULK_LIMIT} of {fmtNumber(total)}; repeat to go further)</span>
+            )}
+            .{" "}
+            {brushLo != null && (
+              <button className="btn sm" onClick={clearBrush}>
+                clear band
+              </button>
+            )}
+            <div className="muted mono" style={{ fontSize: 11, marginTop: 4 }}>
+              {sliceParts.join(" · ")}
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <button
+              className="btn lg"
+              style={{ borderColor: "var(--green)", color: "var(--green)", fontWeight: 600 }}
+              onClick={() => stageSlice("TRUE")}
+              disabled={total === 0 || stagingBusy}
+            >
+              <Icons.check size={14} /> Mark all TRUE
             </button>
+            <button
+              className="btn lg"
+              style={{ borderColor: "var(--ti-red)", color: "var(--ti-red)", fontWeight: 600 }}
+              onClick={() => stageSlice("FALSE")}
+              disabled={total === 0 || stagingBusy}
+            >
+              Mark all FALSE
+            </button>
+            <label
+              className="muted"
+              style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 5, marginLeft: 6 }}
+            >
+              <input
+                type="checkbox"
+                checked={stageOnlyUnlabelled}
+                onChange={(e) => setStageOnlyUnlabelled(e.target.checked)}
+              />
+              skip ones I've already answered
+            </label>
+            {stagingBusy && <span className="muted pulse">collecting the band…</span>}
           </div>
+          <div className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
+            Nothing saves yet — you'll review and flip the wrong ones first.{" "}
+            {brushHi != null && brushHi <= 0.7 ? (
+              <>
+                <strong>Low-scoring pairs are usually FALSE</strong> — recording NOs teaches the
+                model the most.
+              </>
+            ) : (
+              <>The model learns most from the uncertain middle, not the confident top.</>
+            )}
+          </div>
+        </div>
+      </div>
 
-          {/* PRIMARY · label these pairs (your saved answers) */}
-          <div className="card" style={{ marginBottom: 12, borderColor: "var(--line-strong)" }}>
-            <div className="card-h" style={{ paddingBottom: 6 }}>
-              <Icons.check size={15} />
-              <h3 style={{ margin: 0 }}>Label these pairs</h3>
-              <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
-                your answers — saved for good, and what teaches the model
+      {stagedCount > 0 && (
+        <div
+          className="card"
+          style={{
+            marginBottom: 14,
+            borderColor: "var(--ti-red)",
+            borderWidth: 2,
+            background: "var(--ti-red-50)",
+          }}
+        >
+          <div
+            className="card-b"
+            style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", flexWrap: "wrap" }}
+          >
+            <span style={{ fontSize: 13.5 }}>
+              <strong>
+                {fmtNumber(stagedCount)} answer{stagedCount === 1 ? "" : "s"} staged
+              </strong>
+              {" ("}
+              <span style={{ color: "var(--green)", fontWeight: 600 }}>
+                {Object.values(staged).filter((v) => v === "TRUE").length} TRUE
               </span>
-            </div>
-            <div className="card-b" style={{ paddingTop: 10 }}>
-              <div style={{ fontSize: 13, marginBottom: 10 }}>
-                {brushLo != null ? (
-                  <>Band <span className="mono">{brushLo.toFixed(2)}–{brushHi.toFixed(2)}</span> selected on the chart — </>
-                ) : (
-                  <>Whole <strong>{filter}</strong> view (drag a band on the chart to narrow) — </>
-                )}
-                <strong>{stageOnlyUnlabelled ? filtered.filter((m) => !labels[m.id]).length : filtered.length}</strong> pairs will be marked
-                {stageOnlyUnlabelled && filtered.filter((m) => labels[m.id]).length > 0 && (
-                  <span className="muted"> ({filtered.filter((m) => labels[m.id]).length} already answered, skipped)</span>
-                )}.
-                {brushLo != null && (
-                  <> <button className="btn sm" onClick={clearBrush}>clear band</button></>
-                )}
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                <button
-                  className="btn lg"
-                  style={{ borderColor: "var(--green)", color: "var(--green)", fontWeight: 600 }}
-                  onClick={() => stageSlice("TRUE")}
-                  disabled={filtered.length === 0}
-                >
-                  <Icons.check size={14} /> Mark all TRUE
-                </button>
-                <button
-                  className="btn lg"
-                  style={{ borderColor: "var(--ti-red)", color: "var(--ti-red)", fontWeight: 600 }}
-                  onClick={() => stageSlice("FALSE")}
-                  disabled={filtered.length === 0}
-                >
-                  Mark all FALSE
-                </button>
-                <label className="muted" style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 5, marginLeft: 6 }}>
-                  <input type="checkbox" checked={stageOnlyUnlabelled} onChange={(e) => setStageOnlyUnlabelled(e.target.checked)} />
-                  skip ones I've already answered
-                </label>
-              </div>
-              <div className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
-                Nothing saves yet — you'll review and flip the wrong ones first.{" "}
-                {brushLo != null && brushHi <= 0.7
-                  ? <><strong>Low-scoring pairs are usually FALSE</strong> — recording NOs teaches the model the most.</>
-                  : <>The model learns most from the <strong>uncertain middle</strong>, not the confident top — the run's “Next label batch” (Diagnostics tab) picks the pairs worth your time.</>}
-              </div>
-            </div>
+              {" / "}
+              <span style={{ color: "var(--ti-red)", fontWeight: 600 }}>
+                {Object.values(staged).filter((v) => v === "FALSE").length} FALSE
+              </span>
+              {") — "}
+              <strong>not saved yet.</strong> Flip any wrong ones in the list below, then save.
+            </span>
+            <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+              <span className="muted" style={{ fontSize: 11 }}>
+                saved for good · becomes train/test data
+              </span>
+              <button className="btn primary" onClick={commitStaged} disabled={committingBulk}>
+                {committingBulk ? "Saving…" : `Save ${fmtNumber(stagedCount)} answers`}
+              </button>
+              <button className="btn" onClick={cancelStaging}>
+                Discard
+              </button>
+            </span>
           </div>
-
-          {stagedCount > 0 && (
-            <div className="card" style={{ marginBottom: 14, borderColor: "var(--ti-red)", borderWidth: 2, background: "var(--ti-red-50)" }}>
-              <div className="card-b" style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", flexWrap: "wrap" }}>
-                <span style={{ fontSize: 13.5 }}>
-                  <strong>{stagedCount} answer{stagedCount === 1 ? "" : "s"} staged</strong>
-                  {" ("}<span style={{ color: "var(--green)", fontWeight: 600 }}>{Object.values(staged).filter((v) => v === "TRUE").length} TRUE</span>
-                  {" / "}<span style={{ color: "var(--ti-red)", fontWeight: 600 }}>{Object.values(staged).filter((v) => v === "FALSE").length} FALSE</span>
-                  {") — "}<strong>not saved yet.</strong> Flip any wrong ones in the list below, then save.
-                </span>
-                <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-                  <span className="muted" style={{ fontSize: 11 }}>saved for good · becomes train/test data</span>
-                  <button className="btn primary" onClick={commitStaged} disabled={committingBulk}>
-                    {committingBulk ? "Saving…" : `Save ${stagedCount} answer${stagedCount === 1 ? "" : "s"}`}
-                  </button>
-                  <button className="btn" onClick={cancelStaging}>Discard</button>
-                </span>
-              </div>
-            </div>
-          )}
-        </>
+        </div>
       )}
 
-      {/* Toolbar: bucket tabs, search, jurisdiction filter */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          marginTop: 16,
-          marginBottom: 10,
-          flexWrap: "wrap",
-        }}
-      >
+      {/* Toolbar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
         <div className="seg">
-          {[
-            { id: "review", lab: "Review", n: counts.review },
-            { id: "accepted", lab: "Auto-accepted", n: counts.accepted },
-            { id: "all", lab: "All probabilistic", n: counts.all },
-            { id: "exact", lab: "Exact", n: counts.exact },
-          ].map((f) => (
+          {BUCKETS.map((b) => (
             <button
-              key={f.id}
-              className={filter === f.id ? "on" : ""}
-              onClick={() => { setFilter(f.id); setSelectedId(null); }}
+              key={b.id}
+              className={bucket === b.id ? "on" : ""}
+              onClick={() => {
+                resetPage(setBucket, b.id);
+                setSelectedId(null);
+              }}
             >
-              {f.lab} <span className="muted">&middot; {fmtNumber(f.n)}</span>
+              {b.lab}{" "}
+              <span className="muted">&middot; {fmtNumber(counts[b.count])}</span>
             </button>
           ))}
         </div>
-        <div className="search" style={{ width: 280 }}>
+        <div className="search" style={{ width: 260 }}>
           <Icons.search size={14} />
           <input
             className="input"
-            placeholder="Search name or jurisdiction..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search either side's name..."
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
           />
         </div>
         <select
           className="select"
-          style={{ width: 220 }}
-          value={jurFilter}
-          onChange={(e) => setJurFilter(e.target.value)}
+          style={{ width: 210 }}
+          value={`${sort}:${order}`}
+          onChange={(e) => {
+            const [s, o] = e.target.value.split(":");
+            setSort(s);
+            setOrder(o);
+            setPage(0);
+          }}
+          title="Sorting changes the order of review and nothing else"
         >
-          <option value="all">All jurisdictions</option>
-          {jurisdictions.map((j) => (
-            <option key={j} value={j}>
-              {j}
-            </option>
-          ))}
+          <option value="score:desc">Score, highest first</option>
+          <option value="score:asc">Score, lowest first</option>
+          {priorityColumn && (
+            <option value="priority:desc">{priorityColumn.label}, highest first</option>
+          )}
+          <option value="name:asc">Name, A to Z</option>
         </select>
-        {mode === "table" && filter !== "exact" && (
-          <button
-            className="btn sm"
-            style={groupByEntity ? { background: "var(--ink)", color: "#fff", borderColor: "var(--ink)" } : {}}
-            onClick={() => setGroupByEntity((v) => !v)}
-            title="Collapse one OCOD entity's multiple ROE candidates into a single group"
-          >
-            <Icons.ambiguous size={13} /> Group by entity
-          </button>
-        )}
-        {filter !== "exact" && (
-          <button
-            className="btn sm"
-            style={hideLabelled ? { background: "var(--ink)", color: "#fff", borderColor: "var(--ink)" } : {}}
-            onClick={() => setHideLabelled((v) => !v)}
-            title="Hide pairs you've already marked — show only what's left to review"
-          >
-            {hideLabelled ? "Showing unlabelled only" : "Hide labelled"}
-          </button>
-        )}
-        <button
-          className="btn sm"
-          style={formerOnly ? { background: "var(--amber, #b7791f)", color: "#fff", borderColor: "var(--amber, #b7791f)" } : {}}
-          onClick={() => setFormerOnly((v) => !v)}
-          title="Show only matches made via a company's former (previous) name"
-        >
-          {formerOnly ? "Showing former-name only" : "Former-name matches"}
-          <span className="muted" style={{ marginLeft: 4 }}>&middot; {fmtNumber(counts.former)}</span>
-        </button>
         <div className="spacer" />
         <span className="muted" style={{ fontSize: 12 }}>
-          {filter === "exact"
-            ? `Page ${exactPage} · ${fmtNumber(exactTotal)} exact matches`
-            : `Showing ${filtered.length} of ${fmtNumber(probItems.length)} probabilistic`}
+          {fmtNumber(total)} pair{total === 1 ? "" : "s"} in this view
         </span>
-        {counts.ambiguous > 0 && (
-          <button
-            className="btn sm"
-            onClick={() => navigate(runId ? `/runs/${runId}/ambiguous` : "/ambiguous")}
-          >
-            <Icons.ambiguous size={13} /> {counts.ambiguous} ambiguous &rarr;
-          </button>
-        )}
       </div>
 
-      {/* Main view area */}
-      {filter === "exact" && exactLoading ? (
-        <p className="muted pulse" style={{ padding: 20 }}>Loading exact matches...</p>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+        {tracks.length > 1 && (
+          <div className="seg" title="Filter by track">
+            <button className={track === "all" ? "on" : ""} onClick={() => resetPage(setTrack, "all")}>
+              All tracks
+            </button>
+            {tracks.map((t) => (
+              <button
+                key={t.key}
+                className={track === t.key ? "on" : ""}
+                onClick={() => resetPage(setTrack, t.key)}
+              >
+                {t.label}
+                <span className="muted" style={{ fontSize: 11 }}>
+                  &middot; {fmtNumber(counts[t.key])}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="seg" title="What put this pair in its bucket">
+          <button
+            className={decidedBy === "all" ? "on" : ""}
+            onClick={() => resetPage(setDecidedBy, "all")}
+          >
+            Any decision
+          </button>
+          {DECIDED_BY.map((d) => (
+            <button
+              key={d.id}
+              className={decidedBy === d.id ? "on" : ""}
+              onClick={() => resetPage(setDecidedBy, d.id)}
+              title={d.help}
+            >
+              {d.lab}
+              <span className="muted" style={{ fontSize: 11 }}>
+                &middot; {fmtNumber(counts[d.count])}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <button
+          className="btn sm"
+          style={
+            importFilter === "disagrees"
+              ? { background: "var(--amber)", color: "#fff", borderColor: "var(--amber)" }
+              : {}
+          }
+          onClick={() => resetPage(setImportFilter, importFilter === "disagrees" ? "all" : "disagrees")}
+          title="Both sides carry an earlier entity ID, and the two differ. A flag, never a decision."
+        >
+          Earlier labels disagree
+          <span className="muted" style={{ marginLeft: 4 }}>
+            &middot; {fmtNumber(counts.import_disagrees)}
+          </span>
+        </button>
+
+        <div className="seg" title="Filter by whether you have answered">
+          {[
+            ["all", "All"],
+            ["no", "Unlabelled"],
+            ["yes", "Labelled"],
+          ].map(([id, lab]) => (
+            <button key={id} className={labelled === id ? "on" : ""} onClick={() => resetPage(setLabelled, id)}>
+              {lab}
+            </button>
+          ))}
+        </div>
+
+        <div className="seg" title="Pairs whose two sides sit in the same held exact group">
+          {[
+            ["hide", "Hide held"],
+            ["only", "Held only"],
+            ["both", "Show both"],
+          ].map(([id, lab]) => (
+            <button key={id} className={held === id ? "on" : ""} onClick={() => resetPage(setHeld, id)}>
+              {lab}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {held === "hide" && (
+        <p className="muted" style={{ fontSize: 11.5, margin: "0 0 12px" }}>
+          Pairs inside a held group are decided as a group on the cluster screen, which is not built
+          yet.
+        </p>
+      )}
+
+      {loading && !data ? (
+        <p className="muted pulse" style={{ padding: 40 }}>
+          Loading pairs...
+        </p>
+      ) : items.length === 0 ? (
+        <Empty
+          title="Nothing in this view"
+          sub="Clear the band, widen the bucket, or clear the search."
+        />
       ) : mode === "table" ? (
         <>
           <ReviewTable
-            items={filtered}
-            labels={labels}
-            entitiesWithTrue={entitiesWithTrue}
-            runId={runId}
+            items={items}
+            columns={columns}
+            priorityColumn={priorityColumn}
+            tracks={tracks}
+            labelOf={labelOf}
             onLabel={handleLabel}
+            onLabelWithExtra={applyLabel}
+            saving={saving}
             staged={staged}
             onStage={toggleStaged}
             threshold={threshold}
             reviewLow={reviewLow}
-            groupBy={groupByEntity}
-            selectedId={selectedId}
+            selectedId={current?.pair_id}
             setSelectedId={setSelectedId}
-            sortCol={sortCol}
-            sortAsc={sortAsc}
-            onSort={(col) => {
-              if (col === sortCol) setSortAsc(!sortAsc);
-              else { setSortCol(col); setSortAsc(col === "ocod" || col === "roe" || col === "jur"); }
-            }}
           />
-          {filter === "exact" && exactTotal > 50 && (
-            <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 12 }}>
-              <button
-                className="btn sm"
-                disabled={exactPage <= 1}
-                onClick={() => setExactPage((p) => Math.max(1, p - 1))}
-              >
-                &larr; Prev
-              </button>
-              <span className="muted" style={{ fontSize: 12, lineHeight: "28px" }}>
-                Page {exactPage} of {Math.ceil(exactTotal / 50)}
-              </span>
-              <button
-                className="btn sm"
-                disabled={exactPage >= Math.ceil(exactTotal / 50)}
-                onClick={() => setExactPage((p) => p + 1)}
-              >
-                Next &rarr;
-              </button>
-            </div>
-          )}
+          <Pager page={page} totalPages={totalPages} total={total} setPage={setPage} shown={items.length} />
         </>
       ) : (
-          <ReviewDiff
-            items={filtered}
-            current={current}
-            labels={labels}
-            onLabel={handleLabel}
-            staged={staged}
-            onStage={toggleStaged}
-            threshold={threshold}
-            reviewLow={reviewLow}
-            notes={notes}
-            setNote={setNote}
-            setSelectedId={setSelectedId}
-            runId={runId}
-            isGbt={scoreSource === "trained model"}
+        <ReviewDiff
+          runId={runId}
+          items={items}
+          current={current}
+          columns={columns}
+          eventColumns={eventColumns}
+          labelOf={labelOf}
+          onLabel={handleLabel}
+          onLabelWithExtra={applyLabel}
+          staged={staged}
+          onStage={toggleStaged}
+          threshold={threshold}
+          reviewLow={reviewLow}
+          setSelectedId={setSelectedId}
         />
       )}
     </div>
   );
 }
 
+function Pager({ page, totalPages, total, setPage, shown }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 12,
+        marginTop: 12,
+      }}
+    >
+      <span className="muted" style={{ fontSize: 12 }}>
+        Showing {fmtNumber(page * 50 + 1)}&ndash;{fmtNumber(page * 50 + shown)} of {fmtNumber(total)}
+      </span>
+      {totalPages > 1 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span className="muted" style={{ fontSize: 12 }}>
+            Page {page + 1} of {fmtNumber(totalPages)}
+          </span>
+          <button className="btn sm" disabled={page <= 0} onClick={() => setPage((p) => p - 1)}>
+            &larr; Prev
+          </button>
+          <button
+            className="btn sm"
+            disabled={page + 1 >= totalPages}
+            onClick={() => setPage((p) => p + 1)}
+          >
+            Next &rarr;
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============================================================
-// ReviewTable — table view with feature popover
+// ReviewTable — one row per pair, both sides side by side
 // ============================================================
 
-const entityKeyOf = (m) => `${m.ocod_name_clean || m.ocod_name_raw}||${m.jurisdiction_clean}`;
+function ReviewTable({
+  items,
+  columns,
+  priorityColumn,
+  tracks,
+  labelOf,
+  onLabel,
+  onLabelWithExtra,
+  saving,
+  staged,
+  onStage,
+  threshold,
+  reviewLow,
+  selectedId,
+  setSelectedId,
+}) {
+  const [noteFor, setNoteFor] = useState(null);
 
-function ReviewTable({ items, labels, entitiesWithTrue, onLabel, staged, onStage, threshold, reviewLow, groupBy, selectedId, setSelectedId, sortCol, sortAsc, onSort, runId }) {
-  const [popup, setPopup] = useState(null);
-  const explainCache = useRef({});   // m.id -> contributions | false (tried, none)
-  const showPopup = (event, m, pinned = false) => {
-    event.stopPropagation();
-    const rect = event.currentTarget.getBoundingClientRect();
-    // Toggle off if re-clicking the already-pinned one.
-    if (popup?.id === m.id && popup.pinned && pinned) { setPopup(null); return; }
-    // Load the model's per-feature contributions on the SAME hover/click as the Splink
-    // features (cached per pair, so it's fetched once). null = loading, false = no model.
-    const canExplain = !!(runId && m.ocod_name_clean && m.roe_company_number);
-    const cached = explainCache.current[m.id];
-    setPopup({
-      id: m.id, rect, features: m.features, pinned,
-      explain: cached !== undefined ? cached : (canExplain ? null : false),
-    });
-    if (cached === undefined && canExplain) {
-      api.explainPair(runId, {
-        ocod_name_clean: m.ocod_name_clean,
-        jurisdiction_clean: m.jurisdiction_clean,
-        roe_company_number: m.roe_company_number,
-      })
-        .then((d) => { explainCache.current[m.id] = d; setPopup((cur) => (cur && cur.id === m.id ? { ...cur, explain: d } : cur)); })
-        .catch(() => { explainCache.current[m.id] = false; setPopup((cur) => (cur && cur.id === m.id ? { ...cur, explain: false } : cur)); });
-    }
-  };
-
-  // Entity aggregates (count + margin) for the group headers, and an entity-ordered
-  // list so a single OCOD's candidates sit together under one header.
-  const { displayItems, entityInfo } = useMemo(() => {
-    if (!groupBy) return { displayItems: items, entityInfo: {} };
-    const info = {};
-    for (const m of items) {
-      const k = entityKeyOf(m);
-      (info[k] ||= { probs: [], ocod: m.ocod_name_raw || m.ocod_name_clean, jur: m.jurisdiction_clean });
-      info[k].probs.push(+m.match_probability || 0);
-    }
-    for (const k of Object.keys(info)) {
-      const ps = info[k].probs.sort((a, b) => b - a);
-      info[k].count = ps.length;
-      info[k].top = ps[0] ?? 0;
-      info[k].margin = ps.length >= 2 ? ps[0] - ps[1] : null;
-    }
-    const ordered = [...items].sort((a, b) => {
-      const ia = info[entityKeyOf(a)], ib = info[entityKeyOf(b)];
-      if (ib.top !== ia.top) return ib.top - ia.top;              // best entities first
-      const ka = entityKeyOf(a), kb = entityKeyOf(b);
-      if (ka !== kb) return ka < kb ? -1 : 1;                     // keep an entity together
-      return (+b.match_probability || 0) - (+a.match_probability || 0); // best candidate first
-    });
-    return { displayItems: ordered, entityInfo: info };
-  }, [items, groupBy]);
-
-  const SortTh = ({ col, children, style }) => {
-    const active = sortCol === col;
-    return (
-      <th
-        style={{ ...style, cursor: "pointer", userSelect: "none" }}
-        onClick={() => onSort?.(col)}
-      >
-        {children} {active ? (sortAsc ? "▲" : "▼") : ""}
-      </th>
-    );
-  };
-
-  if (items.length === 0) {
-    return (
-      <Empty
-        title="No matches in this filter"
-        sub="Try widening the threshold range or clearing the search."
-      />
-    );
+  function trackLabel(key) {
+    const t = tracks.find((x) => x.key === key);
+    return t ? t.label : key;
   }
 
   return (
@@ -896,637 +821,561 @@ function ReviewTable({ items, labels, entitiesWithTrue, onLabel, staged, onStage
       <table className="t">
         <thead>
           <tr>
-            <th style={{ width: 28 }}></th>
-            <SortTh col="ocod">OCOD name (raw)</SortTh>
-            <SortTh col="roe">ROE name (raw)</SortTh>
-            <SortTh col="jur">Jurisdiction</SortTh>
-            <SortTh col="prob" style={{ width: 90 }}>Prob.</SortTh>
-            <th>Method</th>
-            <th>Features</th>
-            <th>Label</th>
+            <th style={{ width: 26 }}></th>
+            <th style={{ minWidth: 230 }}>Left</th>
+            <th style={{ minWidth: 230 }}>Right</th>
+            <th style={{ width: 120 }}>Score</th>
+            <th style={{ width: 150 }}>Bucket</th>
+            {priorityColumn && (
+              <th style={{ width: 110, textAlign: "right" }}>{priorityColumn.label}</th>
+            )}
+            <th style={{ width: 190 }}>Label</th>
           </tr>
         </thead>
         <tbody>
-          {(() => { let lastKey = null; return displayItems.map((m) => {
-            const lab = labels[m.id];
-            const sel = selectedId === m.id;
-            const gkey = entityKeyOf(m);
-            const showHead = groupBy && gkey !== lastKey;
-            lastKey = gkey;
-            const ginfo = showHead ? entityInfo[gkey] : null;
-            const stagedVal = staged ? staged[m.id] : undefined;
+          {items.map((m) => {
+            const lab = labelOf(m);
+            const sel = selectedId === m.pair_id;
+            const stagedVal = staged[m.pair_id];
             const isStaged = stagedVal !== undefined;
-            const effTrue = isStaged ? stagedVal === "TRUE" : lab === "TRUE";
-            const effFalse = isStaged ? stagedVal === "FALSE" : lab === "FALSE";
-            const overrides =
-              lab &&
-              ((lab === "TRUE" && +m.match_probability < threshold) ||
-                (lab === "FALSE" && +m.match_probability >= threshold));
-            const clickTrue = () => (isStaged ? onStage(m.id, "TRUE") : onLabel(m.id, lab === "TRUE" ? null : "TRUE"));
-            const clickFalse = () => (isStaged ? onStage(m.id, "FALSE") : onLabel(m.id, lab === "FALSE" ? null : "FALSE"));
-            // Another candidate of this entity is already the match -> this one is resolved.
-            const resolvedByOther = !effTrue && !!entitiesWithTrue && entitiesWithTrue.has(gkey);
+            const effTrue = isStaged ? stagedVal === "TRUE" : lab?.is_match === "TRUE";
+            const effFalse = isStaged ? stagedVal === "FALSE" : lab?.is_match === "FALSE";
+            const busy = saving.has(m.pair_id);
             return (
-              <Fragment key={m.id}>
-              {showHead && ginfo && (
-                <tr>
-                  <td colSpan={8} style={{ background: "var(--ti-red-50)", borderTop: "2px solid var(--line)", padding: "7px 10px" }}>
-                    <span style={{ fontWeight: 600 }}>{ginfo.ocod}</span>{" "}
-                    <span className="mono muted" style={{ fontSize: 11 }}>{ginfo.jur}</span>{" "}
-                    <span className="tag violet"><span className="dot" />{ginfo.count} candidate{ginfo.count !== 1 ? "s" : ""}</span>
-                    {ginfo.margin != null && (
-                      <span style={{ fontSize: 11, marginLeft: 6, color: ginfo.margin < 0.05 ? "var(--ti-red)" : "var(--muted)" }}>
-                        margin {ginfo.margin.toFixed(2)}{ginfo.margin < 0.05 ? " · close" : ""}
+              <Fragment key={m.pair_id}>
+                <tr className={sel ? "selected" : ""} onClick={() => setSelectedId(m.pair_id)}>
+                  <td style={{ verticalAlign: "top" }}>
+                    <span
+                      className={
+                        "dot " +
+                        (m.bucket === "accept" ? "green" : m.bucket === "review" ? "amber" : "red")
+                      }
+                    />
+                  </td>
+                  <UnitCell unit={m.left} />
+                  <UnitCell unit={m.right} />
+                  <td style={{ verticalAlign: "top" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <ProbBar p={m.match_probability} w={44} high={threshold} review={reviewLow} />
+                      <span className="mono" style={{ fontWeight: 600 }}>
+                        {fmtProb(m.match_probability)}
                       </span>
+                    </div>
+                    <div className="mono muted" style={{ fontSize: 11 }}>
+                      {trackLabel(m.track)}
+                    </div>
+                  </td>
+                  <td style={{ verticalAlign: "top", whiteSpace: "normal" }}>
+                    <BucketTag bucket={m.bucket} decidedBy={m.decided_by} />
+                    {m.import_disagrees && (
+                      <div style={{ marginTop: 3 }}>
+                        <span className="tag amber" title="The two sides carry different earlier entity IDs">
+                          earlier labels disagree
+                        </span>
+                      </div>
+                    )}
+                    {m.held_group_id && (
+                      <div className="mono muted" style={{ fontSize: 11 }}>
+                        held group {m.held_group_id}
+                      </div>
                     )}
                   </td>
-                </tr>
-              )}
-              <tr
-                className={sel ? "selected" : ""}
-                style={resolvedByOther ? { opacity: 0.5 } : undefined}
-                onClick={() => setSelectedId(m.id)}
-              >
-                <td>
-                  <span
-                    className={
-                      "dot " +
-                      (m.band === "auto-accept"
-                        ? "green"
-                        : m.band === "review"
-                          ? "amber"
-                          : m.band === "ambiguous"
-                            ? "blue"
-                            : "red")
-                    }
-                  />
-                </td>
-                <td>
-                  <div
-                    title={m.ocod_name_raw}
-                    style={{
-                      fontWeight: 500,
-                      maxWidth: 320,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      cursor: "default",
-                    }}
-                  >
-                    {m.ocod_name_raw}
-                  </div>
-                  {m.ocod_id && (
-                    <div className="mono muted" style={{ fontSize: 11 }}>
-                      {m.ocod_id}
-                    </div>
+                  {priorityColumn && (
+                    <td className="mono tnum" style={{ textAlign: "right", verticalAlign: "top" }}>
+                      <Cell
+                        value={m.priority ? m.priority[priorityColumn.key] : null}
+                        type={priorityColumn.type}
+                      />
+                    </td>
                   )}
-                </td>
-                <td>
-                  <div
-                    title={m.roe_name_raw || ""}
-                    style={{
-                      fontWeight: 500,
-                      maxWidth: 320,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      cursor: "default",
-                    }}
-                  >
-                    {m.roe_name_raw || (
-                      <span className="muted">(multiple candidates)</span>
-                    )}
-                  </div>
-                  {m.roe_company_number && (
-                    <div className="mono muted" style={{ fontSize: 11 }}>
-                      {m.roe_company_number}
-                    </div>
-                  )}
-                  {m.matched_name_type === "former" && (
-                    <div style={{ marginTop: 2, fontSize: 11 }}>
-                      <span className="tag amber" title={`Matched on this company's former name${m.roe_name_matched_raw ? `: ${m.roe_name_matched_raw}` : ""}`}>
-                        <span className="dot" />former name
-                      </span>
-                      {m.roe_name_matched_raw && (
-                        <span className="muted" style={{ marginLeft: 4 }}>
-                          via “{m.roe_name_matched_raw}”
+                  <td onClick={(e) => e.stopPropagation()} style={{ verticalAlign: "top" }}>
+                    <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
+                      <button
+                        className="btn sm"
+                        disabled={busy}
+                        title={isStaged ? "Staged — click to flip" : undefined}
+                        style={{
+                          ...(effTrue
+                            ? { background: "var(--green)", color: "#fff", borderColor: "var(--green)" }
+                            : {}),
+                          ...(isStaged ? { borderStyle: "dashed" } : {}),
+                        }}
+                        onClick={() =>
+                          isStaged ? onStage(m.pair_id, "TRUE") : onLabel(m.pair_id, "TRUE")
+                        }
+                      >
+                        <Icons.check size={12} stroke={effTrue ? "#fff" : "currentColor"} />
+                        TRUE
+                      </button>
+                      <button
+                        className="btn sm"
+                        disabled={busy}
+                        title={isStaged ? "Staged — click to flip" : undefined}
+                        style={{
+                          ...(effFalse
+                            ? { background: "var(--ti-red)", color: "#fff", borderColor: "var(--ti-red)" }
+                            : {}),
+                          ...(isStaged ? { borderStyle: "dashed" } : {}),
+                        }}
+                        onClick={() =>
+                          isStaged ? onStage(m.pair_id, "FALSE") : onLabel(m.pair_id, "FALSE")
+                        }
+                      >
+                        <Icons.x size={12} stroke={effFalse ? "#fff" : "currentColor"} />
+                        FALSE
+                      </button>
+                      <button
+                        className="btn sm ghost"
+                        title="Notes and a source link for this decision"
+                        onClick={() => setNoteFor(noteFor === m.pair_id ? null : m.pair_id)}
+                      >
+                        <Icons.doc size={12} />
+                      </button>
+                      {lab?.evidence_url && (
+                        <a
+                          className="btn sm ghost"
+                          href={lab.evidence_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={lab.evidence_url}
+                        >
+                          <Icons.link size={12} />
+                        </a>
+                      )}
+                      {isStaged && (
+                        <span className="tag" style={{ borderColor: "#4C78A8", color: "#4C78A8" }}>
+                          staged
                         </span>
                       )}
+                      {busy && <span className="muted pulse" style={{ fontSize: 11 }}>saving…</span>}
                     </div>
-                  )}
-                </td>
-                <td>
-                  <span className="mono" style={{ fontSize: 12 }}>
-                    {m.jurisdiction_clean}
-                  </span>
-                </td>
-                <td>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <ProbBar p={m.match_probability} w={50} high={threshold} review={reviewLow} />
-                    <span className="mono" style={{ fontWeight: 600 }}>
-                      {fmtProb(m.match_probability)}
-                    </span>
-                  </div>
-                </td>
-                <td>
-                  <BandTag band={m.band} method={m.match_method} />
-                </td>
-                <td>
-                  <button
-                    className="btn sm"
-                    aria-label={`Show feature breakdown for ${m.ocod_name_raw || m.id}`}
-                    title="Show feature breakdown"
-                    onClick={(e) => showPopup(e, m, true)}
-                    onFocus={(e) => showPopup(e, m, false)}
-                    onBlur={() => setPopup((cur) => (cur?.pinned ? cur : null))}
-                    onMouseEnter={(e) => showPopup(e, m, false)}
-                    onMouseLeave={() => setPopup((cur) => (cur?.pinned ? cur : null))}
-                    onKeyDown={(e) => {
-                      if (e.key === "Escape") setPopup(null);
-                    }}
-                  >
-                    <Icons.spark size={12} /> breakdown
-                  </button>
-                </td>
-                <td onClick={(e) => e.stopPropagation()}>
-                  <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                    <button
-                      className="btn sm"
-                      disabled={resolvedByOther}
-                      title={resolvedByOther
-                        ? "Another candidate is already the match for this entity (one per entity)"
-                        : (isStaged ? "Staged — click to flip" : undefined)}
-                      style={{
-                        ...(effTrue ? { background: "var(--green)", color: "#fff", borderColor: "var(--green)" } : {}),
-                        ...(isStaged ? { borderStyle: "dashed", opacity: effTrue ? 0.85 : 1 } : {}),
-                      }}
-                      onClick={clickTrue}
-                    >
-                      <Icons.check size={12} stroke={effTrue ? "#fff" : "currentColor"} />
-                      TRUE
-                    </button>
-                    <button
-                      className="btn sm"
-                      title={isStaged ? "Staged — click to flip" : undefined}
-                      style={{
-                        ...(effFalse ? { background: "var(--ti-red)", color: "#fff", borderColor: "var(--ti-red)" } : {}),
-                        ...(isStaged ? { borderStyle: "dashed", opacity: effFalse ? 0.85 : 1 } : {}),
-                      }}
-                      onClick={clickFalse}
-                    >
-                      <Icons.x size={12} stroke={effFalse ? "#fff" : "currentColor"} />
-                      FALSE
-                    </button>
-                    {isStaged && (
-                      <span className="tag" style={{ borderColor: "#4C78A8", color: "#4C78A8" }}>staged</span>
-                    )}
-                    {resolvedByOther && (
-                      <span className="tag" title="Another candidate is the chosen match for this entity — left unlabelled, not auto-FALSE">
-                        resolved
-                      </span>
-                    )}
-                    {overrides && !isStaged && (
-                      <span className="tag" style={{ color: "var(--ti-red)" }} title="Your label overrides the score band — labels are paramount">
-                        overrides
-                      </span>
-                    )}
-                  </div>
-                </td>
-              </tr>
+                  </td>
+                </tr>
+                {noteFor === m.pair_id && (
+                  <tr>
+                    <td colSpan={priorityColumn ? 7 : 6} style={{ whiteSpace: "normal" }}>
+                      <LabelNotes
+                        label={lab}
+                        onSave={(extra) =>
+                          onLabelWithExtra(m.pair_id, lab?.is_match || "TRUE", extra)
+                        }
+                        onClose={() => setNoteFor(null)}
+                      />
+                    </td>
+                  </tr>
+                )}
               </Fragment>
             );
-          }); })()}
+          })}
         </tbody>
       </table>
-      {popup && <FeaturePopover popup={popup} />}
+    </div>
+  );
+}
+
+function UnitCell({ unit }) {
+  const ids = entityIds(unit);
+  return (
+    <td style={{ verticalAlign: "top", whiteSpace: "normal", overflowWrap: "anywhere" }}>
+      <div style={{ fontWeight: 500 }}>{unit?.name || <span className="muted">(no name)</span>}</div>
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 2, alignItems: "center" }}>
+        <span className="mono muted" style={{ fontSize: 11 }}>
+          {unit?.unit_id}
+        </span>
+        {unit?.unit_size > 1 && <span className="tag">×{unit.unit_size} records</span>}
+        {ids.map((id) => (
+          <span
+            key={id}
+            className={"tag" + (ids.length > 1 ? " amber" : "")}
+            style={{ fontFamily: "var(--font-mono)", textTransform: "none" }}
+          >
+            {id}
+          </span>
+        ))}
+      </div>
+    </td>
+  );
+}
+
+// Notes and source link, shared by the table popover and the diff controls.
+function LabelNotes({ label, onSave, onClose, compact }) {
+  const [notes, setNotes] = useState(label?.notes || "");
+  const [url, setUrl] = useState(label?.evidence_url || "");
+  const urlOk = isHttpUrl(url);
+
+  return (
+    <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+      <div className="field" style={{ flex: "1 1 260px", minWidth: 0 }}>
+        <label>Notes {compact ? "" : "(saved with the decision)"}</label>
+        <textarea
+          className="textarea"
+          style={{ minHeight: 52 }}
+          placeholder="e.g. same address and the same employer on both records"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+        />
+      </div>
+      <div className="field" style={{ flex: "1 1 260px", minWidth: 0 }}>
+        <label>Source link</label>
+        <input
+          className="input"
+          placeholder="https://..."
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          style={urlOk ? undefined : { borderColor: "var(--ti-red)" }}
+        />
+        <div className="muted" style={{ fontSize: 11.5, color: urlOk ? undefined : "var(--ti-red)" }}>
+          {urlOk
+            ? "Where the evidence for this decision lives — a news story, a register entry."
+            : "That is not an http or https link."}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", paddingTop: 18 }}>
+        <button
+          className="btn sm primary"
+          disabled={!urlOk}
+          onClick={() => {
+            onSave({ notes: notes.trim() || undefined, evidence_url: url.trim() || undefined });
+            onClose && onClose();
+          }}
+        >
+          Save
+        </button>
+        {onClose && (
+          <button className="btn sm" onClick={onClose}>
+            Close
+          </button>
+        )}
+      </div>
     </div>
   );
 }
 
 // ============================================================
-// ReviewDiff — diff view with queue sidebar
+// ReviewDiff — one pair in full, with the queue beside it
 // ============================================================
 
 function ReviewDiff({
+  runId,
   items,
   current,
-  labels,
+  columns,
+  eventColumns,
+  labelOf,
   onLabel,
+  onLabelWithExtra,
   staged,
   onStage,
   threshold,
   reviewLow,
-  notes,
-  setNote,
   setSelectedId,
-  runId,
-  isGbt,
 }) {
-  const [inspectOpen, setInspectOpen] = useState(false);
+  const [detail, setDetail] = useState(null);
+  const [detailError, setDetailError] = useState(null);
+  const cache = useRef({});
 
   useEffect(() => {
-    setInspectOpen(false);
-  }, [current?.id]);
+    if (!current) return;
+    const pairId = current.pair_id;
+    if (cache.current[pairId]) {
+      setDetail(cache.current[pairId]);
+      setDetailError(null);
+      return;
+    }
+    setDetail(null);
+    let alive = true;
+    api
+      .getRunPair(runId, pairId)
+      .then((res) => {
+        if (!alive) return;
+        cache.current[pairId] = res;
+        setDetail(res);
+        setDetailError(null);
+      })
+      .catch((err) => {
+        if (alive) setDetailError(err.message);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [runId, current?.pair_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!current) {
-    return (
-      <Empty
-        title="Nothing in this filter"
-        sub="Try widening the threshold or clearing the search."
-      />
-    );
+    return <Empty title="Nothing in this view" sub="Clear the band or widen the bucket." />;
   }
 
-  const lab = labels[current.id];
-  const note = notes[current.id] || "";
-  const pos = items.findIndex((m) => m.id === current.id);
-  const inspectUrl = companiesHouseUrl(current.roe_company_number);
+  const pair = detail || current;
+  const lab = labelOf(current);
+  const pos = items.findIndex((m) => m.pair_id === current.pair_id);
 
   return (
-    <>
+    <div style={{ display: "grid", gridTemplateColumns: "260px minmax(0, 1fr)", gap: 16, alignItems: "start" }}>
+      {/* Queue */}
       <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "260px 1fr",
-          gap: 16,
-          alignItems: "flex-start",
-        }}
+        className="card"
+        style={{ maxHeight: "calc(100vh - 220px)", overflow: "auto", position: "sticky", top: 70 }}
       >
-        {/* Queue sidebar */}
-        <div
-          className="card"
-          style={{
-            maxHeight: "calc(100vh - 320px)",
-            overflow: "auto",
-            position: "sticky",
-            top: 70,
-          }}
-        >
-          <div className="card-h" style={{ padding: "10px 12px" }}>
-            <span className="eyebrow">Queue</span>
-            <span className="muted" style={{ fontSize: 11, marginLeft: "auto" }}>
-              {pos + 1} / {items.length}
-            </span>
-          </div>
-          <div>
-            {items.map((m) => {
-              const sel = m.id === current.id;
-              const ml = labels[m.id];
-              const stagedVal = staged?.[m.id];
-              return (
-                <div
-                  key={m.id}
-                  onClick={() => setSelectedId(m.id)}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "16px 1fr auto",
-                    gap: 8,
-                    padding: "8px 12px",
-                    borderBottom: "1px solid var(--line)",
-                    background: sel ? "var(--ti-red-50)" : "transparent",
-                    cursor: "pointer",
-                    alignItems: "center",
-                  }}
-                >
-                  <span
-                    className={
-                      "dot " +
-                      (m.band === "auto-accept"
-                        ? "green"
-                        : m.band === "review"
-                          ? "amber"
-                          : "red")
-                    }
-                  />
-                  <div style={{ minWidth: 0 }}>
-                    <div
-                      style={{
-                        fontSize: 12.5,
-                        fontWeight: 500,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {m.ocod_name_raw}
-                    </div>
-                    <div className="mono muted" style={{ fontSize: 11 }}>
-                      {fmtProb(m.match_probability)} &middot; {m.jurisdiction_clean}
-                    </div>
-                  </div>
-                  {stagedVal === "TRUE" && <span className="tag green">staged</span>}
-                  {stagedVal === "FALSE" && <span className="tag" style={{ color: "var(--ti-red)" }}>staged</span>}
-                  {!stagedVal && ml === "TRUE" && <Icons.check size={12} stroke="var(--green)" />}
-                  {!stagedVal && ml === "FALSE" && <Icons.x size={12} stroke="var(--ti-red)" />}
-                </div>
-              );
-            })}
-          </div>
+        <div className="card-h" style={{ padding: "10px 12px" }}>
+          <span className="eyebrow">Queue</span>
+          <span className="muted" style={{ fontSize: 11, marginLeft: "auto" }}>
+            {pos + 1} / {items.length}
+          </span>
         </div>
-
-        {/* Main diff area */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <DiffHero match={current} high={threshold} review={reviewLow} />
-          <DiffMeta match={current} onInspect={() => setInspectOpen(true)} />
-          <AddressPanel address={current.address} />
-          <FeatureBreakdown
-            features={current.features}
-            probability={current.match_probability}
-          />
-          <GbtExplain runId={runId} pair={current} />{/* self-hides when no model */}
-          <DiffControls
-            match={current}
-            label={lab}
-            onLabel={onLabel}
-            staged={staged?.[current.id]}
-            onStage={onStage}
-            note={note}
-            setNote={(v) => setNote(current.id, v)}
-          />
+        <div>
+          {items.map((m) => {
+            const sel = m.pair_id === current.pair_id;
+            const ml = labelOf(m);
+            const stagedVal = staged[m.pair_id];
+            return (
+              <div
+                key={m.pair_id}
+                onClick={() => setSelectedId(m.pair_id)}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "16px minmax(0, 1fr) auto",
+                  gap: 8,
+                  padding: "8px 12px",
+                  borderBottom: "1px solid var(--line)",
+                  background: sel ? "var(--ti-red-50)" : "transparent",
+                  cursor: "pointer",
+                  alignItems: "center",
+                }}
+              >
+                <span
+                  className={
+                    "dot " +
+                    (m.bucket === "accept" ? "green" : m.bucket === "review" ? "amber" : "red")
+                  }
+                />
+                <div style={{ minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: 12.5,
+                      fontWeight: 500,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {m.left?.name}
+                  </div>
+                  <div
+                    className="muted"
+                    style={{
+                      fontSize: 12,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {m.right?.name}
+                  </div>
+                  <div className="mono muted" style={{ fontSize: 11 }}>
+                    {fmtProb(m.match_probability)}
+                  </div>
+                </div>
+                {stagedVal === "TRUE" && <span className="tag green">staged</span>}
+                {stagedVal === "FALSE" && (
+                  <span className="tag" style={{ color: "var(--ti-red)" }}>
+                    staged
+                  </span>
+                )}
+                {!stagedVal && ml?.is_match === "TRUE" && <Icons.check size={12} stroke="var(--green)" />}
+                {!stagedVal && ml?.is_match === "FALSE" && <Icons.x size={12} stroke="var(--ti-red)" />}
+              </div>
+            );
+          })}
         </div>
       </div>
 
-      {inspectOpen && current.roe_company_number && (
-        <>
-          <div className="scrim" onClick={() => setInspectOpen(false)} />
-          <aside className="sheet" role="dialog" aria-modal="true" aria-label="Companies House inspection">
-            <div className="sheet-h">
-              <div>
-                <div className="eyebrow">Companies House</div>
-                <div style={{ fontSize: 18, fontWeight: 650 }}>
-                  {current.roe_company_number}
-                </div>
-              </div>
-              <button
-                className="btn"
-                style={{ marginLeft: "auto" }}
-                onClick={() => setInspectOpen(false)}
-                aria-label="Close inspection"
-              >
-                <Icons.x size={14} />
-              </button>
-            </div>
-            <div className="sheet-b">
-              <div style={{ fontWeight: 650, fontSize: 18, marginBottom: 8 }}>
-                {current.roe_name_raw}
-              </div>
-              <dl className="diff-meta">
-                <dt>company number</dt>
-                <dd className="mono">{current.roe_company_number}</dd>
-                <dt>jurisdiction</dt>
-                <dd className="mono">{current.jurisdiction_clean}</dd>
-                <dt>probability</dt>
-                <dd className="mono">{fmtProb(current.match_probability)}</dd>
-              </dl>
-            </div>
-            <div className="sheet-f">
-              <a
-                className="btn primary"
-                href={inspectUrl || undefined}
-                target="_blank"
-                rel="noreferrer"
-              >
-                <Icons.link size={14} stroke="#fff" />
-                Open Companies House
-              </a>
-              <button className="btn" onClick={() => setInspectOpen(false)}>
-                Close
-              </button>
-            </div>
-          </aside>
-        </>
-      )}
-    </>
+      {/* The pair */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
+        <DiffHero pair={pair} high={threshold} review={reviewLow} />
+        <UnitCompare pair={pair} columns={columns} />
+        {detailError ? (
+          <p style={{ fontSize: 12.5, color: "var(--ti-red)" }}>{detailError}</p>
+        ) : (
+          <>
+            <PairExplain
+              explanation={pair.explanation}
+              matchWeight={pair.match_weight}
+              matchProbability={pair.match_probability}
+            />
+            <PairEvidence pair={pair} eventColumns={eventColumns} />
+          </>
+        )}
+        <DiffControls
+          pair={current}
+          label={lab}
+          onLabel={onLabel}
+          onLabelWithExtra={onLabelWithExtra}
+          staged={staged[current.pair_id]}
+          onStage={onStage}
+        />
+      </div>
+    </div>
   );
 }
 
-// ============================================================
-// DiffMeta — side-by-side OCOD and ROE record cards
-// ============================================================
+// The same fields for both sides, aligned, with the differences marked.
+function UnitCompare({ pair, columns }) {
+  const left = pair?.left || {};
+  const right = pair?.right || {};
+  const cols = (columns || []).filter((c) => c.key !== "unit_id");
 
-function DiffMeta({ match, onInspect }) {
+  if (cols.length === 0) return null;
+
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-      <div className="card">
-        <div className="card-h" style={{ padding: "10px 14px" }}>
-          <span className="eyebrow">OCOD record</span>
-        </div>
-        <div className="card-b" style={{ padding: 14 }}>
-          <dl className="diff-meta">
-            <dt>raw name</dt>
-            <dd className="mono">{match.ocod_name_raw}</dd>
-            <dt>clean name</dt>
-            <dd className="mono">{match.ocod_name_clean}</dd>
-            <dt>jurisdiction</dt>
-            <dd className="mono">{match.jurisdiction_clean}</dd>
-            {match.ocod_id && (
-              <>
-                <dt>OCOD id</dt>
-                <dd className="mono">{match.ocod_id}</dd>
-              </>
-            )}
-          </dl>
-        </div>
+    <div className="card">
+      <div className="card-h">
+        <Icons.diff size={16} />
+        <h3>The two records</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          differences are marked
+        </span>
       </div>
-      <div className="card">
-        <div className="card-h" style={{ padding: "10px 14px" }}>
-          <span className="eyebrow">ROE record</span>
-          {match.roe_company_number && (
-            <button
-              className="btn sm"
-              style={{ marginLeft: "auto" }}
-              onClick={onInspect}
-              aria-label={`Inspect ${match.roe_company_number} at Companies House`}
-              title="Inspect at Companies House"
-            >
-              <Icons.link size={13} />
-              Inspect CH
-            </button>
-          )}
-        </div>
-        <div className="card-b" style={{ padding: 14 }}>
-          {match.roe_name_raw ? (
-            <dl className="diff-meta">
-              <dt>raw name</dt>
-              <dd className="mono">{match.roe_name_raw}</dd>
-              <dt>clean name</dt>
-              <dd className="mono">{match.roe_name_clean || match.roe_name_raw}</dd>
-              <dt>company number</dt>
-              <dd className="mono">{match.roe_company_number}</dd>
-              <dt>jurisdiction</dt>
-              <dd className="mono">{match.jurisdiction_clean}</dd>
-              {match.matched_name_type === "former" && (
-                <>
-                  <dt>matched on</dt>
-                  <dd className="mono">
-                    {match.roe_name_matched_raw || "(former name)"}{" "}
-                    <span className="tag amber"><span className="dot" />former name</span>
-                  </dd>
-                </>
-              )}
-            </dl>
-          ) : (
-            <div className="muted" style={{ fontSize: 12.5 }}>
-              Multiple ROE candidates &mdash; open Ambiguous to disambiguate.
-            </div>
-          )}
-        </div>
+      <div className="tbl-wrap">
+        <table className="t" style={{ borderRadius: 0, tableLayout: "fixed" }}>
+          <thead>
+            <tr>
+              <th style={{ width: 180 }}>Field</th>
+              <th>{left.name || "Left"}</th>
+              <th>{right.name || "Right"}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {cols.map((c) => {
+              const a = left[c.key];
+              const b = right[c.key];
+              const bothEmpty = (a == null || a === "") && (b == null || b === "");
+              if (bothEmpty) return null;
+              const same = String(a ?? "") === String(b ?? "");
+              const numeric = NUMERIC_TYPES.has(c.type);
+              return (
+                <tr key={c.key}>
+                  <td className="muted" style={{ whiteSpace: "normal" }}>
+                    {c.label}
+                    {c.source === "cleaning" && (
+                      <div className="mono" style={{ fontSize: 11, color: "var(--muted-2)" }}>
+                        cleaned
+                      </div>
+                    )}
+                  </td>
+                  {[a, b].map((v, i) => (
+                    <td
+                      key={i}
+                      className={numeric ? "mono tnum" : ""}
+                      style={{
+                        textAlign: numeric ? "right" : "left",
+                        whiteSpace: "normal",
+                        overflowWrap: "anywhere",
+                        background: same ? undefined : "var(--ti-red-50)",
+                      }}
+                    >
+                      <Cell value={v} type={c.type} />
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );
 }
 
 // ============================================================
-// DiffControls — notes + TRUE/FALSE/Clear buttons with keys
+// DiffControls — notes, source link, TRUE/FALSE/clear with keys
 // ============================================================
 
-function DiffControls({ match, label, onLabel, staged, onStage, note, setNote }) {
-  const effectiveLabel = staged || label;
-  const handleTrue = () => {
-    if (staged) onStage(match.id, "TRUE");
-    else onLabel(match.id, label === "TRUE" ? null : "TRUE");
-  };
-  const handleFalse = () => {
-    if (staged) onStage(match.id, "FALSE");
-    else onLabel(match.id, label === "FALSE" ? null : "FALSE");
-  };
-  const handleClear = () => {
-    if (staged) onStage(match.id, staged === "TRUE" ? "FALSE" : "TRUE");
-    else onLabel(match.id, null);
-  };
+function DiffControls({ pair, label, onLabel, onLabelWithExtra, staged, onStage }) {
+  const effective = staged || label?.is_match;
+  const pairId = pair.pair_id;
+
+  // One short bar rather than a tall card: it floats over the evidence tables
+  // while the reviewer scrolls them, so it has to cover as little as possible.
+  const [notesOpen, setNotesOpen] = useState(false);
+
   return (
     <div className="card" style={{ position: "sticky", bottom: 16 }}>
-      <div
-        className="card-b"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr auto",
-          gap: 16,
-          alignItems: "flex-start",
-        }}
-      >
-        <div className="field">
-          <label>Notes (visible in audit log)</label>
-          <textarea
-            className="textarea"
-            placeholder='e.g. "Same UBO, parent vs subsidiary — checked CH filing history"'
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-          />
-        </div>
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 6,
-            alignItems: "stretch",
-            minWidth: 220,
-          }}
-        >
-          {staged && (
-            <div className="tag" style={{ justifyContent: "center", borderStyle: "dashed" }}>
-              Staged {staged}; commit or cancel in the banner above
-            </div>
-          )}
+      <div className="card-b" style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <button
             className="btn lg"
-            onClick={handleTrue}
+            onClick={() => (staged ? onStage(pairId, "TRUE") : onLabel(pairId, "TRUE"))}
             style={
-              effectiveLabel === "TRUE"
-                ? {
-                    background: "var(--green)",
-                    color: "#fff",
-                    borderColor: "var(--green)",
-                  }
+              effective === "TRUE"
+                ? { background: "var(--green)", color: "#fff", borderColor: "var(--green)" }
                 : {}
             }
           >
-            <Icons.check
-              size={14}
-              stroke={effectiveLabel === "TRUE" ? "#fff" : "currentColor"}
-            />{" "}
+            <Icons.check size={14} stroke={effective === "TRUE" ? "#fff" : "currentColor"} />{" "}
             {staged ? "Stage TRUE" : "Mark TRUE"}
-            <span
-              className="kh"
-              style={{
-                marginLeft: "auto",
-                color:
-                  effectiveLabel === "TRUE" ? "rgba(255,255,255,.75)" : undefined,
-              }}
-            >
-              <span
-                className="kbd"
-                style={
-                  effectiveLabel === "TRUE"
-                    ? {
-                        background: "rgba(255,255,255,.18)",
-                        color: "#fff",
-                        borderColor: "transparent",
-                      }
-                    : {}
-                }
-              >
-                T
-              </span>
+            <span className="kh" style={{ marginLeft: 6 }}>
+              <span className="kbd">T</span>
             </span>
           </button>
           <button
             className="btn lg"
-            onClick={handleFalse}
+            onClick={() => (staged ? onStage(pairId, "FALSE") : onLabel(pairId, "FALSE"))}
             style={
-              effectiveLabel === "FALSE"
-                ? {
-                    background: "var(--ti-red)",
-                    color: "#fff",
-                    borderColor: "var(--ti-red)",
-                  }
+              effective === "FALSE"
+                ? { background: "var(--ti-red)", color: "#fff", borderColor: "var(--ti-red)" }
                 : {}
             }
           >
-            <Icons.x
-              size={14}
-              stroke={effectiveLabel === "FALSE" ? "#fff" : "currentColor"}
-            />{" "}
+            <Icons.x size={14} stroke={effective === "FALSE" ? "#fff" : "currentColor"} />{" "}
             {staged ? "Stage FALSE" : "Mark FALSE"}
-            <span
-              className="kh"
-              style={{
-                marginLeft: "auto",
-                color:
-                  effectiveLabel === "FALSE" ? "rgba(255,255,255,.75)" : undefined,
-              }}
-            >
-              <span
-                className="kbd"
-                style={
-                  effectiveLabel === "FALSE"
-                    ? {
-                        background: "rgba(255,255,255,.18)",
-                        color: "#fff",
-                        borderColor: "transparent",
-                      }
-                    : {}
-                }
-              >
-                F
-              </span>
+            <span className="kh" style={{ marginLeft: 6 }}>
+              <span className="kbd">F</span>
             </span>
           </button>
-          <button className="btn ghost" onClick={handleClear}>
+          <button
+            className="btn"
+            onClick={() =>
+              staged ? onStage(pairId, staged === "TRUE" ? "FALSE" : "TRUE") : onLabel(pairId, null)
+            }
+          >
             <Icons.refresh size={13} />
-            {staged ? "Flip staged verdict" : "Clear label"}{" "}
-            <span className="kh" style={{ marginLeft: "auto" }}>
+            {staged ? "Flip" : "Clear"}
+            <span className="kh" style={{ marginLeft: 6 }}>
               <span className="kbd">U</span>
             </span>
           </button>
-          <div
-            className="muted"
-            style={{ fontSize: 11, textAlign: "center", marginTop: 4 }}
-          >
-            <span className="kbd">J</span> / <span className="kbd">K</span> to
-            navigate
-          </div>
+          <button className="btn" onClick={() => setNotesOpen((v) => !v)}>
+            <Icons.doc size={13} />
+            Notes &amp; source
+            {(label?.notes || label?.evidence_url) && (
+              <span className="dot green" style={{ marginLeft: 4 }} />
+            )}
+          </button>
+
+          {staged && (
+            <span className="tag" style={{ borderStyle: "dashed" }}>
+              Staged {staged}; save or discard in the banner above
+            </span>
+          )}
+          {label?.reviewer && !staged && (
+            <span className="muted" style={{ fontSize: 11.5 }}>
+              {label.is_match === "TRUE" ? "Match" : "Not a match"} by {label.reviewer}
+              {label.provenance && label.provenance !== "manual" ? ` · ${label.provenance}` : ""}
+            </span>
+          )}
+          <span className="spacer" />
+          <span className="muted" style={{ fontSize: 11 }}>
+            <span className="kbd">J</span> / <span className="kbd">K</span> to navigate
+          </span>
         </div>
+
+        {notesOpen && (
+          <LabelNotes
+            label={label}
+            compact
+            onSave={(extra) => onLabelWithExtra(pairId, label?.is_match || "TRUE", extra)}
+            onClose={() => setNotesOpen(false)}
+          />
+        )}
       </div>
     </div>
   );

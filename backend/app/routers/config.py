@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from app.auth import current_user
 from app.profiles import get_profile
-from app.rules import engine, functions
+from app.rules import engine, functions, linkage
 from app.services import config_manager
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -74,9 +74,23 @@ def _ruleset_or_current(draft: dict | None) -> dict:
     return draft if draft is not None else _current_ruleset()
 
 
-def _validated(ruleset: dict) -> dict:
+def _all_errors(ruleset: dict, settings: dict | None) -> list[dict]:
+    """Everything wrong with a draft ruleset and its linkage settings.
+
+    The settings are checked against the ruleset, because which columns a
+    blocking rule or a comparison may name depends on what that track's
+    cleaning steps write.
+    """
+    raw = _raw_columns()
+    errors = engine.validate_ruleset(ruleset, raw)
+    if isinstance(ruleset, dict):
+        errors = errors + linkage.validate_linkage_settings(settings, ruleset, raw)
+    return errors
+
+
+def _validated(ruleset: dict, settings: dict | None = None) -> dict:
     """A ruleset that is safe to run, or a 422 listing everything wrong with it."""
-    errors = engine.validate_ruleset(ruleset, _raw_columns())
+    errors = _all_errors(ruleset, settings)
     if errors:
         raise HTTPException(status_code=422, detail={"errors": errors})
     return ruleset
@@ -108,6 +122,9 @@ class SaveConfigBody(BaseModel):
 
 class ValidateBody(BaseModel):
     ruleset: dict[str, Any]
+    # Omitted means "only check the ruleset" — the rules screen has no thresholds
+    # on it, and the Thresholds & Splink tab sends both.
+    linkage_settings: Optional[dict[str, Any]] = None
 
 
 class ColumnsBody(BaseModel):
@@ -180,11 +197,11 @@ def diff_versions(v1: int, v2: int):
 def save_config(body: SaveConfigBody, user_name: str = Depends(current_user)):
     """Save a new config version. An invalid ruleset is never stored."""
     db_path = _db_path()
-    _validated(body.ruleset)
     settings = body.linkage_settings
     if settings is None:
         current = config_manager.get_current(db_path)
         settings = json.loads(current["linkage_settings"] or "{}") if current else {}
+    _validated(body.ruleset, settings)
     version = config_manager.save_version(
         db_path,
         created_by=user_name,
@@ -198,7 +215,7 @@ def save_config(body: SaveConfigBody, user_name: str = Depends(current_user)):
 @router.post("/validate")
 def validate_config(body: ValidateBody):
     """Check a draft without saving it."""
-    return {"errors": engine.validate_ruleset(body.ruleset, _raw_columns())}
+    return {"errors": _all_errors(body.ruleset, body.linkage_settings)}
 
 
 # ---- What the editor needs to offer ----

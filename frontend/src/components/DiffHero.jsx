@@ -1,78 +1,110 @@
 /* ============================================================
-   DiffHero — token-level name comparison view
+   DiffHero — token-level name comparison for one pair
+   ------------------------------------------------------------
+   Both sides are the same kind of thing now, so the two columns
+   carry the same furniture: the name with its tokens coloured, how
+   many records the unit holds, and the entity IDs it already
+   carries. The score pill sits between them, as in roe_ui.
    ============================================================ */
 
-import { diffNames, fmtProb, BandTag } from "./ProbBar";
+import { diffNames, fmtProb } from "./ProbBar";
 
-/**
- * Renders a single annotated token.
- * Token kinds: match (green), diff (red), digit (blue), suffix (dashed), ws, punct.
- */
 function renderToken(t, i) {
   if (t.kind === "ws" || t.kind === "punct") return <span key={i}>{t.text}</span>;
   return <span key={i} className={`tok ${t.kind}`}>{t.text}</span>;
 }
 
-/**
- * DiffHero — the token-level name comparison view.
- * Shows OCOD name on left, ROE name on right, with tokens color-coded.
- * Header shows probability badge and band tag.
- *
- * @param {Object} props
- * @param {Object} props.match — the match record with:
- *   - ocod_name_raw, roe_name_raw (or ocod.raw / roe.raw shape)
- *   - match_probability (or prob)
- *   - match_method (or method)
- *   - band
- *   - ocod_id / roe_id (display identifiers)
- */
-export function DiffHero({ match, high = 0.92, review = 0.7 }) {
-  const ocodName = match.ocod_name_raw || "";
-  const roeName = match.roe_name_raw || "";
-  const prob = match.match_probability ?? match.prob ?? 0;
-  const method = match.match_method || match.method;
-  const band = match.band;
+// A unit may carry several old ids, joined with " | " by the API.
+export function entityIds(unit) {
+  const raw = unit?.existing_entity_ids ?? unit?.existing_entity_id;
+  if (!raw) return [];
+  return String(raw)
+    .split("|")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
 
-  const { a, b } = diffNames(ocodName, roeName);
+export function BucketTag({ bucket, decidedBy }) {
+  const meta = {
+    accept: { cls: "green", text: "auto-accept" },
+    review: { cls: "amber", text: "review" },
+    reject: { cls: "red", text: "rejected" },
+  }[bucket] || { cls: "", text: bucket || "—" };
+  const by = {
+    score: "decided by the score",
+    import: "accepted because both sides carry the same earlier entity ID",
+    human: "decided by a reviewer",
+  }[decidedBy];
+  return (
+    <span className={"tag " + meta.cls} title={by}>
+      <span className="dot" />
+      {meta.text}
+      {decidedBy && decidedBy !== "score" && (
+        <span style={{ marginLeft: 4, opacity: 0.8 }}>· {decidedBy}</span>
+      )}
+    </span>
+  );
+}
 
-  const score = (
-    <div className="diff-score" aria-label={`Match probability ${fmtProb(prob)}`}>
-      <div className="diff-score-pill">
-        <span
-          style={{
-            color:
-              prob >= high
-                ? "var(--green)"
-                : prob >= review
-                  ? "var(--amber)"
-                  : "var(--ti-red)",
-          }}
-        >
-          {fmtProb(prob)}
+function UnitHead({ unit, side }) {
+  const ids = entityIds(unit);
+  const size = unit?.unit_size;
+  return (
+    <div className="diff-h">
+      <div className="lab">{side}</div>
+      {size > 1 && (
+        <span className="tag" title="This unit is an exact group of this many records">
+          ×{size} records
         </span>
-        <BandTag band={band} method={method} />
-      </div>
+      )}
+      {ids.map((id) => (
+        <span
+          key={id}
+          className={"tag" + (ids.length > 1 ? " amber" : "")}
+          style={{ fontFamily: "var(--font-mono)", textTransform: "none" }}
+          title="Entity ID this side already carries"
+        >
+          {id}
+        </span>
+      ))}
+      {ids.length === 0 && (
+        <span className="muted" style={{ fontSize: 11 }}>
+          never reviewed
+        </span>
+      )}
     </div>
   );
+}
+
+export function DiffHero({ pair, high = 0.92, review = 0.5 }) {
+  const left = pair?.left || {};
+  const right = pair?.right || {};
+  const prob = pair?.match_probability ?? 0;
+  const { a, b } = diffNames(left.name || "", right.name || "");
 
   return (
     <div className="diff">
-      {score}
+      <div className="diff-score" aria-label={`Match probability ${fmtProb(prob)}`}>
+        <div className="diff-score-pill">
+          <span
+            style={{
+              color:
+                prob >= high ? "var(--green)" : prob >= review ? "var(--amber)" : "var(--ti-red)",
+            }}
+          >
+            {fmtProb(prob)}
+          </span>
+          <BucketTag bucket={pair?.bucket} decidedBy={pair?.decided_by} />
+        </div>
+      </div>
 
       <div className="diff-pair">
         <div className="diff-col diff-left">
-          <div className="diff-h">
-            <div className="lab">OCOD &middot; UK Land Registry</div>
-            {match.ocod_id && <span className="tag">{match.ocod_id}</span>}
-          </div>
+          <UnitHead unit={left} side={left.unit_id ? `unit ${left.unit_id}` : "left"} />
           <div className="diff-name">{a.map(renderToken)}</div>
         </div>
-
         <div className="diff-col diff-right">
-          <div className="diff-h">
-            <div className="lab">ROE &middot; Companies House</div>
-            {match.roe_company_number && <span className="tag">{match.roe_company_number}</span>}
-          </div>
+          <UnitHead unit={right} side={right.unit_id ? `unit ${right.unit_id}` : "right"} />
           <div className="diff-name">{b.map(renderToken)}</div>
         </div>
       </div>

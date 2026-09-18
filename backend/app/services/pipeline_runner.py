@@ -34,6 +34,7 @@ def _build_error_detail(exc: Exception) -> str | None:
     lookup" — instead of just showing an error string. Each kind carries only
     what its fix needs.
     """
+    from app.pipeline.dedupe.stage_3_score import BlockingBudgetError
     from app.rules.engine import UnmappedLookupValuesError
 
     if isinstance(exc, UnmappedLookupValuesError):
@@ -42,6 +43,8 @@ def _build_error_detail(exc: Exception) -> str | None:
             "table": exc.table,
             "values": exc.values,
         })
+    if isinstance(exc, BlockingBudgetError):
+        return json.dumps(exc.detail())
     return None
 
 
@@ -132,16 +135,18 @@ def _write_config_files(
         linkage_settings["match_probability_threshold_review"] = threshold_review
     linkage_settings.setdefault("random_seed", 42)
 
-    # Wire the upload-time cross-jurisdiction name-matching toggle into this run's
-    # snapshot: add the name_core blocking rule when enabled (idempotent), strip it
-    # when disabled — so the flag is authoritative regardless of the base config.
-    blocking_rules = list(linkage_settings.get("blocking_rules", []))
-    if cross_jurisdiction_name_matching:
-        if NAME_CORE_BLOCKING_RULE not in blocking_rules:
-            blocking_rules.append(NAME_CORE_BLOCKING_RULE)
-    else:
-        blocking_rules = [r for r in blocking_rules if "name_core" not in r]
-    linkage_settings["blocking_rules"] = blocking_rules
+    # The two-dataset tool this app was copied from kept one flat list of blocking
+    # rules and an upload-time toggle over it. Settings in the dedupe shape put the
+    # rules under `tracks`, so that toggle has nothing to say about them and is left
+    # alone; only a legacy document still gets the old treatment.
+    if "tracks" not in linkage_settings:
+        blocking_rules = list(linkage_settings.get("blocking_rules", []))
+        if cross_jurisdiction_name_matching:
+            if NAME_CORE_BLOCKING_RULE not in blocking_rules:
+                blocking_rules.append(NAME_CORE_BLOCKING_RULE)
+        else:
+            blocking_rules = [r for r in blocking_rules if "name_core" not in r]
+        linkage_settings["blocking_rules"] = blocking_rules
 
     (config_dir / "linkage_settings.json").write_text(
         json.dumps(linkage_settings, indent=2), encoding="utf-8"
@@ -497,11 +502,12 @@ def revert_run_to_splink(db_path: str, run_dir: str, config_dir: str, run_id: st
 # ---------------------------------------------------------------------------
 
 # The dedupe pipeline replaces the old two-dataset linkage stages one slice at a
-# time. Three stages run today; the scoring stages are added beside them later.
+# time. Four stages run today; clustering and export are added beside them later.
 STAGE_NAMES = {
     0: "load",
     1: "clean",
     2: "exact",
+    3: "score",
 }
 
 
@@ -531,6 +537,7 @@ def start_run(
     config_version: int,
     threshold_high: float,
     threshold_review: float,
+    render_diagnostics: bool = True,
 ) -> str:
     """Prepare a run directory and launch the pipeline in a background thread.
 
@@ -573,6 +580,7 @@ def start_run(
             "input_path": input_path,
             "threshold_high": threshold_high,
             "threshold_review": threshold_review,
+            "render_diagnostics": render_diagnostics,
         },
         daemon=True,
     )
@@ -590,12 +598,13 @@ def _run_pipeline(
     input_path: str,
     threshold_high: float,
     threshold_review: float,
+    render_diagnostics: bool = True,
 ) -> None:
     """Execute the dedupe stages sequentially in a background thread.
 
-    Three stages so far: load the records, assign tracks and clean them, then
-    group them on the ruleset's match keys. Scoring, clustering and export
-    stages join them later, each replacing one of the old linkage stages.
+    Four stages so far: load the records, assign tracks and clean them, group
+    them on the ruleset's match keys, then score the units the keys left with
+    Splink. Clustering and export join them later.
     """
     events_path = Path(run_dir) / "events.jsonl"
 
@@ -622,6 +631,7 @@ def _run_pipeline(
             from app.pipeline.dedupe.stage_0_load import run_stage_0_load
             from app.pipeline.dedupe.stage_1_clean import run_stage_1_clean
             from app.pipeline.dedupe.stage_2_exact import run_stage_2_exact
+            from app.pipeline.dedupe.stage_3_score import run_stage_3_score
 
             # Count active labels before running so we know what was available.
             # Nothing consumes them yet — matching arrives in a later slice — but
@@ -647,6 +657,20 @@ def _run_pipeline(
             counts.update(run_stage_2_exact(
                 run_dir=run_dir,
                 config_dir=config_dir,
+                progress_callback=progress_callback,
+            ))
+            # A label is a statement about two records, so it outlives the run
+            # that made it: stage 3 maps each one onto whichever units hold
+            # those two records now.
+            from app.services.pair_labels import labels_frame
+
+            counts.update(run_stage_3_score(
+                run_dir=run_dir,
+                config_dir=config_dir,
+                threshold_high=threshold_high,
+                threshold_review=threshold_review,
+                render_diagnostics=render_diagnostics,
+                labels=labels_frame(db_path),
                 progress_callback=progress_callback,
             ))
             counts["labels_in_library"] = labels_in_library
@@ -778,6 +802,64 @@ def rebucket_run(
     return counts
 
 
+def rebucket_pairs(
+    db_path: str,
+    run_dir: str,
+    config_dir: str,
+    run_id: str,
+    threshold_high: float | None = None,
+    threshold_review: float | None = None,
+) -> dict:
+    """Move a scored run's bucket lines without re-running Splink.
+
+    The dedupe answer to ``rebucket_run``: stage 3 kept every pair down to the
+    candidate floor, so a new accept or review line is a re-read of
+    ``pairs.parquet``, not a rerun. The run's stored counts and thresholds move
+    with it, so the screen never shows old numbers over new data.
+    """
+    from app.pipeline.dedupe.stage_3_score import rebucket
+    from app.services.pair_labels import labels_frame
+
+    settings_path = Path(config_dir) / "linkage_settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    rows = query_db(
+        db_path,
+        "SELECT threshold_high, threshold_review, counts_json FROM runs WHERE id = ?",
+        (run_id,),
+    )
+    current = dict(rows[0]) if rows else {}
+
+    high = threshold_high if threshold_high is not None else current.get("threshold_high")
+    review = threshold_review if threshold_review is not None else current.get("threshold_review")
+    if high is None:
+        high = settings.get("match_probability_threshold_high", 0.92)
+    if review is None:
+        review = settings.get("match_probability_threshold_review", 0.50)
+    high, review = float(high), float(review)
+    if review > high:
+        raise ValueError("The review threshold must be at or below the accept threshold")
+
+    settings["match_probability_threshold_high"] = high
+    settings["match_probability_threshold_review"] = review
+    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+    counts: dict = {}
+    if current.get("counts_json"):
+        try:
+            counts = json.loads(current["counts_json"])
+        except (ValueError, TypeError):
+            counts = {}
+    counts.update(rebucket(run_dir, high, review, labels_frame(db_path)))
+
+    write_db(
+        db_path,
+        "UPDATE runs SET threshold_high = ?, threshold_review = ?, counts_json = ? "
+        "WHERE id = ?",
+        (high, review, json.dumps(counts), run_id),
+    )
+    return counts
+
+
 def _on_run_finished(db_path: str, data_dir: str) -> None:
     """Clear the active run and start the next queued run if any."""
     global _active_run_id
@@ -806,6 +888,7 @@ def enqueue_run(
     config_version: int,
     threshold_high: float,
     threshold_review: float,
+    render_diagnostics: bool = True,
 ) -> None:
     """If no run is active, start immediately. Otherwise queue for later."""
     kwargs = {
@@ -816,6 +899,7 @@ def enqueue_run(
         "config_version": config_version,
         "threshold_high": threshold_high,
         "threshold_review": threshold_review,
+        "render_diagnostics": render_diagnostics,
     }
 
     with _run_lock:

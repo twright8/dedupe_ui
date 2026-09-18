@@ -229,6 +229,215 @@ function RecordKpis({ c }) {
   );
 }
 
+// ---------- Blocking-budget failure panel ----------
+// A run whose blocking rules would have made more pairs than the budget stops
+// before Splink. The fix lives on the Thresholds & Splink tab, so the panel
+// names the worst rule and takes the user there.
+function BlockingBudgetPanel({ run, navigate }) {
+  const detail = run.error_detail || {};
+  const rules = Array.isArray(detail.rules) ? detail.rules : [];
+
+  return (
+    <div className="card" style={{ borderColor: "var(--ti-red-200, #f3c2c2)", marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <Icons.alert size={16} />
+        <h3 style={{ margin: 0 }}>The blocking rules would have made too many pairs</h3>
+      </div>
+      <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
+        On the <strong>{detail.track}</strong> track the rules would compare{" "}
+        <span className="mono">{fmtNumber(detail.total)}</span> pairs against a budget of{" "}
+        <span className="mono">{fmtNumber(detail.budget)}</span>, so the run stopped before scoring
+        anything. Tighten the worst rule, or raise that track's pair budget.
+      </p>
+      {rules.length > 0 && (
+        <div className="tbl-wrap" style={{ marginBottom: 10 }}>
+          <table className="t" style={{ borderRadius: 0, tableLayout: "fixed" }}>
+            <thead>
+              <tr>
+                <th style={{ width: 70 }}>Rule</th>
+                <th>What it blocks on</th>
+                <th style={{ width: 140, textAlign: "right" }}>Pairs</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rules.map((r, i) => (
+                <tr key={r.id || i}>
+                  <td className="mono">{r.id}</td>
+                  <td style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
+                    {r.description || <span className="muted">(no description)</span>}
+                    {r.sql && (
+                      <div className="mono muted" style={{ fontSize: 11 }}>
+                        {r.sql}
+                      </div>
+                    )}
+                  </td>
+                  <td
+                    className="mono tnum"
+                    style={{
+                      textAlign: "right",
+                      color:
+                        detail.budget != null && r.pairs > detail.budget ? "var(--ti-red)" : undefined,
+                    }}
+                  >
+                    {fmtNumber(r.pairs)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <button className="btn primary" onClick={() => navigate("/config")}>
+        <Icons.config size={14} stroke="#fff" /> Open Thresholds &amp; Splink
+      </button>
+    </div>
+  );
+}
+
+// ---------- Contradictions callout ----------
+// A reviewer said two records are not the same and an exact key merged them
+// anyway. That is a rule bug, not a review task, so it gets said loudly.
+function ContradictionsPanel({ runId, count }) {
+  const [rows, setRows] = useState(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open || rows) return;
+    api
+      .getRunContradictions(runId)
+      .then((d) => setRows(Array.isArray(d) ? d : d?.items || []))
+      .catch(() => setRows([]));
+  }, [open, rows, runId]);
+
+  return (
+    <div
+      style={{
+        background: "var(--ti-red-50)",
+        border: "1px solid var(--ti-red)",
+        borderRadius: 5,
+        padding: "10px 14px",
+        marginBottom: 16,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <Icons.alert size={15} />
+        <span style={{ fontSize: 13 }}>
+          <strong>{fmtNumber(count)}</strong> pair{count === 1 ? "" : "s"} an exact key merged
+          although a reviewer had said they are not the same. A match key is too loose.
+        </span>
+        <button className="btn sm" style={{ marginLeft: "auto" }} onClick={() => setOpen((v) => !v)}>
+          {open ? "Hide" : "Show them"}
+        </button>
+      </div>
+      {open && (
+        <div style={{ marginTop: 10 }}>
+          {rows === null ? (
+            <p className="muted pulse" style={{ fontSize: 12.5, margin: 0 }}>
+              Loading…
+            </p>
+          ) : rows.length === 0 ? (
+            <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+              Nothing to list.
+            </p>
+          ) : (
+            <div className="tbl-wrap">
+              <table className="t" style={{ borderRadius: 0 }}>
+                <thead>
+                  <tr>
+                    <th>Records a reviewer kept apart</th>
+                    <th style={{ width: 150 }}>Merged by</th>
+                    <th style={{ width: 160 }}>Group</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={i}>
+                      <td style={{ whiteSpace: "normal" }}>
+                        {r.name_a || r.record_id_a} ↔ {r.name_b || r.record_id_b}
+                        <div className="mono muted" style={{ fontSize: 11 }}>
+                          {r.record_id_a} ↔ {r.record_id_b}
+                        </div>
+                      </td>
+                      <td className="mono" style={{ fontSize: 12 }}>
+                        {(r.key_ids || []).join(", ") || r.key_id || "—"}
+                      </td>
+                      <td className="mono" style={{ fontSize: 12 }}>
+                        {r.group_id || "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Scoring KPI strip ----------
+// The third row on the summary, once stage 3 has scored the pairs.
+function ScoreKpis({ c, onReview }) {
+  const disagrees = c.pairsImportDisagrees || 0;
+  return (
+    <div className="kpi-grid">
+      <div className="kpi">
+        <div className="label">Units compared</div>
+        <div className="value">{fmtNumber(c.unitsTotal)}</div>
+        <div className="delta muted">{fmtNumber(c.pairsScored)} pairs scored</div>
+      </div>
+      <div className="kpi">
+        <div className="label">Auto-accepted</div>
+        <div className="value" style={{ color: "var(--green)" }}>
+          {fmtNumber(c.pairsAccept)}
+        </div>
+        <div className="delta muted">
+          {fmtNumber(c.pairsDecidedByImport)} of them on an earlier entity ID
+        </div>
+      </div>
+      <div className="kpi" onClick={onReview} style={{ cursor: "pointer" }} title="Open the review queue">
+        <div className="label">To review</div>
+        <div className="value" style={{ color: "var(--amber)" }}>
+          {fmtNumber(c.pairsReview)}
+        </div>
+        <div className="delta muted">open the review queue</div>
+      </div>
+      <div className="kpi">
+        <div className="label">Rejected</div>
+        <div className="value">{fmtNumber(c.pairsReject)}</div>
+        <div className="delta muted">below the review floor</div>
+      </div>
+      <div className="kpi">
+        <div className="label">Entities after scoring</div>
+        <div className="value">{fmtNumber(c.entitiesAfterScore)}</div>
+        <div className="delta muted">was {fmtNumber(c.unitsTotal)} units</div>
+      </div>
+      <div className="kpi">
+        <div className="label">Earlier labels disagree</div>
+        <div className="value" style={disagrees > 0 ? { color: "var(--amber)" } : undefined}>
+          {fmtNumber(disagrees)}
+        </div>
+        <div className="delta muted">a flag for sorting, never a decision</div>
+      </div>
+      <div className="kpi">
+        <div className="label">Pair precision</div>
+        <div className="value">
+          {c.scorePairPrecision == null ? "—" : fmtPct(c.scorePairPrecision, 1)}
+        </div>
+        <div className="delta muted">of pairs this run joins, the manual work agreed</div>
+      </div>
+      <div className="kpi">
+        <div className="label">Pair recall</div>
+        <div className="value">
+          {c.scorePairRecall == null ? "—" : fmtPct(c.scorePairRecall, 1)}
+        </div>
+        <div className="delta muted">of pairs the manual work joined, this run finds</div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Exact-key KPI strip ----------
 // The second row on the summary once the exact keys have run: what merged, what
 // is waiting for a human, and how the result sits against the earlier labels.
@@ -387,546 +596,60 @@ function RunSummary({ run, onReview, onConflicts }) {
     );
   }
 
-  // A run that only loaded records: no pair panels to draw, so say what there
-  // is and point at the Records tab.
-  if (!pairs) {
-    const exact = hasExactCounts(c);
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-        <RecordKpis c={c} />
-        {exact && <ExactKpis c={c} onConflicts={onConflicts} />}
-        <div className="card">
-          <div className="card-h">
-            <Icons.table size={16} />
-            <h3>{exact ? "What this run did" : "Records loaded"}</h3>
-          </div>
-          <div className="card-b">
-            <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.6 }}>
-              {exact ? (
-                <>
-                  This run read the input file, sorted every record into a track, cleaned it with
-                  the config's rules, and merged records that share a match key. Open the{" "}
-                  <strong>Records</strong> tab to read the records, or{" "}
-                  <strong>Exact groups</strong> to see what merged and what a guard held back.
-                  Scoring, the review queue and durable entity IDs are not built yet.
-                </>
-              ) : (
-                <>
-                  This run read the input file and sorted every record into a track. Open the{" "}
-                  <strong>Records</strong> tab to read them. Matching, the review queue and
-                  entity IDs are not built yet.
-                </>
-              )}
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  const total = c.exact + c.probAccept + c.review + c.ambiguous;
-  const segs = [
-    { label: "Exact", value: c.exact, color: "var(--blue)", key: "exact" },
-    {
-      label: "Auto-accept",
-      value: c.probAccept,
-      color: "var(--green)",
-      key: "auto",
-    },
-    {
-      label: "Review",
-      value: c.review,
-      color: "var(--amber)",
-      key: "review",
-    },
-    {
-      label: "Ambiguous",
-      value: c.ambiguous,
-      color: "var(--violet)",
-      key: "amb",
-    },
-  ];
-
-  // Which model actually DECIDED this run. Prefer the authoritative per-run field
-  // (decision_model, recorded in run metadata), falling back to the diagnostics
-  // score_column for legacy runs recorded before that field existed.
-  const decisionModel = c.decisionModel; // 'splink' | 'gbt:<version>' | null
-  const gbtDecides = decisionModel
-    ? decisionModel.startsWith("gbt")
-    : diagData?.score_column === "gbt_score";
-  const decisionVersion =
-    c.decisionModelVersion ??
-    (decisionModel && decisionModel.includes(":") ? decisionModel.split(":")[1] : null);
-  const gbtTrained = !!modelStatus?.exists;
-  const gm = modelStatus?.metrics;
-  const gbtUnvalidated =
-    gm && (gm.auc === 1 || gm.brier_calibrated === 0 ||
-           (gm.eval_source !== "held_out" && gm.eval_source !== "oof_train"));
-  const decision = gbtDecides
-    ? {
-        label: `Decision score: GBT (calibrated)${decisionVersion ? ` · model v${decisionVersion}` : ""}`,
-        cls: gbtUnvalidated ? "amber" : "green",
-        note: gbtUnvalidated
-          ? "⚠ unvalidated — too small or separable"
-          : gm?.eval_source === "oof_train"
-            ? "validated out-of-fold (no separate held-out set)"
-            : null,
-      }
-    : {
-        label: "Decision score: Splink (clumpy)",
-        cls: c.gbtWarning ? "amber" : "",
-        note: c.gbtWarning
-          ? c.gbtWarning
-          : gbtTrained
-            ? "a GBT is trained but not applied to this run"
-            : "no GBT trained",
-      };
+  // One summary for every stage a run has reached: records, then the exact
+  // groups, then the scored pairs. Each strip appears once its stage has run.
+  const exact = hasExactCounts(c);
+  const contradictions = c.labelContradictions || 0;
 
   return (
-    <div
-      style={{ display: "flex", flexDirection: "column", gap: 20 }}
-    >
-      {/* Record counts, when this run also recorded them */}
-      {records && <RecordKpis c={c} />}
-
-      {/* KPI strip */}
-      <div className="kpi-grid">
-        <div className="kpi">
-          <div className="label">OCOD rows in</div>
-          <div className="value">{fmtNumber(c.ocod)}</div>
-          <div className="delta muted">{fmtNumber(c.roe)} ROE rows</div>
-        </div>
-        <div className="kpi">
-          <div className="label">Total matched (titles)</div>
-          <div className="value">
-            {fmtNumber(c.matchedTitles || c.exact + c.probAccept)}
-          </div>
-          <div className="delta up">
-            {fmtPct(c.matchRate, 2)} of OCOD
-          </div>
-        </div>
-        <div className="kpi">
-          <div className="label">Pending review</div>
-          <div className="value" style={{ color: "var(--amber)" }}>
-            {fmtNumber(c.review)}
-          </div>
-          <div className="delta muted">
-            {fmtNumber(c.ambiguous)} ambiguous
-          </div>
-        </div>
-        <div className="kpi">
-          <div className="label">Phase split</div>
-          <div className="value">
-            <span style={{ fontSize: 22, color: "var(--blue)" }}>
-              {c.exact + c.probAccept > 0
-                ? Math.round(
-                    (c.exact / (c.exact + c.probAccept)) * 100
-                  )
-                : 0}
-              %
-            </span>
-            <span
-              className="muted"
-              style={{ fontSize: 14, marginLeft: 6 }}
-            >
-              exact
-            </span>
-          </div>
-          <div className="delta muted">
-            Phase 2 added {fmtNumber(c.probAccept)}
-          </div>
-        </div>
-      </div>
-
-      {/* Stages strip */}
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {contradictions > 0 && <ContradictionsPanel runId={run.id} count={contradictions} />}
+      <RecordKpis c={c} />
+      {exact && <ExactKpis c={c} onConflicts={onConflicts} />}
+      {pairs && <ScoreKpis c={c} onReview={onReview} />}
       <div className="card">
         <div className="card-h">
-          <Icons.bolt size={16} />
-          <h3>Pipeline stages</h3>
-          <div className="actions">
-            <span className={`tag ${decision.cls}`}>
-              <span className="dot" />{decision.label}
-            </span>
-            {decision.note && (
-              <span className="muted" style={{ fontSize: 11 }}>{decision.note}</span>
+          <Icons.table size={16} />
+          <h3>{exact || pairs ? "What this run did" : "Records loaded"}</h3>
+          {pairs && (
+            <div className="actions">
+              <button className="btn primary" onClick={onReview}>
+                <Icons.review size={14} stroke="#fff" /> Open the review queue
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="card-b">
+          <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.6 }}>
+            {pairs ? (
+              <>
+                This run read the input file, sorted every record into a track, cleaned it, merged
+                records that share a match key, and scored every pair the blocking rules let
+                through. Open <strong>Review</strong> to answer the uncertain ones. Clustering and
+                durable entity IDs are not built yet, so nothing is published from here.
+              </>
+            ) : exact ? (
+              <>
+                This run read the input file, sorted every record into a track, cleaned it with the
+                config's rules, and merged records that share a match key. Open the{" "}
+                <strong>Records</strong> tab to read the records, or <strong>Exact groups</strong>{" "}
+                to see what merged and what a guard held back. Scoring, the review queue and
+                durable entity IDs are not built yet.
+              </>
+            ) : (
+              <>
+                This run read the input file and sorted every record into a track. Open the{" "}
+                <strong>Records</strong> tab to read them. Matching, the review queue and entity IDs
+                are not built yet.
+              </>
             )}
-          </div>
-        </div>
-        <div className="card-b">
-          <div className="stages">
-            {(run.stages || [
-              {
-                num: 0,
-                name: "Preprocess",
-                status: "done",
-                meta: "",
-              },
-              {
-                num: 1,
-                name: "Phase 1 — Exact",
-                status: "done",
-                meta: `${fmtNumber(c.exact)} matches`,
-              },
-              {
-                num: 2,
-                name: "Phase 2 — Splink",
-                status: "done",
-                meta: `${fmtNumber(c.probAccept + c.review + c.ambiguous)} candidates scored (unsupervised)`
-                  + (c.droppedBelowReview > 0 ? ` · ${fmtNumber(c.droppedBelowReview)} below review floor` : ""),
-              },
-              {
-                num: "2.5",
-                name: "GBT re-score",
-                status: gbtDecides ? "done" : "skip",
-                meta: gbtDecides
-                  ? "applied · decides this run (calibrated)"
-                  : gbtTrained
-                    ? "trained but NOT applied — this run decided on Splink"
-                    : "not trained — pipeline ran on Splink",
-              },
-              {
-                num: 3,
-                name: "Evaluate & Export",
-                status: "done",
-                meta: "",
-              },
-              {
-                num: null,
-                name: "Apply labels",
-                status: "done",
-                meta: labelStats
-                  ? `${fmtNumber(c.labelsApplied || 0)} of your saved answers applied`
-                    + (c.labelsUnmatched > 0 ? ` · ${fmtNumber(c.labelsUnmatched)} didn't match this run's data` : "")
-                    + ` · ${fmtNumber(labelStats.total)} saved in total`
-                  : c.labelsApplied > 0
-                    ? `${fmtNumber(c.labelsApplied)} of your saved answers applied`
-                      + (c.labelsUnmatched > 0 ? ` · ${fmtNumber(c.labelsUnmatched)} didn't match this run's data` : "")
-                    : "",
-              },
-            ]).map((s) => (
-              <div
-                key={s.num ?? s.name}
-                className={`stage ${s.status || "done"}`}
-              >
-                <div className="st-num">
-                  {s.num != null ? `${s.num} · ` : "POST · "}{(s.status || "done").toUpperCase()}
-                </div>
-                <div className="st-name">{s.name}</div>
-                {s.meta && (
-                  <div className="st-meta">{s.meta}</div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Land-title outcome — counted per land title (OCOD rows), not per owner */}
-      <div className="card">
-        <div className="card-h">
-          <Icons.spark size={16} />
-          <h3>Land-title outcome</h3>
-          <span className="muted" style={{ fontSize: 12, marginLeft: "auto" }}>
-            counted per land title, not per owner
-          </span>
-        </div>
-        <div className="card-b">
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 28 }}>
-            {(() => {
-              const matched = c.matchedTitles || 0;
-              const unmatchedT = c.unmatchedTitles ?? Math.max(0, c.ocod - matched);
-              const exactT = c.matchedTitlesExact ?? 0;
-              const fuzzyT = Math.max(0, matched - exactT);
-              const formerT = c.matchedTitlesFormer ?? 0;
-              const roeNoMatch = c.unmatchedRoe ?? 0;
-              return [
-                { label: "Total land titles", value: c.ocod, sub: null },
-                { label: "Titles with a matched owner", value: matched, color: "var(--green)",
-                  sub: `${fmtPct(c.matchRate, 1)} of titles`
-                    + (c.matchedTitlesExact != null ? ` · ${fmtNumber(exactT)} exact, ${fmtNumber(fuzzyT)} fuzzy/confirmed` : "")
-                    + (formerT > 0 ? ` · incl. ${fmtNumber(formerT)} via former name` : "") },
-                { label: "Titles with no confirmed owner", value: unmatchedT, color: "var(--ti-red)",
-                  sub: `${fmtPct(c.ocod > 0 ? unmatchedT / c.ocod : 0, 1)} of titles · incl. any in review` },
-                { label: "Total ROE companies", value: c.roe, sub: null },
-                { label: "ROE companies with no match", value: roeNoMatch,
-                  sub: `${fmtPct(c.roe > 0 ? roeNoMatch / c.roe : 0, 1)} of ROE · sold up, owns outside E&W, or the link failed` },
-              ].map((s) => (
-                <div key={s.label} style={{ minWidth: 150 }}>
-                  <div className="muted" style={{ fontSize: 12 }}>{s.label}</div>
-                  <div className="mono" style={{ fontSize: 22, fontWeight: 650, color: s.color }}>
-                    {fmtNumber(s.value)}
-                  </div>
-                  {s.sub && <div className="muted" style={{ fontSize: 11 }}>{s.sub}</div>}
-                </div>
-              ));
-            })()}
-          </div>
-          <p className="muted" style={{ fontSize: 11.5, marginTop: 14, lineHeight: 1.5 }}>
-            Title-level: <strong>matched + unmatched = total titles</strong> (a company owning 5
-            properties counts as 5). The “Outcome composition” bar below counts <strong>per owner</strong>
-            (de-duplicated proprietors), so its total differs from the title counts here — and the
-            downloadable <code>unmatched_ocod.csv</code> is per-owner too.
           </p>
         </div>
       </div>
-
-      {/* Before vs after human labels */}
-      {c.preLabels && (
-        <div className="card">
-          <div className="card-h">
-            <h3>Before and after your labels</h3>
-            <span className="muted" style={{ fontSize: 12, marginLeft: "auto" }}>
-              what the matcher decided vs what the export says
-            </span>
-          </div>
-          <div className="card-b">
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr className="muted" style={{ fontSize: 12, textAlign: "left" }}>
-                  <th style={{ padding: "4px 0" }}>Measure</th>
-                  <th style={{ padding: "4px 0", textAlign: "right" }}>Model only</th>
-                  <th style={{ padding: "4px 0", textAlign: "right" }}>After labels</th>
-                  <th style={{ padding: "4px 0", textAlign: "right" }}>Change</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[
-                  ["Titles with a matched owner", c.preLabels.matchedTitles, c.matchedTitles],
-                  ["Titles with no confirmed owner", c.preLabels.unmatchedTitles, c.unmatchedTitles],
-                  ["Distinct entities identified", c.preLabels.distinctEntitiesIdentified, c.distinctEntitiesIdentified],
-                ].map(([label, before, after]) => {
-                  const delta = (after ?? 0) - (before ?? 0);
-                  return (
-                    <tr key={label} style={{ borderTop: "1px solid var(--border)" }}>
-                      <td style={{ padding: "7px 0" }}>{label}</td>
-                      <td className="mono" style={{ padding: "7px 0", textAlign: "right" }}>{fmtNumber(before ?? 0)}</td>
-                      <td className="mono" style={{ padding: "7px 0", textAlign: "right", fontWeight: 650 }}>{fmtNumber(after ?? 0)}</td>
-                      <td className="mono" style={{ padding: "7px 0", textAlign: "right",
-                        color: delta === 0 ? "var(--muted)" : delta > 0 ? "var(--green)" : "var(--ti-red)" }}>
-                        {delta > 0 ? "+" : ""}{fmtNumber(delta)}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            <p className="muted" style={{ fontSize: 11.5, marginTop: 12, lineHeight: 1.5 }}>
-              “Model only” is what Stage 3 produced before any human label touched the export.
-              “After labels” is what <code>merged_dataset.csv</code> now contains — {fmtNumber(c.labelsApplied || 0)} label
-              {(c.labelsApplied || 0) === 1 ? "" : "s"} applied
-              {(c.labelsUnmatched || 0) > 0 ? `, ${fmtNumber(c.labelsUnmatched)} that did not resolve onto this run` : ""}.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Outcome composition bar */}
-      <div className="card">
-        <div className="card-h">
-          <Icons.spark size={16} />
-          <h3>Outcome composition</h3>
-          <div className="actions">
-            <span
-              className="muted"
-              style={{ fontSize: 12 }}
-            >
-              Candidate pairs scored (per owner):
-            </span>{" "}
-            <span className="mono" style={{ fontSize: 13 }}>
-              {fmtNumber(total)}
-            </span>
-          </div>
-        </div>
-        <div className="card-b">
-          <div
-            style={{
-              display: "flex",
-              height: 32,
-              borderRadius: 6,
-              overflow: "hidden",
-              border: "1px solid var(--line)",
-            }}
-          >
-            {segs.map((s) => (
-              <div
-                key={s.key}
-                style={{
-                  width: `${total > 0 ? (s.value / total) * 100 : 0}%`,
-                  background: s.color,
-                  color: "#fff",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  display: "grid",
-                  placeItems: "center",
-                  minWidth: s.value > 0 ? 24 : 0,
-                }}
-              >
-                {total > 0 && s.value / total > 0.04
-                  ? fmtNumber(s.value)
-                  : ""}
-              </div>
-            ))}
-          </div>
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 16,
-              marginTop: 12,
-            }}
-          >
-            {segs.map((s) => (
-              <div
-                key={s.key}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                }}
-              >
-                <span
-                  style={{
-                    width: 10,
-                    height: 10,
-                    background: s.color,
-                    borderRadius: 2,
-                  }}
-                />
-                <span style={{ fontSize: 12.5 }}>{s.label}</span>
-                <span
-                  className="mono muted"
-                  style={{ fontSize: 12 }}
-                >
-                  {fmtNumber(s.value)} &middot;{" "}
-                  {fmtPct(total > 0 ? s.value / total : 0, 1)}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Side-by-side: Top jurisdictions + Top name rules */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: 16,
-        }}
-      >
-        <div className="card">
-          <div className="card-h">
-            <h3>Top jurisdictions by matches</h3>
-          </div>
-          <div className="card-b">
-            {diagData && diagData.top_jurisdictions && diagData.top_jurisdictions.length > 0 ? (
-              <table className="t" style={{ borderRadius: 0 }}>
-                <thead>
-                  <tr>
-                    <th>Jurisdiction</th>
-                    <th style={{ textAlign: "right" }}>Matches</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {diagData.top_jurisdictions.map((j, i) => (
-                    <tr key={i}>
-                      <td style={{ fontSize: 12.5 }}>{j.jurisdiction}</td>
-                      <td className="mono" style={{ textAlign: "right", fontSize: 12.5 }}>
-                        {fmtNumber(j.count)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <p className="muted" style={{ fontSize: 13, padding: "12px 0" }}>
-                No data available.
-              </p>
-            )}
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-h">
-            <h3>Most-applied name rules</h3>
-          </div>
-          <div className="card-b">
-            {diagData && diagData.top_rules && diagData.top_rules.length > 0 ? (
-              <table className="t" style={{ borderRadius: 0 }}>
-                <thead>
-                  <tr>
-                    <th>Rule</th>
-                    <th style={{ textAlign: "right" }}>Hits</th>
-                    <th>Effect</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {diagData.top_rules.map((r, i) => (
-                    <tr key={i}>
-                      <td style={{ fontSize: 12.5 }}>{r.rule}</td>
-                      <td className="mono" style={{ textAlign: "right", fontSize: 12.5 }}>
-                        {fmtNumber(r.hits)}
-                      </td>
-                      <td className="muted" style={{ fontSize: 12 }}>{r.effect}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <p className="muted" style={{ fontSize: 13, padding: "12px 0" }}>
-                No data available.
-              </p>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Call out: needs attention */}
-      {c.review > 0 && (
-        <div
-          className="card"
-          style={{
-            borderColor: "var(--amber)",
-            background: "var(--amber-50)",
-          }}
-        >
-          <div
-            style={{
-              padding: "14px 16px",
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-            }}
-          >
-            <Icons.alert size={20} stroke="var(--amber)" />
-            <div style={{ flex: 1 }}>
-              <div
-                style={{ fontWeight: 600, color: "var(--amber)" }}
-              >
-                {c.review} pairs in the review band
-                {c.ambiguous > 0 &&
-                  ` — and ${c.ambiguous} ambiguous cases to disambiguate.`}
-              </div>
-              <div
-                style={{
-                  color: "var(--ink-2)",
-                  fontSize: 12.5,
-                }}
-              >
-                {labelStats && labelStats.forRun > 0
-                  ? `${fmtNumber(labelStats.forRun)} labelled so far. Apply labels to update exports, or continue reviewing.`
-                  : "Open the review queue to label matches as TRUE or FALSE."}
-              </div>
-            </div>
-            <button className="btn primary" onClick={onReview}>
-              Start reviewing
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
+
 
 // ---------- Diagnostics tab ----------
 function RunDiagnostics({ runId }) {
@@ -1719,6 +1442,11 @@ export default function RunDetailScreen() {
         (run.error_detail.values?.length || 0) > 0 && (
           <UnmappedLookupValuesPanel run={run} runId={id} navigate={navigate} />
         )}
+
+      {/* A run that never scored because its blocking rules were too loose */}
+      {run.status === "failed" && run.error_detail?.kind === "blocking_budget" && (
+        <BlockingBudgetPanel run={run} navigate={navigate} />
+      )}
 
       {/* Tabs. Exact groups only appears once the key stage has run. */}
       <div className="tabs">

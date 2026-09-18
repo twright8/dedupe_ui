@@ -213,7 +213,7 @@ export default function RecordsTable({ runId, profile }) {
             title="Show the columns the cleaning steps wrote, beside the profile's own"
           >
             <Icons.table size={14} stroke={showCleaned ? "#fff" : undefined} />
-            Cleaned columns
+            Cleaned and derived columns
             <span className="muted" style={{ fontSize: 11 }}>
               &middot; {cleaningColumns.length}
             </span>

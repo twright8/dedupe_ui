@@ -302,3 +302,137 @@ def test_psc_loader_says_it_is_not_built_yet(tmp_path):
     assert profile.title == "PSC reconciliation"
     with pytest.raises(NotImplementedError, match="not built yet"):
         profile.load_records(tmp_path / "snapshot.zip")
+
+
+# ---------------------------------------------------------------------------
+# The giving pattern (D13a) and the evidence rows (D13b)
+# ---------------------------------------------------------------------------
+
+
+def test_the_amount_profile_describes_how_a_donor_gives():
+    records, _ = build_records(_frame([
+        _row(DonorId="7", Value=1000),
+        _row(DonorId="7", Value=1000),
+        _row(DonorId="7", Value=2000),
+        _row(DonorId="7", Value=250),
+        _row(DonorId="8", Value=500),
+    ]))
+    by_id = _by_id(records)
+
+    seven = by_id["7"]
+    assert seven["median_value"] == 1000.0       # 250, 1000, 1000, 2000
+    assert seven["modal_value"] == 1000.0        # two of them
+    assert seven["n_distinct_values"] == 3
+    assert seven["share_round_1000"] == 0.75     # three of four are whole thousands
+    # Most frequent first, and the larger amount wins a tie.
+    assert seven["top_values"] == "1,000 | 2,000 | 250"
+
+    assert by_id["8"]["median_value"] == 500.0
+    assert by_id["8"]["n_distinct_values"] == 1
+
+
+def test_the_modal_amount_breaks_a_tie_towards_the_larger_gift():
+    records, _ = build_records(_frame([
+        _row(DonorId="9", Value=100),
+        _row(DonorId="9", Value=5000),
+    ]))
+    # One each: the bigger habit is the more telling one.
+    assert _by_id(records)["9"]["modal_value"] == 5000.0
+
+
+def test_a_donor_with_no_usable_amount_still_loads():
+    records, _ = build_records(_frame([_row(DonorId="11", Value=None)]))
+    row = _by_id(records)["11"]
+    assert row["median_value"] is None or pd.isna(row["median_value"])
+    assert row["n_distinct_values"] == 0
+    assert row["top_values"] is None
+
+
+def test_the_events_frame_is_one_row_per_donation():
+    from app.profiles.donations import build_events
+
+    events = build_events(_frame([
+        _row(DonorId="20", Value=100, AcceptedDate="2020-01-05",
+             RegulatedEntityName="Party A", ECRef="C1"),
+        _row(DonorId="20", Value=200, AcceptedDate="2022-03-09",
+             RegulatedEntityName="Party B", ECRef="C2"),
+        _row(DonorId="21", DonorStatus="Trust", Value=300, AcceptedDate=None),
+    ]))
+
+    assert list(events.columns) == [
+        "record_id", "date", "value", "recipient", "unit", "donation_type",
+        "nature", "is_sponsorship", "reporting_period", "ec_ref",
+    ]
+    twenty = events[events["record_id"] == "20"]
+    # Newest first, which is the order a reviewer reads them in.
+    assert list(twenty["date"]) == ["2022-03-09", "2020-01-05"]
+    assert list(twenty["value"]) == [200.0, 100.0]
+    assert list(twenty["ec_ref"]) == ["C2", "C1"]
+    # A trust keeps its own id namespace here too, so the events join the same
+    # record the loader made.
+    assert set(events["record_id"]) == {"20", "TR21"}
+    assert events[events["record_id"] == "TR21"].iloc[0]["date"] is None
+
+
+def test_the_workbook_is_parsed_once_for_both_frames(tmp_path, monkeypatch):
+    """Reading the real sheet takes about ten seconds, and a run needs it twice."""
+    from app.profiles import donations
+
+    path = tmp_path / "donations.csv"
+    _frame([_row(DonorId="30"), _row(DonorId="31")]).to_csv(path, index=False)
+
+    donations.forget_input_cache()
+    calls = []
+    original = donations._read_input_uncached
+    monkeypatch.setattr(donations, "_read_input_uncached",
+                        lambda p: (calls.append(p), original(p))[1])
+
+    profile = DonationsProfile()
+    profile.load_records(path)
+    profile.load_events(path)
+    assert len(calls) == 1
+
+    # A changed file is never served from the cache.
+    _frame([_row(DonorId="32")]).to_csv(path, index=False)
+    profile.load_records(path)
+    assert len(calls) == 2
+    donations.forget_input_cache()
+
+
+def test_a_units_giving_pattern_is_pooled_not_voted_on():
+    """A unit is several donors pooled, so its median is not a member's median."""
+    from app.pipeline.dedupe.units import build_units
+
+    records, _ = build_records(_frame([
+        _row(DonorId="40", Value=1000),
+        _row(DonorId="40", Value=1000),
+        _row(DonorId="41", Value=9000),
+    ]))
+    from app.profiles.donations import build_events
+
+    events = build_events(_frame([
+        _row(DonorId="40", Value=1000, AcceptedDate="2020-01-01"),
+        _row(DonorId="40", Value=1000, AcceptedDate="2021-01-01"),
+        _row(DonorId="41", Value=9000, AcceptedDate="2022-01-01"),
+    ]))
+    groups = pd.DataFrame([
+        {"record_id": r, "group_id": "X-40", "track": "person",
+         "status": "merged", "key_ids": "k3", "guard": None} for r in ("40", "41")
+    ])
+    records["track"] = "person"
+
+    units, members = build_units(records, groups, events)
+    unit = units.iloc[0]
+
+    # Pooled: 1000, 1000, 9000.
+    assert unit["median_value"] == 1000.0
+    assert unit["n_distinct_values"] == 2
+    assert unit["n_donations"] == 3
+    assert unit["first_year"] == 2020
+    assert unit["last_year"] == 2022
+    assert unit["total_value"] == 11000.0
+
+    # Without the evidence rows the hook has nothing to work from and the
+    # representative's own value stands.
+    plain, _ = build_units(records, groups)
+    assert plain.iloc[0]["n_donations"] in (1, 2)

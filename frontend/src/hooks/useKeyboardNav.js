@@ -32,23 +32,24 @@ export function useKeyboardNav({ items, selectedId, setSelectedId, onLabel, enab
       const tag = e.target.tagName;
       if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return;
 
-      const currentIndex = items.findIndex(m => (m.id || m.match_id) === selectedId);
+      const idOf = (m) => m.pair_id || m.id || m.match_id;
+      const currentIndex = items.findIndex((m) => idOf(m) === selectedId);
       const currentItem = items[currentIndex];
 
       if (e.key === "j" || e.key === "ArrowDown") {
         e.preventDefault();
         const next = items[Math.min(items.length - 1, currentIndex + 1)];
-        if (next) setSelectedId(next.id || next.match_id);
+        if (next) setSelectedId(idOf(next));
       } else if (e.key === "k" || e.key === "ArrowUp") {
         e.preventDefault();
         const prev = items[Math.max(0, currentIndex - 1)];
-        if (prev) setSelectedId(prev.id || prev.match_id);
+        if (prev) setSelectedId(idOf(prev));
       } else if (e.key === "t" || e.key === "y") {
-        if (currentItem) onLabel(currentItem.id || currentItem.match_id, "TRUE");
+        if (currentItem) onLabel(idOf(currentItem), "TRUE");
       } else if (e.key === "f" || e.key === "n") {
-        if (currentItem) onLabel(currentItem.id || currentItem.match_id, "FALSE");
+        if (currentItem) onLabel(idOf(currentItem), "FALSE");
       } else if (e.key === "u") {
-        if (currentItem) onLabel(currentItem.id || currentItem.match_id, null);
+        if (currentItem) onLabel(idOf(currentItem), null);
       }
     }
 

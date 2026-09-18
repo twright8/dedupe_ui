@@ -26,10 +26,19 @@ def client(db_path, monkeypatch):
 
 
 def _label(client, name, roe, verdict):
-    return client.post("/api/labels", json={
-        "ocod_name_clean": name, "jurisdiction_clean": "ENGLAND",
-        "roe_company_number": roe, "is_true_match": verdict,
-    })
+    """Seed a legacy OCOD/ROE label.
+
+    /api/labels now serves the dedupe pair labels, so the GBT's own label table
+    is seeded through its service function instead of over HTTP.
+    """
+    from app.routers.labels import upsert_label
+
+    return upsert_label(
+        db_path=_main_mod.DB_PATH, ocod_name_clean=name,
+        jurisdiction_clean="ENGLAND", roe_company_number=roe,
+        ocod_name_raw=name, ocod_jurisdiction_raw="ENGLAND",
+        is_true_match=verdict, reviewer="test", notes=None, run_id=None,
+    )
 
 
 def test_model_status_shape(client):
@@ -168,16 +177,3 @@ def test_activate_deactivate_and_status_version(client, tmp_path, monkeypatch):
     assert r.status_code == 200 and r.json()["active_version"] is None
     assert gbt_model.get_active_version() is None
     assert client.get("/api/model").json()["active_version"] is None
-
-
-def test_labels_batch_skips_invalid(client):
-    r = client.post("/api/labels/batch", json={"labels": [
-        {"ocod_name_clean": "A LTD", "jurisdiction_clean": "ENGLAND",
-         "roe_company_number": "OE1", "is_true_match": "true", "provenance": "bulk_range"},
-        {"ocod_name_clean": "B LTD", "jurisdiction_clean": "ENGLAND",
-         "roe_company_number": "OE2", "is_true_match": "nonsense"},
-    ]})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["created"] == 1
-    assert body["failed"] == 1

@@ -14,6 +14,7 @@ from app.profiles import get_profile
 from app.profiles.base import validate_records
 
 RECORDS_RAW_FILENAME = "records_raw.parquet"
+EVENTS_FILENAME = "events.parquet"
 
 STAGE = 0
 STAGE_NAME = "load"
@@ -58,6 +59,14 @@ def run_stage_0_load(
 
     out_path = run_dir / RECORDS_RAW_FILENAME
     records.to_parquet(out_path, index=False)
+
+    # The evidence rows behind the records (D13b), when the profile has any.
+    # A profile that reads a slow file serves both frames from one parse.
+    events = profile.load_events(Path(input_path))
+    if events is not None and len(events):
+        events.to_parquet(run_dir / EVENTS_FILENAME, index=False)
+        stats["event_rows"] = int(len(events))
+        _step(f"  {len(events):,} evidence rows", progress_callback)
 
     elapsed = time.time() - t_start
     _step(

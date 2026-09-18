@@ -102,7 +102,9 @@ def test_config_version_1_is_seeded_from_the_profile_defaults(db_path, monkeypat
 
     settings = json.loads(config["linkage_settings"])
     assert "match_probability_threshold_high" in settings
-    assert "blocking_rules" in settings
+    assert set(settings["tracks"]) == {"person", "organisation"}
+    for track in settings["tracks"].values():
+        assert track["blocking_rules"] and track["comparisons"]
 
 
 def test_the_seeded_ruleset_validates_against_the_profile(db_path, monkeypatch):

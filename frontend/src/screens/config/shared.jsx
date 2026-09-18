@@ -31,6 +31,7 @@ export function normalizeRuleset(raw) {
       person: Array.isArray(cleaning.person) ? cleaning.person : [],
       organisation: Array.isArray(cleaning.organisation) ? cleaning.organisation : [],
     },
+    derived_columns: Array.isArray(rs.derived_columns) ? rs.derived_columns : [],
     match_keys: Array.isArray(rs.match_keys) ? rs.match_keys : [],
     vetoes: Array.isArray(rs.vetoes) ? rs.vetoes : [],
   };
@@ -68,6 +69,7 @@ export function tabForPath(path) {
   if (p.startsWith("track_rules") || p.startsWith("default_track")) return "tracks";
   if (p.startsWith("cleaning")) return "cleaning";
   if (p.startsWith("token_lists") || p.startsWith("lookups")) return "tables";
+  if (p.startsWith("derived_columns")) return "derived";
   if (p.startsWith("match_keys")) return "keys";
   if (p.startsWith("linkage_settings")) return "thresholds";
   return null; // vetoes have no tab yet — they arrive with scoring
@@ -429,6 +431,51 @@ export function columnsBeforeStep(cols, index) {
 export function allColumnNames(cols) {
   if (Array.isArray(cols.all) && cols.all.length) return cols.all;
   return columnsBeforeStep(cols, (cols.steps || []).length);
+}
+
+// Every column several tracks make available, as one list. A derived column may
+// be scoped to more than one track, and its conditions read whatever those
+// tracks produce, so the union is what the column dropdown offers.
+export function useColumnsForTracks(ruleset, trackKeys) {
+  const draft = useDebounced(ruleset, 400);
+  const signature = (trackKeys || []).join(",");
+  const [state, setState] = useState({ byTrack: {}, union: [] });
+
+  useEffect(() => {
+    const keys = signature ? signature.split(",") : [];
+    if (!keys.length) return undefined;
+    let alive = true;
+    Promise.all(
+      keys.map((t) =>
+        api
+          .configColumns({ ruleset: draft, track: t })
+          .then((res) => [t, res])
+          .catch(() => [t, null])
+      )
+    ).then((pairs) => {
+      if (!alive) return;
+      const byTrack = {};
+      const seen = new Map();
+      for (const [t, res] of pairs) {
+        if (!res) continue;
+        byTrack[t] = res;
+        for (const c of res.raw || []) {
+          if (!seen.has(c.key)) seen.set(c.key, { key: c.key, label: c.label || c.key });
+        }
+        for (const step of res.steps || []) {
+          for (const target of step.targets || []) {
+            if (!seen.has(target)) seen.set(target, { key: target, label: target });
+          }
+        }
+      }
+      setState({ byTrack, union: [...seen.values()] });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [draft, signature]);
+
+  return state;
 }
 
 // The completed runs a preview can be tried against, newest first.

@@ -1,33 +1,157 @@
 {
-  "blocking_rules": [
-    "l.name_core = r.name_core AND l.name_core <> ''"
-  ],
-  "comparisons": {
-    "name_clean": {
-      "splink_function": "cl.JaroWinklerAtThresholds",
-      "splink_args": {"score_threshold_or_thresholds": [0.97, 0.95, 0.92, 0.90, 0.85, 0.80]},
-      "description": "Jaro-Winkler at six similarity thresholds plus exact. Six thresholds give finer probability bucketing than two."
+  "tracks": {
+    "person": {
+      "blocking_rules": [
+        {
+          "id": "pb1",
+          "description": "Same surname and same first initial. The workhorse rule: 26,958 pairs over 9,678 blocks on the September 2026 sheet, biggest block 141.",
+          "sql": "l.surname = r.surname AND l.forename_initial = r.forename_initial"
+        },
+        {
+          "id": "pb2",
+          "description": "Surname sounds the same and the forename maps to the same canonical form. Rescues SMITH/SMYTH and BILL/WILLIAM. 23,915 pairs.",
+          "sql": "l.surname_metaphone = r.surname_metaphone AND l.forename_canon = r.forename_canon"
+        },
+        {
+          "id": "pb3",
+          "description": "Same forename and the surname starts with the same letter. Catches a changed or mistyped surname. 76,738 pairs, the most expensive of the three and still far inside budget.",
+          "sql": "l.forename_canon = r.forename_canon AND substr(l.surname, 1, 1) = substr(r.surname, 1, 1)"
+        }
+      ],
+      "comparisons": [
+        {
+          "id": "pc1",
+          "column": "forename_canon",
+          "splink_function": "cl.JaroWinklerAtThresholds",
+          "splink_args": {
+            "score_threshold_or_thresholds": [
+              0.92,
+              0.85
+            ]
+          },
+          "term_frequency": false,
+          "description": "Forename after the nickname lookup, so ROBERT and BOB have already met. Two Jaro-Winkler levels below exact."
+        },
+        {
+          "id": "pc2",
+          "column": "surname",
+          "splink_function": "cl.JaroWinklerAtThresholds",
+          "splink_args": {
+            "score_threshold_or_thresholds": [
+              0.92,
+              0.85
+            ]
+          },
+          "term_frequency": true,
+          "description": "Surname, with the term-frequency adjustment on: agreeing on FOTHERGILL is far stronger evidence than agreeing on SMITH."
+        },
+        {
+          "id": "pc3",
+          "column": "middle_names",
+          "splink_function": "cl.ExactMatch",
+          "splink_args": {},
+          "term_frequency": false,
+          "description": "Middle names. Only 4,788 of 13,310 person units carry one, so most pairs land on the null level and are neither helped nor punished."
+        },
+        {
+          "id": "pc4",
+          "column": "title",
+          "splink_function": "cl.ExactMatch",
+          "splink_args": {},
+          "term_frequency": false,
+          "description": "The title the cleaning stripped off the name. Weak on its own; it mainly separates a MR from a MRS of the same name."
+        }
+      ],
+      "em_blocking_rules": [
+        "l.surname = r.surname",
+        "l.forename_canon = r.forename_canon"
+      ],
+      "max_pairs": 5000000,
+      "_name_clean_note": "A cl.JaroWinklerAtThresholds comparison on name_clean was tried here and taken out again. It did break up the 0.70-0.80 spike, but by inflating every score: name_clean contains the forename and the surname, which are already comparisons of their own, and Splink assumes its comparisons are independent, so the same evidence was counted twice. Person pair precision fell 0.9872 -> 0.9008 (score_only), the review queue went from 1,059 pairs to 29,121, and no pair scored below 0.5 at all. Recall did rise 0.6236 -> 0.8899. The honest fix for the spike is evidence the name does not already carry - the donation amount profile and the recipients - which is what the GBT in slice 5 is for."
     },
-    "name_core": {
-      "splink_function": "cl.ExactMatch",
-      "splink_args": {},
-      "description": "Exact match on the name with trailing legal-entity tokens stripped (see legal_entity_tokens.json)."
-    },
-    "name_tokens_sorted": {
-      "splink_function": "cl.ExactMatch",
-      "splink_args": {},
-      "description": "Exact match on the sorted unique tokens of name_clean. Catches pairs whose words are the same but in a different order (A J TULLOCH vs TULLOCH A J)."
-    },
-    "postcode": {
-      "splink_function": "cl.ExactMatch",
-      "splink_args": {},
-      "description": "Exact match on the cleaned postcode. Most donations carry no postcode, so agreement is strong evidence and disagreement is weak."
+    "organisation": {
+      "blocking_rules": [
+        {
+          "id": "ob1",
+          "description": "Same cleaned postcode. 6,033 pairs. It was 90,730 until the placeholder postcodes were nullified: 412 units all carried ZZ0 0ZZ, which alone made 84,666 of those pairs.",
+          "sql": "l.postcode_clean = r.postcode_clean"
+        },
+        {
+          "id": "ob2",
+          "description": "Same padded company number. 1,209 pairs \u2014 nearly everything this rule finds, the exact keys have already merged.",
+          "sql": "l.company_number_clean = r.company_number_clean"
+        },
+        {
+          "id": "ob3",
+          "description": "Same first word of the core name and same postcode district. Rescues a renamed or re-suffixed organisation at one address. 3,955 pairs.",
+          "sql": "l.name_first_token = r.name_first_token AND l.postcode_district = r.postcode_district"
+        }
+      ],
+      "comparisons": [
+        {
+          "id": "oc1",
+          "column": "name_core",
+          "splink_function": "cl.JaroWinklerAtThresholds",
+          "splink_args": {
+            "score_threshold_or_thresholds": [
+              0.95,
+              0.88
+            ]
+          },
+          "term_frequency": false,
+          "description": "The name with the legal form taken off. The main signal on this track."
+        },
+        {
+          "id": "oc2",
+          "column": "name_tokens_sorted",
+          "splink_function": "cl.JaccardAtThresholds",
+          "splink_args": {
+            "score_threshold_or_thresholds": [
+              0.9,
+              0.6
+            ]
+          },
+          "term_frequency": false,
+          "description": "Sorted distinct words of the core name, compared on overlap. Catches a different word order and a dropped word."
+        },
+        {
+          "id": "oc3",
+          "column": "postcode_clean",
+          "splink_function": "cl.PostcodeComparison",
+          "splink_args": {},
+          "term_frequency": false,
+          "description": "Postcode at full, sector, district and area level, so a nearby address still counts for something."
+        },
+        {
+          "id": "oc4",
+          "column": "company_number_clean",
+          "splink_function": "cl.ExactMatch",
+          "splink_args": {},
+          "term_frequency": false,
+          "description": "Padded company number. Strong when present; absent on most donations rows."
+        },
+        {
+          "id": "oc5",
+          "column": "legal_form",
+          "splink_function": "cl.ExactMatch",
+          "splink_args": {},
+          "term_frequency": false,
+          "description": "The suffix the cleaning split off \u2014 LTD, LLP, PLC. Weak, and mainly separates a company from a union of the same name."
+        }
+      ],
+      "em_blocking_rules": [
+        "l.name_first_token = r.name_first_token",
+        "l.postcode_clean = r.postcode_clean"
+      ],
+      "max_pairs": 5000000
     }
   },
   "em_iterations": 20,
-  "probability_two_random_records_match": 0.0001,
+  "random_seed": 42,
+  "probability_two_random_records_match": null,
+  "deterministic_recall": 0.8,
   "match_probability_threshold_candidate": 0.05,
   "match_probability_threshold_high": 0.92,
-  "match_probability_threshold_review": 0.50,
-  "_threshold_notes": "Provisional. threshold_candidate=0.05 is the floor scoring predicts down to; threshold_review=0.50 is the line below which pairs are not surfaced for review; threshold_high=0.92 auto-accepts. All three will be tuned against the 4,284 existing merge groups once matching lands."
+  "match_probability_threshold_review": 0.5,
+  "_notes": "Pair counts are from the units of the September 2026 donations sheet (13,310 person units, 9,125 organisation). Each track's rules cost about 128,000 pairs (person) and 11,000 (organisation), so max_pairs of 5,000,000 leaves plenty of headroom while still stopping a rule that blocks on a near-constant column. probability_two_random_records_match is null, so Splink estimates it from that track's match keys at the recall in deterministic_recall."
 }

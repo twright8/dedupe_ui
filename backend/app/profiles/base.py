@@ -86,6 +86,9 @@ class Profile:
     # and may not overwrite them, so the Config screen needs the list before any
     # run exists.
     raw_columns: list[str] = field(default_factory=list)
+    # The evidence rows a profile may supply (D13b): the donations behind a
+    # donor, the companies behind a PSC. Empty when there are none.
+    event_columns: list[DisplayColumn] = field(default_factory=list)
 
     def load_records(self, input_path: Path) -> tuple[pd.DataFrame, dict]:
         """Read the input file and return (records frame, load stats).
@@ -97,6 +100,34 @@ class Profile:
             f"Profile '{self.key}' cannot load records yet."
         )
 
+    def load_events(self, input_path: Path) -> pd.DataFrame | None:
+        """The evidence rows behind the records, or None when there are none.
+
+        One row per underlying event, keyed on ``record_id`` and carrying the
+        columns ``event_columns`` describes. Stage 0 writes it to
+        ``events.parquet``, and a pair or a group opens it beside the records.
+
+        A profile whose input is slow to read should read it once and serve both
+        this and ``load_records`` from the same parse.
+        """
+        return None
+
+    def aggregate_unit_columns(
+        self, members: pd.DataFrame, events: pd.DataFrame | None = None
+    ) -> pd.DataFrame | None:
+        """Per-unit columns a modal vote over the members would get wrong.
+
+        ``units.py`` takes the most frequent member value for every column,
+        which is right for a name and wrong for a median. A profile with such
+        columns recomputes them here, indexed by ``unit_id``, and the result
+        replaces what the representative row worked out.
+
+        ``members`` is the record rows with a ``unit_id`` column. ``events`` is
+        the evidence rows with the same, when the run has any. Both are whole
+        frames, so the work has to stay vectorised.
+        """
+        return None
+
     def as_dict(self) -> dict:
         """The profile as the /api/profile endpoint returns it (minus base_path)."""
         return {
@@ -107,6 +138,7 @@ class Profile:
             "tracks": [t.as_dict() for t in self.tracks],
             "display_columns": [c.as_dict() for c in self.display_columns],
             "priority_columns": list(self.priority_columns),
+            "event_columns": [c.as_dict() for c in self.event_columns],
         }
 
 

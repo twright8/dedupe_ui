@@ -2,8 +2,8 @@
 """Within-dataset dedupe stages.
 
 These replace the two-dataset linkage stages in ``app/pipeline`` one slice at a
-time. Three stages exist so far: load the records, assign tracks and clean, then
-group them on the ruleset's match keys.
+time. Four stages exist so far: load the records, assign tracks and clean, group
+them on the ruleset's match keys, then score the pairs the keys left undecided.
 """
 
 # What GET /api/pipeline/stages serves. One entry per stage that exists today —
@@ -29,6 +29,15 @@ STAGES = [
             "Group records that agree on a match key, hold the groups a guard "
             "stops, and score the result against the existing labels "
             "(exact_groups.parquet)."
+        ),
+    },
+    {
+        "key": "score",
+        "label": "Score pairs",
+        "description": (
+            "Compare the units the exact keys left — one per merged group, one "
+            "per other record — with Splink, and bucket every pair into accept, "
+            "review or reject (pairs.parquet)."
         ),
     },
 ]
