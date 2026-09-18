@@ -591,3 +591,90 @@ def test_the_shipped_settings_name_both_tracks_and_a_positive_budget():
         assert linkage.comparisons(config)
         assert linkage.max_pairs(config) > 0
     assert linkage.thresholds(settings) == (0.05, 0.5, 0.92)
+
+
+# ---------------------------------------------------------------------------
+# The representative vote, now done in DuckDB
+# ---------------------------------------------------------------------------
+
+
+def _reference_representative(joined, column):
+    """The rule LINKAGE.md states, written the slow obvious way.
+
+    Most frequent non-null value per unit, ties to the smallest record_id. The
+    DuckDB version has to agree with this on every frame.
+    """
+    answer = {}
+    for unit_id, group in joined.groupby("unit_id", sort=True):
+        seen = group[group[column].notna()]
+        if not len(seen):
+            continue
+        best = None
+        for value in seen[column].unique():
+            rows = seen[seen[column] == value]
+            key = (-len(rows), min(rows["record_id"]))
+            if best is None or key < best[0]:
+                best = (key, value)
+        answer[unit_id] = best[1]
+    return answer
+
+
+def test_the_duckdb_vote_matches_the_rule_on_ties_nulls_and_mixed_types():
+    joined = pd.DataFrame({
+        "unit_id": ["u1"] * 6 + ["u2"] * 3 + ["u3"],
+        "record_id": ["9", "2", "7", "3", "5", "1", "b", "a", "c", "z"],
+        # u1: BETA twice, ALPHA twice -> tie, and record 2 is smaller than 3.
+        "name":   ["BETA", "ALPHA", "BETA", "ALPHA", "GAMMA", None,
+                   "X", "X", None, None],
+        # A null-only column for one unit, and a column that is all null.
+        "town":   [None, "LEEDS", None, None, None, "LEEDS",
+                   None, None, None, "YORK"],
+        "empty":  [None] * 10,
+        # Mixed types: a float with a null, and a boolean.
+        "amount": [1.0, 2.0, 2.0, None, 1.0, 1.0, 5.0, 5.0, None, 9.0],
+        "flag":   [True, False, True, True, None, False, True, True, None, False],
+    })
+    columns = ["name", "town", "empty", "amount", "flag"]
+    found = units_module.representatives(joined, columns)
+
+    for column in columns:
+        expected = _reference_representative(joined, column)
+        got = {
+            unit: value for unit, value in found[column].dropna().items()
+        } if column in found.columns else {}
+        assert got == expected, column
+
+    # Spelled out, so the rule is readable and not just asserted:
+    assert found.loc["u1", "name"] == "ALPHA"   # tie on count, record 2 < 3
+    assert found.loc["u1", "town"] == "LEEDS"   # the only non-null value
+    assert found.loc["u1", "amount"] == 1.0     # three of them
+    assert "empty" not in found.columns or pd.isna(found.loc["u1", "empty"])
+
+
+def test_the_unit_build_is_unchanged_by_where_the_vote_happens():
+    """A frame with ties, nulls and mixed types, end to end."""
+    records = records_frame([
+        {"record_id": "1", "name": "Ann", "postcode": None, "total_value": 1.0,
+         "existing_entity_id": "E1"},
+        {"record_id": "2", "name": "Anne", "postcode": "LE1 1AA", "total_value": 2.0,
+         "existing_entity_id": None},
+        {"record_id": "3", "name": "Anne", "postcode": "LE1 1AA", "total_value": 3.0,
+         "existing_entity_id": "E2"},
+        {"record_id": "4", "name": None, "postcode": None, "total_value": None,
+         "existing_entity_id": None},
+    ])
+    groups = groups_frame([
+        {"record_id": r, "group_id": "X-1", "track": "person", "status": "merged",
+         "key_ids": "k1", "guard": None} for r in ("1", "2", "3")
+    ])
+    units, members = units_module.build_units(records, groups)
+    row = units.set_index("unit_id").loc["1"]
+
+    assert row["name"] == "Anne"                 # two of them beat one
+    assert row["postcode"] == "LE1 1AA"          # nulls do not vote
+    assert row["unit_size"] == 3
+    assert row["total_value"] == 6.0             # priority columns are summed
+    assert row["existing_entity_ids"] == "E1 | E2"
+    assert row["n_existing_ids"] == 2
+    assert row["existing_entity_id"] is None     # two ids means no single id
+    assert len(members) == 4

@@ -511,12 +511,34 @@ function EntityKpis({ c, onQueue }) {
   );
 }
 
+// One line saying which score decided this run's pairs.
+export function decidedBy(counts) {
+  if (!counts?.modelActive) return "Splink score";
+  const versions = counts.modelVersion || {};
+  const list = Object.values(versions);
+  const v = list.length === 1 ? `v${list[0]}` : list.map((n) => `v${n}`).join(" / ");
+  return `Model ${v} (${counts.modelGraded ? "graded" : "cold start"})`;
+}
+
 // ---------- Scoring KPI strip ----------
 // The third row on the summary, once stage 3 has scored the pairs.
 function ScoreKpis({ c, onReview }) {
   const disagrees = c.pairsImportDisagrees || 0;
   return (
     <div className="kpi-grid">
+      <div className="kpi">
+        <div className="label">Decided by</div>
+        <div className="value" style={{ fontSize: 17 }}>
+          {decidedBy(c)}
+        </div>
+        <div className="delta muted">
+          {c.modelActive
+            ? c.modelGraded
+              ? "the model sets the buckets"
+              : "the model only re-orders the queue"
+            : "no model applied to this run"}
+        </div>
+      </div>
       <div className="kpi">
         <div className="label">Units compared</div>
         <div className="value">{fmtNumber(c.unitsTotal)}</div>
@@ -700,7 +722,6 @@ function RunSummary({ run, onReview, onConflicts, onQueue }) {
   const c = run.counts;
   const [diagData, setDiagData] = useState(null);
   const [labelStats, setLabelStats] = useState(null);
-  const [modelStatus, setModelStatus] = useState(null);
   const [scoreEval, setScoreEval] = useState(null);
 
   useEffect(() => {
@@ -708,7 +729,6 @@ function RunSummary({ run, onReview, onConflicts, onQueue }) {
       api.getRunDiagnostics(run.id)
         .then((data) => setDiagData(data))
         .catch(() => setDiagData(null));
-      api.modelStatus().then(setModelStatus).catch(() => setModelStatus(null));
       api.getRunScoreEval(run.id).then(setScoreEval).catch(() => setScoreEval(null));
       api.listLabels({ active: 1, run_id: run.id, per_page: 1 })
         .then((data) => {
@@ -791,8 +811,92 @@ function RunSummary({ run, onReview, onConflicts, onQueue }) {
 }
 
 
+/* The charts Splink writes for each track, under diagnostics/. They are whole
+   HTML documents, so each one is opened in its own frame rather than injected
+   into this page, and there is always a link to open it full size. */
+const SPLINK_CHARTS = [
+  {
+    file: "match_weights",
+    label: "Match weights",
+    help: "How much each comparison level pushes a pair towards a match or away from one.",
+  },
+  {
+    file: "m_u_parameters",
+    label: "m and u values",
+    help: "How often each level happens among real matches, and among pairs picked at random.",
+  },
+  {
+    file: "score_distribution",
+    label: "Score distribution",
+    help: "Splink's own histogram of the scores it produced for this track.",
+  },
+];
+
+function SplinkCharts({ runId, tracks }) {
+  if (!tracks || tracks.length === 0) return null;
+
+  return (
+    <div className="card">
+      <div className="card-h">
+        <Icons.spark size={16} />
+        <h3>Splink's own charts</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          written by the run, one set per track
+        </span>
+      </div>
+      <div className="tbl-wrap">
+        <table className="t" style={{ borderRadius: 0 }}>
+          <thead>
+            <tr>
+              <th style={{ minWidth: 180 }}>Chart</th>
+              <th>What it shows</th>
+              {tracks.map((t) => (
+                <th key={t.key} style={{ width: 130 }}>
+                  {t.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {SPLINK_CHARTS.map((c) => (
+              <tr key={c.file}>
+                <td>{c.label}</td>
+                <td className="muted" style={{ whiteSpace: "normal", fontSize: 12.5 }}>
+                  {c.help}
+                </td>
+                {tracks.map((t) => (
+                  <td key={t.key}>
+                    <a
+                      className="btn sm"
+                      href={api.runFileUrl(runId, `diagnostics/${c.file}_${t.key}.html`)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <Icons.link size={12} /> Open
+                    </a>
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="card-b">
+        <p className="muted" style={{ fontSize: 12, margin: 0, lineHeight: 1.55 }}>
+          Each chart opens in a new tab. They are drawn by a charting library the page fetches from
+          the internet, so a machine with no connection shows an empty chart. The same figures are
+          in <span className="mono">splink_model_&lt;track&gt;.json</span> on the Files tab.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Diagnostics tab ----------
 function RunDiagnostics({ runId }) {
+  const navigate = useNavigate();
+  const profile = useProfile();
+  const tracks = profile.tracks || [];
   const [diag, setDiag] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -841,111 +945,23 @@ function RunDiagnostics({ runId }) {
     <div
       style={{ display: "flex", flexDirection: "column", gap: 16 }}
     >
-      {/* Probability histogram */}
+      {/* The review screen draws this distribution properly: every scored pair by
+          bucket, the lines, the import split, the model score and a brush. One
+          chart, in one place, rather than a second empty one here. */}
       <div className="card">
         <div className="card-h">
           <Icons.spark size={16} />
-          <h3>Probability distribution</h3>
-          <div
-            className="actions muted"
-            style={{ fontSize: 12 }}
-          >
-            {scoreColumn} &middot; {hist.length} bins,
-            log-scaled height
-          </div>
+          <h3>Score distribution</h3>
         </div>
-        <div className="card-b">
-          <div style={{ position: "relative" }}>
-            <div className="histo">
-              {hist.map((v, i) => {
-                const h =
-                  (Math.log(v + 1) / Math.log(maxBin + 1)) * 100;
-                let cls = "b";
-                const binStart = i / hist.length;
-                const binEnd = (i + 1) / hist.length;
-                const binMid = (i + 0.5) / hist.length;
-                if (binMid >= thresholdHigh) cls += " exact";
-                else if (binMid >= thresholdReview) cls += " review";
-                else cls += " auto-no";
-                return (
-                  <div
-                    key={i}
-                    className={cls}
-                    style={{ height: `${h}%` }}
-                    title={`bin ${binStart.toFixed(2)}-${binEnd.toFixed(2)}: ${fmtNumber(v)}`}
-                  />
-                );
-              })}
-            </div>
-            <div
-              className="threshold-band"
-              style={{ marginTop: 16 }}
-            >
-              <span
-                style={{
-                  position: "absolute",
-                  left: 4,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  fontSize: 11,
-                }}
-              >
-                below scored floor (&lt;{thresholdReview.toFixed(2)})
-              </span>
-              <span
-                style={{
-                  position: "absolute",
-                  left: pct((thresholdReview + thresholdHigh) / 2),
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  fontSize: 11,
-                }}
-              >
-                review band
-              </span>
-              <span
-                style={{
-                  position: "absolute",
-                  right: 6,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  fontSize: 11,
-                }}
-              >
-                {`auto-accept (>=${thresholdHigh.toFixed(2)})`}
-              </span>
-              <div
-                className="pin"
-                style={{ left: pct(thresholdReview) }}
-                data-label={thresholdReview.toFixed(2)}
-              />
-              <div
-                className="pin"
-                style={{ left: pct(thresholdHigh) }}
-                data-label={thresholdHigh.toFixed(2)}
-              />
-            </div>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                fontSize: 11,
-                color: "var(--muted)",
-                fontFamily: "var(--font-mono)",
-                marginTop: 22,
-              }}
-            >
-              <span>0.00</span>
-              <span>0.25</span>
-              <span>0.50</span>
-              <span>0.75</span>
-              <span>1.00</span>
-            </div>
-            <p className="muted" style={{ fontSize: 12, margin: "10px 0 0" }}>
-              Stage 2 only emits candidate pairs at or above the review floor. To inspect
-              weaker possible matches, lower the review floor and run the pipeline again.
-            </p>
-          </div>
+        <div className="card-b" style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.55, flex: "1 1 340px" }}>
+            The review queue draws the whole distribution: every scored pair by bucket, the accept
+            and review lines, whether the earlier labels agree, and the model's score once one has
+            been applied. You can drag a band there to label it.
+          </p>
+          <button className="btn" onClick={() => navigate(`/runs/${runId}/review`)}>
+            <Icons.review size={14} /> Open the review queue
+          </button>
         </div>
       </div>
 
@@ -953,157 +969,7 @@ function RunDiagnostics({ runId }) {
           (Threshold tuning + mark-by-range now live inline on the Review queue.) */}
       <ModelPanel runId={runId} />
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: 16,
-        }}
-      >
-        {/* Feature contribution */}
-        <div className="card">
-          <div className="card-h">
-            <h3>Feature contribution (Splink m-values)</h3>
-          </div>
-          <div className="card-b">
-            <div className="features">
-              {features.map((f) => (
-                <div className="ft" key={f.lab}>
-                  <div className="lab">
-                    <div
-                      className="mono"
-                      style={{ fontSize: 12.5 }}
-                    >
-                      {f.lab}
-                    </div>
-                    <div
-                      className="muted"
-                      style={{ fontSize: 11 }}
-                    >
-                      {f.info}
-                    </div>
-                  </div>
-                  <div className="bar">
-                    <i
-                      style={{
-                        width: `${f.v * 100}%`,
-                      }}
-                    />
-                  </div>
-                  <div className="val">{f.v.toFixed(2)}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Confusion matrix — requires dedicated endpoint */}
-        <div className="card">
-          <div className="card-h">
-            <h3>Confusion (vs prior labels re-applied)</h3>
-          </div>
-          <div className="card-b">
-            {confusion ? (
-              <>
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "auto 1fr 1fr",
-                    gap: 4,
-                    fontSize: 12.5,
-                  }}
-                >
-                  <div></div>
-                  <div
-                    style={{
-                      textAlign: "center",
-                      color: "var(--muted)",
-                      fontWeight: 600,
-                      fontSize: 11,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.06em",
-                    }}
-                  >
-                    Prior TRUE
-                  </div>
-                  <div
-                    style={{
-                      textAlign: "center",
-                      color: "var(--muted)",
-                      fontWeight: 600,
-                      fontSize: 11,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.06em",
-                    }}
-                  >
-                    Prior FALSE
-                  </div>
-
-                  <div
-                    style={{
-                      alignSelf: "center",
-                      color: "var(--muted)",
-                      fontWeight: 600,
-                      fontSize: 11,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.06em",
-                    }}
-                  >
-                    Now &gt;= {thresholdHigh.toFixed(2)}
-                  </div>
-                  <ConfCell
-                    n={confusion.tp}
-                    good
-                    note="re-confirmed"
-                  />
-                  <ConfCell
-                    n={confusion.fp}
-                    warn
-                    note="model says TRUE; prior FALSE"
-                  />
-
-                  <div
-                    style={{
-                      alignSelf: "center",
-                      color: "var(--muted)",
-                      fontWeight: 600,
-                      fontSize: 11,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.06em",
-                    }}
-                  >
-                    Now &lt; {thresholdHigh.toFixed(2)}
-                  </div>
-                  <ConfCell
-                    n={confusion.fn}
-                    warn
-                    note="prior TRUE; below threshold now"
-                  />
-                  <ConfCell
-                    n={confusion.tn}
-                    good
-                    note="re-confirmed FALSE"
-                  />
-                </div>
-                {confusion.fp > 0 && (
-                  <div
-                    className="muted"
-                    style={{ fontSize: 11.5, marginTop: 10 }}
-                  >
-                    {confusion.fp} disagreements where the new
-                    model now says TRUE for previously-rejected pairs.
-                    Worth a look.
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className="muted" style={{ fontSize: 13, padding: "12px 0" }}>
-                Confusion matrix requires comparing against prior labels and will be available in a future update.
-              </p>
-            )}
-          </div>
-        </div>
-      </div>
+      <SplinkCharts runId={runId} tracks={tracks} />
 
       {/* Cleaning examples */}
       {examples.length > 0 && (

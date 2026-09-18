@@ -15,6 +15,7 @@ from app.routers.config import router as config_router
 from app.routers.entities import router as entities_router
 from app.routers.pair_labels import router as labels_router
 from app.routers.model import router as model_router
+from app.routers.model_track import router as model_track_router
 from app.routers.notes import router as notes_router
 from app.routers.pipeline import router as pipeline_router
 from app.routers.profile import router as profile_router
@@ -105,6 +106,9 @@ app.include_router(config_router)
 app.include_router(entities_router)
 app.include_router(labels_router)
 app.include_router(model_router)
+# After the legacy router, so its fixed paths (/api/model/eval-set, /train) keep
+# matching first; everything of the shape /api/model/{track}/... lands here.
+app.include_router(model_track_router)
 app.include_router(notes_router)
 app.include_router(pipeline_router)
 app.include_router(profile_router)

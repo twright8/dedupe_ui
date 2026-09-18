@@ -143,6 +143,7 @@ The whole chain reruns in memory — tracks, cleaning, then the derived rules �
 { "id": "k1", "name": "Company number", "track": "organisation", "tier": 1,
   "columns": ["company_number_clean"], "allow_null": false,
   "applies_when": "always",
+  "when": [ { "column": "donor_status_std", "op": "equals", "value": "Trade Union" } ],
   "guards": { "blocklists": ["placeholder_numbers"],
               "max_group_size": 50,
               "max_distinct": { "column": "name_core", "count": 3 },
@@ -150,11 +151,12 @@ The whole chain reruns in memory — tracks, cleaning, then the derived rules �
   "on_guard_fail": "review" }
 ```
 
-A key needs at least one column, a unique `id`, and a `tier` that is a whole number of 1 or more. Every column it names — in `columns`, in `max_distinct.column`, in `require_any_equal` — must exist for that key's track, as a raw column or as something that track's cleaning writes. `blocklists` names token lists. `max_group_size` is 2 or more and `max_distinct.count` is 1 or more.
+A key needs at least one column, a unique `id`, and a `tier` that is a whole number of 1 or more. Every column it names — in `columns`, in `when`, in `max_distinct.column`, in `require_any_equal` — must exist for that key's track, as a raw column, a cleaning target or a derived target. `blocklists` names token lists. `max_group_size` is 2 or more and `max_distinct.count` is 1 or more.
 
+- `when` is optional and holds the same condition objects as a track rule or a derived-column rule, ANDed, `starts_with` included. It is evaluated on the cleaned frame, so raw columns, cleaning targets and derived targets are all readable. A key with a condition applies to one kind of record only — a shared name settles a trade union but not a company (D13c).
 - Records with the same values in every key column form a candidate group. A group of one record is not a group.
 - Keys run in `tier` order within a track; keys of the same tier run in document order.
-- A record is eligible for a key when it is in the key's track; with `allow_null` false, every key column is non-null; no key-column value is in a blocklist; and, with `applies_when: "no_earlier_key"`, it was not eligible for any key of an earlier tier of that track. Keys of the same tier are not earlier than each other. Matching is case-insensitive and a blank counts as missing.
+- A record is eligible for a key when it is in the key's track; every condition in `when` holds; with `allow_null` false, every key column is non-null; no key-column value is in a blocklist; and, with `applies_when: "no_earlier_key"`, it was not eligible for any key of an earlier tier of that track. A record an earlier key's `when` excluded was never eligible for that key, so a later `no_earlier_key` key still sees it. Keys of the same tier are not earlier than each other. Matching is case-insensitive and a blank counts as missing.
 - `blocklists`: a key value found in any named token list makes that record ineligible.
 - Guards run in this order: `max_group_size`, then `max_distinct` (distinct non-null values of that column inside the group). A group over either limit is not merged.
 - `on_guard_fail` is `review` (the group is `held` for a human, with a `guard` reason such as `max_distinct:name_core=7>3` or `max_group_size:12>10`) or `skip` (the records are left unmerged, silently).
@@ -165,7 +167,7 @@ Stage 2 writes one row per record per group it belongs to: `record_id`, `group_i
 
 A `group_id` is deterministic and stable for the same membership: `X-` plus the smallest member `record_id` for a merged group, and `H-<key id>-` plus the smallest member `record_id` for a held one. Record ids compare as text.
 
-The stage reports, per key, `{id, name, track, tier, eligible_records, groups, records, held_groups, held_records, blocked_values}` — where `groups` and `records` are what that key alone merged, before the union across keys — plus an overall block `{records, merged_groups, merged_records, held_groups, held_records, entities_after}`, where `entities_after` is `records − (merged_records − merged_groups)`.
+The stage reports, per key, `{id, name, track, tier, eligible_records, groups, records, held_groups, held_records, blocked_values, excluded_by_condition}` — `excluded_by_condition` being the records of that key's track its `when` kept out, and 0 for a key with no condition — where `groups` and `records` are what that key alone merged, before the union across keys — plus an overall block `{records, merged_groups, merged_records, held_groups, held_records, entities_after}`, where `entities_after` is `records − (merged_records − merged_groups)`.
 
 ### Scoring the keys against the existing labels
 

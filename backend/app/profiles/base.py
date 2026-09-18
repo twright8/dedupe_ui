@@ -61,6 +61,41 @@ class DisplayColumn:
         return {"key": self.key, "label": self.label, "type": self.type}
 
 
+@dataclass(frozen=True)
+class EvidenceFocus:
+    """What a reviewer actually checks for one kind of record (D13c).
+
+    ``when`` is a list of conditions in the ruleset's own shape, ANDed, read
+    against one record or unit. The focuses are tried in order and the first
+    whose conditions hold wins, exactly as a track rule does — so the last one
+    should have an empty ``when`` and act as the fallback.
+
+    Only operators a browser can evaluate in a line of JavaScript belong here
+    (``equals``, ``in``, ``is_null``, ``not_null``, ``starts_with``): the review
+    screen may have to pick the focus client-side from ``/api/profile``.
+    """
+
+    id: str
+    label: str
+    when: list[dict] = field(default_factory=list)
+    record_columns: list[str] = field(default_factory=list)
+    event_columns: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "when": [dict(c) for c in self.when],
+            "record_columns": list(self.record_columns),
+            "event_columns": list(self.event_columns),
+        }
+
+
+# The condition operators an evidence focus may use. Deliberately the subset a
+# browser can evaluate without the backend.
+EVIDENCE_FOCUS_OPS = ("equals", "in", "is_null", "not_null", "starts_with")
+
+
 # Every profile has exactly these two tracks (design decision D5). A profile may
 # relabel them but may not add or remove one.
 DEFAULT_TRACKS = [
@@ -92,6 +127,14 @@ class Profile:
     # Columns settled once per entity rather than per record (D8a, stage 2 of
     # the two). Donations: the standardised donor status.
     consensus_columns: list[str] = field(default_factory=list)
+    # What a reviewer checks, by kind of record (D13c). Tried in order; the last
+    # entry should be the catch-all. Empty when every record is judged the same.
+    evidence_focus: list[EvidenceFocus] = field(default_factory=list)
+    # Outside tables the model's features need (`app.model.references.Reference`),
+    # such as the UK name frequencies the rarity features read (D12). Empty when
+    # the profile needs none. A declared table that is not built is not an error:
+    # its features go null and the training report says so.
+    references: list = field(default_factory=list)
     # Only the default mint uses this; a profile with an ID convention of its
     # own ignores it.
     _entity_counter: int = 0
@@ -173,6 +216,44 @@ class Profile:
         """
         return None
 
+    # -- the model's features (docs/MODEL.md) --------------------------------
+
+    def pair_feature_metadata(self, track: str) -> list:
+        """What this profile's feature builder produces for *track*.
+
+        A list of ``app.model.features.Feature``: the column name, a label in
+        plain words, the group it belongs to, and its monotone constraint. It is
+        a description, not a build, so ``GET /api/model/{track}/features`` can
+        answer before anything is trained.
+
+        A profile with no features of its own returns an empty list, and the
+        model trains on the generic Splink features alone.
+        """
+        return []
+
+    def build_pair_features(
+        self,
+        pairs: pd.DataFrame,
+        units: pd.DataFrame,
+        events: pd.DataFrame | None = None,
+        references: dict | None = None,
+        track: str = "person",
+    ) -> pd.DataFrame | None:
+        """One feature row per pair, in *pairs*' own order and index.
+
+        *pairs* is one track's rows of `pairs.parquet`, *units* is the whole of
+        `units.parquet`, *events* is the evidence rows carrying a ``unit_id``
+        column (or None), and *references* is what
+        ``app.model.references.load`` returned, keyed by reference key with None
+        for a table that is not built.
+
+        The builder receives whole frames and must stay vectorised: it never
+        loops over pairs. A column the metadata names and the frame omits is
+        read as null, so a feature can be dropped from a run without breaking
+        the model.
+        """
+        return None
+
     def as_dict(self) -> dict:
         """The profile as the /api/profile endpoint returns it (minus base_path)."""
         return {
@@ -185,7 +266,79 @@ class Profile:
             "priority_columns": list(self.priority_columns),
             "event_columns": [c.as_dict() for c in self.event_columns],
             "consensus_columns": list(self.consensus_columns),
+            "evidence_focus": [f.as_dict() for f in self.evidence_focus],
         }
+
+    def evidence_focus_for(self, row) -> str | None:
+        """The id of the first focus whose conditions hold for one record or unit.
+
+        *row* is anything with ``.get`` or ``[]`` — a dict, a pandas Series, a
+        reader's item. Returns None when the profile declares no focuses, or
+        when none matches (which a catch-all entry should prevent).
+        """
+        return evidence_focus_id(self.evidence_focus, row)
+
+
+# ---------------------------------------------------------------------------
+# Picking an evidence focus for one row
+# ---------------------------------------------------------------------------
+
+
+def _cell(row, column: str):
+    """One column of a dict, a Series or a reader's item, as text or None."""
+    try:
+        value = row.get(column) if hasattr(row, "get") else row[column]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return text or None
+
+
+def _condition_holds(condition: dict, row) -> bool:
+    """One condition against one row, in the same words as the ruleset engine.
+
+    Deliberately the small subset in ``EVIDENCE_FOCUS_OPS``: whatever runs here
+    must also run in the browser, because the review screen may pick the focus
+    without asking the server.
+    """
+    op = condition.get("op")
+    value = _cell(row, condition.get("column"))
+
+    if op == "is_null":
+        return value is None
+    if op == "not_null":
+        return value is not None
+    if value is None:
+        return False
+    if op == "equals":
+        return value.upper() == str(condition.get("value", "")).strip().upper()
+    if op == "in":
+        wanted = {str(v).strip().upper() for v in (condition.get("values") or [])}
+        return value.upper() in wanted
+    if op == "starts_with":
+        prefixes = tuple(
+            str(v).strip().upper() for v in (condition.get("values") or []) if str(v).strip()
+        )
+        return bool(prefixes) and value.upper().startswith(prefixes)
+    raise ValueError(
+        f"An evidence focus may not use '{op}' — "
+        f"allowed: {', '.join(EVIDENCE_FOCUS_OPS)}"
+    )
+
+
+def evidence_focus_id(focuses, row) -> str | None:
+    """The id of the first focus in *focuses* whose conditions all hold for *row*."""
+    for focus in focuses or []:
+        if all(_condition_holds(c, row) for c in focus.when):
+            return focus.id
+    return None
 
 
 def validate_records(records: pd.DataFrame) -> None:

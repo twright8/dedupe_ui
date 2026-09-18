@@ -40,13 +40,25 @@ MAX_BINS = 200
 
 TRACKS = ("person", "organisation")
 BUCKETS = ("accept", "review", "reject")
-DECIDED_BY = ("score", "import", "human")
+# `model` joins the three when a graded model is what put the pair in its bucket
+# (docs/MODEL.md, stage 3b).
+DECIDED_BY = ("score", "import", "human", "model")
 IMPORT_STATES = ("agrees", "disagrees", "unknown")
 HELD_STATES = ("hide", "only")
 LABELLED_STATES = ("yes", "no")
-SORTS = ("score", "priority", "name")
+SORTS = ("score", "priority", "name", "useful")
 
 PAIR_ID_SEPARATOR = "|"
+
+# The model's calibrated score, beside Splink's match_probability.
+MODEL_SCORE_COLUMN = "gbt_score"
+
+# How `sort=useful` is weighted (docs/MODEL_API.md). The evidence half and the
+# money half count equally, and the money half never falls below half of itself:
+# a big pair is moved up the queue, and a small but genuinely uncertain one is
+# never buried under it.
+USEFUL_UNCERTAINTY_WEIGHT = 0.5
+USEFUL_PRIORITY_FLOOR = 0.5
 
 
 class PairsNotFound(Exception):
@@ -234,12 +246,46 @@ def _gamma_columns(pair_columns: list[str]) -> list[str]:
     return sorted(c for c in pair_columns if c.startswith("gamma_"))
 
 
-def _item(row: dict, priority: list[str], gammas: list[str]) -> dict:
+def _usefulness_sql(has_model: bool, priority: list[str],
+                    priority_max: float | None) -> dict[str, str]:
+    """The three parts of `sort=useful`, and the score they make, as SQL.
+
+    Uncertainty is distance from a half, on the model's dial when there is one
+    and on Splink's when there is not, so the sort works before a model exists.
+    Disagreement is how far apart the two scores are, and is zero with only one
+    of them. The priority weight is the log of the pair's summed priority column
+    over the log of the largest in the run, so money tilts the order without a
+    huge donor outranking every uncertain pair.
+    """
+    score = f"COALESCE({MODEL_SCORE_COLUMN}, match_probability)" if has_model \
+        else "match_probability"
+    uncertainty = f"(1 - abs(2 * COALESCE({score}, 0) - 1))"
+    disagreement = (f"COALESCE(abs({MODEL_SCORE_COLUMN} - match_probability), 0)"
+                    if has_model else "0")
+    total = " + ".join(f'COALESCE("priority_{c}", 0)' for c in priority)
+    if total and priority_max and priority_max > 0:
+        weight = f"(ln(1 + greatest({total}, 0)) / {math.log(1 + priority_max)!r})"
+    else:
+        weight = "1"
+    evidence = (f"({USEFUL_UNCERTAINTY_WEIGHT} * {uncertainty} "
+                f"+ {1 - USEFUL_UNCERTAINTY_WEIGHT} * {disagreement})")
+    money = (f"({USEFUL_PRIORITY_FLOOR} + {1 - USEFUL_PRIORITY_FLOOR} "
+             f"* least(greatest({weight}, 0), 1))")
     return {
+        "_uncertainty": uncertainty,
+        "_disagreement": disagreement,
+        "_weight": f"least(greatest({weight}, 0), 1)",
+        "_usefulness": f"{evidence} * {money}",
+    }
+
+
+def _item(row: dict, priority: list[str], gammas: list[str]) -> dict:
+    item = {
         "pair_id": row["pair_id"],
         "track": row.get("track"),
         "match_probability": _json_safe(row.get("match_probability")),
         "match_weight": _json_safe(row.get("match_weight")),
+        "gbt_score": _json_safe(row.get(MODEL_SCORE_COLUMN)),
         "bucket": row.get("bucket"),
         "score_bucket": row.get("score_bucket"),
         "decided_by": row.get("decided_by"),
@@ -256,6 +302,14 @@ def _item(row: dict, priority: list[str], gammas: list[str]) -> dict:
             column[len("gamma_"):]: _json_safe(row.get(column)) for column in gammas
         },
     }
+    if row.get("_usefulness") is not None:
+        item["usefulness"] = {
+            "score": _json_safe(row.get("_usefulness")),
+            "uncertainty": _json_safe(row.get("_uncertainty")),
+            "disagreement": _json_safe(row.get("_disagreement")),
+            "weight": _json_safe(row.get("_weight")),
+        }
+    return item
 
 
 def _label(row: dict) -> dict | None:
@@ -280,7 +334,7 @@ def _rows(cursor) -> list[dict]:
 
 def _filters(
     track, bucket, decided_by, import_state, held, min_score, max_score, q,
-    labelled=None,
+    labelled=None, min_gbt=None, max_gbt=None, has_model=False,
 ) -> tuple[list[str], list]:
     where: list[str] = []
     params: list = []
@@ -310,6 +364,15 @@ def _filters(
     if max_score is not None:
         where.append("match_probability <= ?")
         params.append(float(max_score))
+    # The model filters do nothing on a run no model has scored, rather than
+    # emptying the list: a saved screen with a gbt filter on must not go blank
+    # when someone deactivates the model.
+    if has_model and min_gbt is not None:
+        where.append(f"{MODEL_SCORE_COLUMN} >= ?")
+        params.append(float(min_gbt))
+    if has_model and max_gbt is not None:
+        where.append(f"{MODEL_SCORE_COLUMN} <= ?")
+        params.append(float(max_gbt))
     if q:
         pattern = f"%{q.lower()}%"
         where.append(
@@ -336,6 +399,8 @@ def get_pairs(
     limit: int = DEFAULT_LIMIT,
     labelled: str | None = None,
     labels=None,
+    min_gbt: float | None = None,
+    max_gbt: float | None = None,
 ) -> dict:
     """One page of a run's scored pairs, both units on every row.
 
@@ -368,12 +433,14 @@ def get_pairs(
         unit_columns = _column_names(con, units)
         priority = _priority_columns(pair_columns)
         gammas = _gamma_columns(pair_columns)
+        has_model = MODEL_SCORE_COLUMN in pair_columns
         with_labels, label_params = _prepare_labels(con, run_dir, labels)
         base = _base_sql(unit_columns, with_labels)
         base_params = [str(pairs), str(units), *label_params]
 
         where, params = _filters(track, bucket, decided_by, import_state, held,
-                                 min_score, max_score, q, labelled)
+                                 min_score, max_score, q, labelled,
+                                 min_gbt, max_gbt, has_model)
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
 
         counts_row = con.execute(
@@ -406,6 +473,21 @@ def get_pairs(
             f"SELECT count(*) FROM ({base}){where_sql}", [*base_params, *params]
         ).fetchone()[0])
 
+        listing, extra_params = base, []
+        if sort_key == "useful":
+            # The weight needs the biggest priority in the RUN, not in the page
+            # or the filtered set, or the order would move as a filter narrows.
+            total = " + ".join(f'COALESCE("priority_{c}", 0)' for c in priority)
+            priority_max = None
+            if total:
+                priority_max = con.execute(
+                    f"SELECT max({total}) FROM ({base})", base_params
+                ).fetchone()[0]
+            parts = _usefulness_sql(has_model, priority, priority_max)
+            columns = ", ".join(f"{sql} AS {name}" for name, sql in parts.items())
+            listing = f"SELECT *, {columns} FROM ({base})"
+            extra_params = base_params
+
         sort_sql = {
             "score": "match_probability",
             # Blank is not a name: NULLIF sends the nameless units to the end
@@ -414,13 +496,14 @@ def get_pairs(
             "priority": " + ".join(
                 f'COALESCE("priority_{c}", 0)' for c in priority
             ) or "match_probability",
+            "useful": "_usefulness",
         }[sort_key]
 
         cursor = con.execute(
-            f"""SELECT * FROM ({base}){where_sql}
+            f"""SELECT * FROM ({listing}){where_sql}
                 ORDER BY {sort_sql} {order_sql} NULLS LAST, pair_id ASC
                 LIMIT ? OFFSET ?""",
-            [*base_params, *params, limit, offset],
+            [*(extra_params or base_params), *params, limit, offset],
         )
         items = [_item(row, priority, gammas) for row in _rows(cursor)]
     finally:
@@ -631,8 +714,63 @@ def get_pair(run_dir: str, pair_id: str, labels=None) -> dict | None:
     }
     item["event_columns"] = event_columns()
     item["explanation"] = _explain(item, comparison_levels(run_dir, item["track"]))
+    item["model_explanation"] = model_explanation(run_dir, left_id, right_id,
+                                                  item["track"])
     item["columns"] = describe_columns(unit_columns)
     return item
+
+
+def model_explanation(run_dir: str, left_id: str, right_id: str,
+                      track: str | None) -> dict | None:
+    """The model's own explanation of one pair, or None when no model is active.
+
+    Only the two units' evidence rows are read; the whole units frame goes to the
+    feature builder because the organisation TF-IDF weights are fitted over every
+    unit, and a feature's value must not depend on how much was asked for.
+    """
+    if not track:
+        return None
+    from app.model import explain as explain_lib
+    from app.pipeline.dedupe import stage_3b_model
+
+    model = stage_3b_model.models_from_state(run_dir).get(track) \
+        or stage_3b_model.active_models((track,)).get(track)
+    if model is None:
+        return None
+
+    import pandas as pd
+
+    try:
+        pairs = pd.read_parquet(pairs_path(run_dir))
+        row = pairs[(pairs["unit_id_l"].astype(str) == str(left_id))
+                    & (pairs["unit_id_r"].astype(str) == str(right_id))]
+        if not len(row):
+            return None
+        units = pd.read_parquet(units_path(run_dir))
+        events = None
+        events_path = Path(run_dir) / EVENTS_FILENAME
+        members_path = Path(run_dir) / UNIT_MEMBERS_FILENAME
+        if events_path.is_file() and members_path.is_file():
+            members = pd.read_parquet(members_path)
+            members["unit_id"] = members["unit_id"].astype(str)
+            wanted = members[members["unit_id"].isin([str(left_id), str(right_id)])]
+            if len(wanted):
+                events = pd.read_parquet(events_path)
+                events["record_id"] = events["record_id"].astype(str)
+                wanted = wanted.copy()
+                wanted["record_id"] = wanted["record_id"].astype(str)
+                events = events.merge(wanted[["record_id", "unit_id"]],
+                                      on="record_id", how="inner")
+        return explain_lib.explain(row.reset_index(drop=True), units, track,
+                                   model.version, events=events,
+                                   profile=get_profile(),
+                                   gamma_levels=comparison_levels(run_dir, track))
+    except Exception:  # noqa: BLE001 — an explanation must never break a pair view
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "Could not explain pair %s|%s", left_id, right_id)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -648,40 +786,91 @@ def get_histogram(run_dir: str, track: str | None = None, bins: int = DEFAULT_BI
 
     con, pairs, units = _open(run_dir)
     try:
+        pair_columns = _column_names(con, pairs)
         unit_columns = _column_names(con, units)
+        has_model = MODEL_SCORE_COLUMN in pair_columns
         with_labels, label_params = _prepare_labels(con, run_dir, labels)
         base = _base_sql(unit_columns, with_labels)
         where_sql = " WHERE track = ?" if track is not None else ""
-        cursor = con.execute(
-            f"""SELECT bin,
-                       count(*) AS total,
-                       count(*) FILTER (WHERE bucket = 'accept') AS accept,
-                       count(*) FILTER (WHERE bucket = 'review') AS review,
-                       count(*) FILTER (WHERE bucket = 'reject') AS reject,
-                       count(*) FILTER (WHERE import_agreement = 'agrees') AS agrees,
-                       count(*) FILTER (WHERE import_agreement = 'disagrees') AS disagrees,
-                       count(*) FILTER (WHERE import_agreement = 'unknown') AS unknown
-                FROM (
-                    SELECT *, least(CAST(floor(match_probability * ?) AS BIGINT), ? - 1)
-                               AS bin
-                    FROM ({base})
-                ){where_sql}
-                GROUP BY bin ORDER BY bin""",
-            # DuckDB binds ? in the order they appear in the text: the bin
-            # arithmetic comes before the base query's own paths.
-            [bins, bins, str(pairs), str(units), *label_params]
-            + ([track] if track else []),
-        )
-        rows = _rows(cursor)
+        base_params = [str(pairs), str(units), *label_params]
+
+        def _bin(column: str) -> list[dict]:
+            cursor = con.execute(
+                f"""SELECT bin,
+                           count(*) AS total,
+                           count(*) FILTER (WHERE bucket = 'accept') AS accept,
+                           count(*) FILTER (WHERE bucket = 'review') AS review,
+                           count(*) FILTER (WHERE bucket = 'reject') AS reject,
+                           count(*) FILTER (WHERE import_agreement = 'agrees') AS agrees,
+                           count(*) FILTER (WHERE import_agreement = 'disagrees') AS disagrees,
+                           count(*) FILTER (WHERE import_agreement = 'unknown') AS unknown
+                    FROM (
+                        SELECT *, least(CAST(floor({column} * ?) AS BIGINT), ? - 1)
+                                   AS bin
+                        FROM ({base})
+                    ){where_sql}
+                    GROUP BY bin ORDER BY bin""",
+                # DuckDB binds ? in the order they appear in the text: the bin
+                # arithmetic comes before the base query's own paths.
+                [bins, bins, *base_params] + ([track] if track else []),
+            )
+            return _rows(cursor)
+
+        rows = _bin("match_probability")
+        # The model's own histogram, so the threshold panel can show both dials
+        # side by side rather than one replacing the other.
+        model_rows = _bin(MODEL_SCORE_COLUMN) if has_model else None
     finally:
         con.close()
 
     keys = ("total", "accept", "review", "reject", "agrees", "disagrees", "unknown")
-    series = {key: [0] * bins for key in keys}
-    for row in rows:
-        index = int(row["bin"])
-        if 0 <= index < bins:
-            for key in keys:
-                series[key][index] = int(row[key])
+
+    def _series(source):
+        out = {key: [0] * bins for key in keys}
+        for row in source or []:
+            index = row["bin"]
+            if index is None:
+                continue
+            index = int(index)
+            if 0 <= index < bins:
+                for key in keys:
+                    out[key][index] = int(row[key])
+        return out
+
     edges = [round(i / bins, 6) for i in range(bins + 1)]
-    return {"track": track, "bins": bins, "edges": edges, **series}
+    return {
+        "track": track, "bins": bins, "edges": edges,
+        "score_column": MODEL_SCORE_COLUMN if has_model else "match_probability",
+        "by_score_column": _series(model_rows) if has_model else None,
+        # The same four model keys the run's counts carry, so the threshold
+        # panel can draw the lines the pairs were actually bucketed on without a
+        # second request — and without reading them off a model that has been
+        # retrained since (docs/MODEL_API.md).
+        **model_state(run_dir, track),
+        **_series(rows),
+    }
+
+
+def model_state(run_dir: str, track: str | None = None) -> dict:
+    """Which model decided this run, and on what lines, in the API's camelCase.
+
+    Narrowed to *track* when one is asked for, so a single-track histogram
+    carries a single-track answer.
+    """
+    from app.pipeline.dedupe import stage_3b_model
+
+    counts = stage_3b_model.counts_from_state(run_dir)
+
+    def _narrow(mapping: dict) -> dict:
+        if track is None:
+            return mapping
+        return {track: mapping[track]} if track in mapping else {}
+
+    return {
+        "modelActive": bool(counts["model_active"]),
+        "modelVersion": _narrow(counts["model_version"]),
+        "modelAcceptLine": _narrow(counts["model_accept_line"]),
+        "modelRejectLine": _narrow(counts["model_reject_line"]),
+        "modelGraded": bool(counts["model_graded"]),
+        "modelWarning": counts["model_warning"],
+    }

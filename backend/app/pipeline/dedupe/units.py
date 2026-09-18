@@ -14,6 +14,7 @@ Nothing loops over groups. The whole build is a handful of groupbys, so the
 16 million PSC records will not need a different implementation.
 """
 
+import duckdb
 import numpy as np
 import pandas as pd
 
@@ -36,6 +37,69 @@ _NOT_REPRESENTED = (LABEL_COLUMN,)
 
 def _as_text(series: pd.Series) -> pd.Series:
     return series.astype(str)
+
+
+def plain_strings(frame: pd.DataFrame) -> pd.DataFrame:
+    """Arrow-backed string columns as plain object ones.
+
+    Parquet hands pandas Arrow-backed strings. Anything that groups or compares
+    them row by row pays for a pyarrow scalar each time, so the frame is put
+    back on plain Python objects before any of that. Note that rebuilding a
+    Series from ``to_numpy`` does not do it — pandas re-infers the string dtype;
+    ``astype(object)`` is the conversion that sticks.
+    """
+    converted = {}
+    for column in frame.columns:
+        dtype = str(frame[column].dtype)
+        if dtype in ("str", "string", "large_string") or dtype.startswith("string["):
+            converted[column] = frame[column].astype(object)
+    return frame.assign(**converted) if converted else frame
+
+
+def _quote(name: str) -> str:
+    """An identifier DuckDB will read as one name, whatever is in it."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def representatives(joined: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """The representative value of every column, for every unit, in one pass.
+
+    The rule (`docs/LINKAGE.md`) is the most frequent non-null value, ties going
+    to the smallest ``record_id``. Pandas does that with a group-by per column,
+    and on Arrow-backed strings it falls back to a Python loop per group — ten
+    seconds for 52,000 records, and the best part of an hour at PSC scale.
+
+    DuckDB does the same work set-based. ``mode()`` is no use because its
+    tie-break is not the one the contract names, so each column is counted and
+    ranked: ``count(*) DESC`` then ``min(record_id) ASC``, which is the rule
+    exactly. One query per column keeps every column's own type, which an
+    unpivot into a single VARCHAR would throw away.
+    """
+    result = pd.DataFrame(index=pd.Index([], name="unit_id"))
+    if not len(joined) or not columns:
+        return result
+
+    con = duckdb.connect()
+    try:
+        con.register("j", joined)
+        frames = []
+        for column in columns:
+            quoted = _quote(column)
+            frames.append(con.execute(f"""
+                SELECT unit_id, {quoted} FROM (
+                    SELECT unit_id, {quoted},
+                           row_number() OVER (
+                               PARTITION BY unit_id
+                               ORDER BY count(*) DESC, min(record_id) ASC
+                           ) AS rank
+                    FROM j
+                    WHERE {quoted} IS NOT NULL
+                    GROUP BY unit_id, {quoted}
+                ) WHERE rank = 1
+            """).df().set_index("unit_id"))
+    finally:
+        con.close()
+    return pd.concat(frames, axis=1) if frames else result
 
 
 def _nullable(values, keep, index) -> pd.Series:
@@ -165,8 +229,9 @@ def build_units(
     then correct its own columns through ``Profile.aggregate_unit_columns``.
     *events* is the run's evidence rows, which that hook reads when there are any.
     """
-    records = records.copy()
+    records = plain_strings(records.copy())
     records["record_id"] = _as_text(records["record_id"])
+    groups = plain_strings(groups)
 
     members = unit_membership(records, groups)
     joined = records.merge(members, on="record_id", how="left")
@@ -184,14 +249,17 @@ def build_units(
 
     units = pd.DataFrame(index=sizes.index)
     units.index.name = "unit_id"
+    # A unit of one is its own representative — most of a donations run and
+    # nearly all of a PSC one — so only the pooled units are voted on.
+    modal = representatives(many, represented) if len(many) else None
     for column in represented:
         column_values = pd.Series(index=sizes.index, dtype="object")
         if len(lone):
             column_values.loc[lone["unit_id"].to_numpy()] = lone[column].to_numpy()
-        if len(many):
-            modal = _modal(many, column)
-            if len(modal):
-                column_values.loc[modal.index] = modal.to_numpy()
+        if modal is not None and column in modal.columns:
+            found = modal[column].dropna()
+            if len(found):
+                column_values.loc[found.index] = found.to_numpy()
         units[column] = column_values.astype(records[column].dtype, errors="ignore")
 
     for column in priority:

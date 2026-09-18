@@ -70,6 +70,21 @@ def to_unit_pairs(labels: pd.DataFrame, members: pd.DataFrame) -> pd.DataFrame:
     return frame.reset_index(drop=True)
 
 
+def in_this_run(labels: pd.DataFrame, members: pd.DataFrame) -> pd.DataFrame:
+    """The labels whose two records this run actually loaded.
+
+    A label about records from another dataset, or from a record the loader no
+    longer keeps, is not this run's business. Everything else is — whether the
+    exact keys have already satisfied it, whether a pair carries it, or neither.
+    """
+    if not len(labels):
+        return labels
+    known = set(members["record_id"].astype(str))
+    keep = (labels["record_id_a"].astype(str).isin(known)
+            & labels["record_id_b"].astype(str).isin(known))
+    return labels[keep.to_numpy()]
+
+
 def outcomes(
     labels: pd.DataFrame, members: pd.DataFrame, groups: pd.DataFrame
 ) -> dict:

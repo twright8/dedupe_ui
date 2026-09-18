@@ -308,25 +308,13 @@ def refresh_counts_after_labels(
     Keys ``_collect_counts`` cannot derive from the CSVs (decision provenance, the
     pre-label baseline, library size) are carried over from the stored counts.
     """
-    rows = query_db(db_path, "SELECT counts_json FROM runs WHERE id = ?", (run_id,))
-    existing: dict = {}
-    if rows and rows[0]["counts_json"]:
-        try:
-            existing = json.loads(rows[0]["counts_json"])
-        except (ValueError, TypeError):
-            existing = {}
+    from app.services import run_counts
 
-    counts = dict(existing)
-    counts.update(_collect_counts(Path(run_dir)))
-    counts["labels_applied"] = label_result.get("applied", 0)
-    counts["labels_unmatched"] = label_result.get("unmatched", 0)
-
-    write_db(
-        db_path,
-        "UPDATE runs SET counts_json = ? WHERE id = ?",
-        (json.dumps(counts), run_id),
-    )
-    return counts
+    return run_counts.merge(db_path, run_id, {
+        **_collect_counts(Path(run_dir)),
+        "labels_applied": label_result.get("applied", 0),
+        "labels_unmatched": label_result.get("unmatched", 0),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -862,21 +850,17 @@ def rebucket_pairs(
     settings["match_probability_threshold_review"] = review
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
-    counts: dict = {}
-    if current.get("counts_json"):
-        try:
-            counts = json.loads(current["counts_json"])
-        except (ValueError, TypeError):
-            counts = {}
-    counts.update(rebucket(run_dir, high, review, labels_frame(db_path)))
+    # Merged, never replaced: moving a threshold redoes the scoring counts and
+    # nothing else, so every other stage's numbers have to survive it
+    # (services/run_counts). The thresholds move in the same statement.
+    from app.services import run_counts
 
-    write_db(
-        db_path,
-        "UPDATE runs SET threshold_high = ?, threshold_review = ?, counts_json = ? "
-        "WHERE id = ?",
-        (high, review, json.dumps(counts), run_id),
+    return run_counts.merge(
+        db_path, run_id,
+        rebucket(run_dir, high, review, labels_frame(db_path)),
+        extra_sql="threshold_high = ?, threshold_review = ?, ",
+        extra_params=(high, review),
     )
-    return counts
 
 
 def _on_run_finished(db_path: str, data_dir: str) -> None:
@@ -955,7 +939,7 @@ def recluster_run(db_path: str, run_dir: str, run_id: str) -> dict:
     from app.pipeline.dedupe import units as units_module
     from app.pipeline.dedupe.stage_2_exact import EXACT_GROUPS_FILENAME, run_stage_2_exact
     from app.pipeline.dedupe.stage_3_score import (
-        PAIRS_FILENAME, refresh_after_labels,
+        PAIRS_FILENAME, never_scored, refresh_after_labels, repoint_pairs,
     )
     from app.pipeline.dedupe.stage_4_cluster import run_stage_4_cluster
     from app.pipeline.dedupe.stage_5_entities import run_stage_5_entities
@@ -989,34 +973,30 @@ def recluster_run(db_path: str, run_dir: str, run_id: str) -> dict:
         members.to_parquet(run_dir_path / units_module.UNIT_MEMBERS_FILENAME, index=False)
         units_rebuilt = True
 
+        # The pairs follow their records onto whatever units hold them now, so a
+        # merge never loses the candidates its members had.
         pairs = pd.read_parquet(run_dir_path / PAIRS_FILENAME)
-        known = set(units["unit_id"].astype(str))
         if len(pairs):
+            pairs = repoint_pairs(pairs, members)
+            known = set(units["unit_id"].astype(str))
             keep = (pairs["unit_id_l"].astype(str).isin(known)
                     & pairs["unit_id_r"].astype(str).isin(known))
             pairs = pairs[keep.to_numpy()]
             pairs.to_parquet(run_dir_path / PAIRS_FILENAME, index=False)
-        scored = set(pairs["unit_id_l"].astype(str)) | set(pairs["unit_id_r"].astype(str)) \
-            if len(pairs) else set()
-        # A unit a split created that no surviving pair mentions was never scored.
-        unscored = int(sum(1 for unit_id in known if unit_id not in scored
-                           and unit_id not in set(before["record_id"].astype(str))))
+        # Units nothing has ever compared — not units that happen to be in no
+        # pair, which is most of them in any run.
+        unscored = len(never_scored(run_dir_path, units))
 
     counts.update(refresh_after_labels(run_dir, labels))
     counts.update(run_stage_4_cluster(run_dir=run_dir, config_dir=str(config_dir),
                                       labels=labels, decisions=decisions))
     counts.update(run_stage_5_entities(run_dir=run_dir, db_path=db_path))
 
-    stored = query_db(db_path, "SELECT counts_json FROM runs WHERE id = ?", (run_id,))
-    merged = {}
-    if stored and stored[0]["counts_json"]:
-        try:
-            merged = json.loads(stored[0]["counts_json"])
-        except (ValueError, TypeError):
-            merged = {}
-    merged.update(counts)
-    write_db(db_path, "UPDATE runs SET counts_json = ? WHERE id = ?",
-             (json.dumps(merged), run_id))
+    # Merged, never replaced: a recluster reruns stages 2 to 5 and not stage 0,
+    # so the loader's counts have to survive it (services/run_counts).
+    from app.services import run_counts
+
+    merged = run_counts.merge(db_path, run_id, counts)
 
     from app.routers.runs import _normalize_counts
 

@@ -10,6 +10,7 @@ import { fmtNumber, fmtPct, fmtDateTime, timeAgo } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
 import { useProfile } from "../profile";
 import { hasEntityCounts, hasExactCounts, hasPairCounts, hasRecordCounts, trackCountKey } from "../counts";
+import { decidedBy } from "./RunDetailScreen";
 
 // Old linkage runs report pair buckets; a run that only loaded records does not.
 // The list shows whichever set of numbers the runs actually carry.
@@ -337,6 +338,7 @@ export default function RunsScreen() {
                     <th className="tnum" style={{ textAlign: "right" }}>
                       To decide
                     </th>
+                    <th>Decided by</th>
                   </>
                 ) : (
                   <>

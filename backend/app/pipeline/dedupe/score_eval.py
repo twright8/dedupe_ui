@@ -170,6 +170,43 @@ def _human_figures(records, members, units, pairs, applied) -> dict:
     }
 
 
+def _accepted_at(pairs: pd.DataFrame, column: str, high: float,
+                 lines: dict | None = None) -> pd.DataFrame | None:
+    """The pairs one score alone would accept, ignoring every overlay.
+
+    *lines* is ``{track: (review, high)}`` and overrides the accept line for the
+    tracks it names, which is how a model with a different line per track is
+    scored. Returns None when the column is not there at all — a run no model has
+    touched has no model figures, and an empty set would read as "the model
+    accepted nothing", which is a different statement.
+    """
+    if column not in pairs.columns or not len(pairs):
+        return None
+    values = pd.to_numeric(pairs[column], errors="coerce")
+    if not values.notna().any():
+        return None
+    limits = np.full(len(pairs), float(high))
+    if lines:
+        tracks = pairs["track"].to_numpy() if "track" in pairs.columns \
+            else np.full(len(pairs), None)
+        for track, (_track_review, track_high) in lines.items():
+            limits[tracks == track] = float(track_high)
+    return pairs[(values >= limits).to_numpy()]
+
+
+def _comparison_set(records, members, units, accepted) -> dict | None:
+    if accepted is None:
+        return None
+    figures, entities = _figures(records, members, units, accepted)
+    return {
+        "entities_after": entities,
+        "pair_precision": figures["pair_precision"],
+        "pair_recall": figures["pair_recall"],
+        "accepted_pairs": int(len(accepted)),
+        "by_track": figures["by_track"],
+    }
+
+
 def evaluate(
     records: pd.DataFrame,
     groups: pd.DataFrame,
@@ -178,16 +215,24 @@ def evaluate(
     pairs: pd.DataFrame,
     thresholds: dict | None = None,
     applied: pd.DataFrame | None = None,
+    model_lines: dict | None = None,
 ) -> dict:
     """What the exact groups plus the accepted pairs do to the existing labels.
 
     *applied* is the active human labels mapped onto this run's unit pairs
     (``label_overlay.outcomes``). It adds the ``with_human`` figure set and
     changes nothing else, so the sets beside it stay comparable.
+
+    *model_lines* is ``{track: (review, high)}`` for the graded models. It adds
+    two more sets, ``splink_only`` and ``model_only``, which are the same
+    arithmetic run on each score on its own. Without them "did the model help"
+    cannot be answered from the file: ``score_only`` follows whichever score is
+    deciding, so it changes meaning the moment a model is applied.
     """
     accepted = pairs[pairs["bucket"] == "accept"] if len(pairs) else pairs
     combined, entities_after = _figures(records, members, units, accepted)
     exact_only = keys_eval.evaluate(records, groups)
+    high = float((thresholds or {}).get("high") or 1.0)
 
     # The import overlay accepts a pair because the two units already carry the
     # same old entity id, so those accepts cannot be evidence that the scorer
@@ -256,4 +301,15 @@ def evaluate(
             "pair_recall": exact_only["pair_recall"],
             "by_track": exact_only["by_track"],
         },
+        # The two scores, each on its own, so the owner can read "what does the
+        # model change" straight off the file. `model_only` is null on a run no
+        # model has scored.
+        "splink_only": _comparison_set(
+            records, members, units,
+            _accepted_at(pairs, "match_probability", high),
+        ),
+        "model_only": _comparison_set(
+            records, members, units,
+            _accepted_at(pairs, "gbt_score", high, model_lines),
+        ),
     }

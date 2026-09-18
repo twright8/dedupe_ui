@@ -17,6 +17,8 @@ import { ProbBar, fmtProb, fmtNumber } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
 import { Cell, NUMERIC_TYPES, readableColumns } from "../components/cells";
 import { patternSummary } from "../components/PairEvidence";
+import { FocusEvents } from "../components/FocusStrip";
+import { evidenceFocusFor, pickColumns } from "../evidenceFocus";
 import { guardReason } from "../components/ExactGroupsTable";
 import { useProfile } from "../profile";
 
@@ -596,7 +598,17 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
   useEffect(load, [load]);
 
   const units = detail?.units || [];
-  const columns = readableColumns(detail?.columns, profile.display_columns);
+  const [showAllColumns, setShowAllColumns] = useState(false);
+  const allColumns = readableColumns(detail?.columns, profile.display_columns);
+  /* The focus of the first unit decides which columns the table leads with, so a
+     reviewer sees the fields that settle this kind of record and nothing else
+     until they ask (D13c). */
+  const focus = evidenceFocusFor(units[0], profile.evidence_focus || []);
+  const focusColumns = focus ? pickColumns(focus.record_columns, allColumns) : [];
+  const columns = showAllColumns || focusColumns.length === 0 ? allColumns : focusColumns;
+  const focusEventColumns = focus
+    ? pickColumns(focus.event_columns, detail?.event_columns || profile.event_columns || [])
+    : [];
   const eventColumns = detail?.event_columns || profile.event_columns || [];
   // The detail endpoint caps the units it returns. The decision still applies to
   // the whole group, so the cap is said out loud rather than hidden.
@@ -826,9 +838,16 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
         <div className="card-h">
           <h3>Records in this group</h3>
           <span className="muted" style={{ fontSize: 12 }}>
-            put units in different parts to split the group
+            {focus && !showAllColumns
+              ? `showing what to check for ${focus.label.toLowerCase()}`
+              : "put units in different parts to split the group"}
           </span>
           <div className="actions">
+            {focusColumns.length > 0 && (
+              <button className="btn sm" onClick={() => setShowAllColumns((v) => !v)}>
+                {showAllColumns ? "Show less" : "Show everything"}
+              </button>
+            )}
             <button className="btn sm" onClick={suggestParts}>
               Suggest parts
             </button>
@@ -1041,7 +1060,15 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
                   <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
                     {patternSummary(u) || "no pattern recorded"}
                   </div>
-                  <EventRows events={u.events} columns={eventColumns} />
+                  <FocusEvents
+                    events={u.events}
+                    columns={focusEventColumns.length ? focusEventColumns : eventColumns}
+                    emptyNote={
+                      focus
+                        ? `For ${focus.label.toLowerCase()}, the fields in the table above are enough.`
+                        : "No individual rows recorded."
+                    }
+                  />
                 </div>
               ))}
             </div>
@@ -1264,46 +1291,3 @@ function UnitMembers({ unit, columns }) {
   );
 }
 
-function EventRows({ events, columns }) {
-  const rows = Array.isArray(events) ? events : [];
-  if (rows.length === 0) {
-    return (
-      <p className="muted" style={{ fontSize: 12, margin: 0 }}>
-        No individual rows recorded.
-      </p>
-    );
-  }
-  return (
-    <div className="tbl-wrap">
-      <table className="t" style={{ borderRadius: 0 }}>
-        <thead>
-          <tr>
-            {columns.map((c) => (
-              <th key={c.key} style={{ textAlign: NUMERIC_TYPES.has(c.type) ? "right" : "left" }}>
-                {c.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.slice(0, 20).map((e, i) => (
-            <tr key={i}>
-              {columns.map((c) => {
-                const numeric = NUMERIC_TYPES.has(c.type);
-                return (
-                  <td
-                    key={c.key}
-                    className={numeric ? "mono tnum" : ""}
-                    style={{ textAlign: numeric ? "right" : "left", whiteSpace: "normal" }}
-                  >
-                    <Cell value={e[c.key]} type={c.type} />
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}

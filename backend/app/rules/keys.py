@@ -207,6 +207,7 @@ def apply_match_keys(records: pd.DataFrame, ruleset: dict) -> tuple[pd.DataFrame
 
     ordered = _ordered_keys(ruleset)
     _attach_token_lists(ordered, ruleset)
+    _attach_conditions(ordered, ruleset, records)
     stats_by_key: dict[int, dict] = {}
     merged_positions: list[np.ndarray] = []
     merged_key_positions: list[np.ndarray] = []
@@ -254,13 +255,20 @@ def _run_key(key, entry, in_track, eligible_before, normalised, record_ids, unio
     columns = _key_columns(key)
     allow_null = bool(key.get("allow_null", False))
 
-    eligible = in_track.copy()
+    # A conditional key applies to one kind of record only (D13c). The condition
+    # is settled before anything else, so a record it excludes is not eligible —
+    # and therefore does not count as "covered by an earlier key" either.
+    condition = entry.get("condition")
+    excluded_by_condition = int((in_track & ~condition).sum()) if condition is not None else 0
+    eligible = in_track & condition if condition is not None else in_track.copy()
     blocked_values: set[str] = set()
 
     missing = [c for c in columns if c not in normalised]
     if missing or not columns:
         # Validation rejects this; a draft preview must still answer.
-        return _empty_key_result(key, entry, np.zeros(total, dtype=bool), 0)
+        return _empty_key_result(
+            key, entry, np.zeros(total, dtype=bool), 0, excluded_by_condition
+        )
 
     blocklist = _blocklist_tokens(key, entry)
     for column in columns:
@@ -278,7 +286,9 @@ def _run_key(key, entry, in_track, eligible_before, normalised, record_ids, unio
 
     positions = np.flatnonzero(eligible)
     if len(positions) == 0:
-        return _empty_key_result(key, entry, eligible, len(blocked_values))
+        return _empty_key_result(
+            key, entry, eligible, len(blocked_values), excluded_by_condition
+        )
 
     frame = pd.DataFrame({c: normalised[c][positions] for c in columns})
     group_codes = frame.groupby(list(columns), sort=False, dropna=False).ngroup().to_numpy()
@@ -358,11 +368,12 @@ def _run_key(key, entry, in_track, eligible_before, normalised, record_ids, unio
             "held_groups": len(held),
             "held_records": int(sum(len(h["positions"]) for h in held)),
             "blocked_values": len(blocked_values),
+            "excluded_by_condition": excluded_by_condition,
         },
     }
 
 
-def _empty_key_result(key, entry, eligible, blocked_values) -> dict:
+def _empty_key_result(key, entry, eligible, blocked_values, excluded_by_condition=0) -> dict:
     return {
         "eligible": eligible,
         "merged_positions": np.empty(0, dtype=np.int64),
@@ -378,6 +389,7 @@ def _empty_key_result(key, entry, eligible, blocked_values) -> dict:
             "held_groups": 0,
             "held_records": 0,
             "blocked_values": blocked_values,
+            "excluded_by_condition": excluded_by_condition,
         },
     }
 
@@ -538,6 +550,23 @@ def _stats(ordered, stats_by_key, groups: pd.DataFrame, total: int) -> dict:
 # ---------------------------------------------------------------------------
 # Token lists reach a key through its ordered entry
 # ---------------------------------------------------------------------------
+
+
+def _attach_conditions(ordered: list[dict], ruleset: dict, records: pd.DataFrame) -> None:
+    """Evaluate each key's ``when`` once, over the whole frame.
+
+    The conditions run on the cleaned records, so a key may test a raw column, a
+    cleaning target or a derived one. ``engine.when_mask`` is the same evaluator
+    the track and derived-column rules use; there is no second implementation.
+    """
+    token_lists = ruleset.get("token_lists")
+    token_lists = token_lists if isinstance(token_lists, dict) else {}
+    for item in ordered:
+        when = item["key"].get("when")
+        if not isinstance(when, list) or not when:
+            item["condition"] = None
+            continue
+        item["condition"] = engine.when_mask(when, records, token_lists).to_numpy()
 
 
 def _attach_token_lists(ordered: list[dict], ruleset: dict) -> None:

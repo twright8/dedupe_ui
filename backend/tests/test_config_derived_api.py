@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 os.environ.setdefault("SITE_PASSWORD", "testpass123")
 
-from tests.rulesets import default_ruleset
+from tests.rulesets import default_ruleset, replace_derived_columns
 
 import app.auth as _auth_mod
 import app.main as _main_mod
@@ -165,8 +165,7 @@ def test_preview_derived_uses_a_draft(client):
 
 
 def test_preview_derived_of_a_ruleset_with_no_derived_columns(client):
-    draft = copy.deepcopy(default_ruleset())
-    draft["derived_columns"] = []
+    draft = replace_derived_columns(default_ruleset())
     _save(client, draft)
     assert _preview(client).json() == {"columns": []}
 
@@ -314,7 +313,7 @@ def test_a_saved_ruleset_with_no_derived_section_is_read_as_empty(client, db_pat
     """An older saved version must keep working, and must not force a re-seed."""
     from app.services.config_manager import get_current
 
-    older = copy.deepcopy(default_ruleset())
+    older = replace_derived_columns(default_ruleset())
     del older["derived_columns"]
     _save(client, older)
 

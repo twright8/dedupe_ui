@@ -19,6 +19,8 @@ import { Empty } from "../components/Empty";
 import { DiffHero, BucketTag, entityIds } from "../components/DiffHero";
 import { PairExplain } from "../components/PairExplain";
 import { PairEvidence } from "../components/PairEvidence";
+import { ModelExplain } from "../components/ModelExplain";
+import { FocusStrip } from "../components/FocusStrip";
 import { ThresholdPanel } from "../components/ThresholdPanel";
 import { Cell, NUMERIC_TYPES, SYSTEM_COLUMNS, PATTERN_COLUMNS } from "../components/cells";
 import MethodologyNotes from "../components/MethodologyNotes";
@@ -66,6 +68,7 @@ export default function ReviewScreen() {
   const [threshold, setThreshold] = useState(0.92);
   const [reviewLow, setReviewLow] = useState(0.5);
   const [committed, setCommitted] = useState(null);
+  const [runInfo, setRunInfo] = useState(null);
   const [committing, setCommitting] = useState(false);
 
   // Filters — every one of these is a query parameter.
@@ -82,6 +85,7 @@ export default function ReviewScreen() {
   const [page, setPage] = useState(0);
   const [brushLo, setBrushLo] = useState(null);
   const [brushHi, setBrushHi] = useState(null);
+  const [brushOnModel, setBrushOnModel] = useState(false);
 
   const [data, setData] = useState(null);
   const [histogram, setHistogram] = useState(null);
@@ -120,6 +124,7 @@ export default function ReviewScreen() {
     api
       .getRun(runId)
       .then((run) => {
+        setRunInfo(run);
         const high = run?.threshold_high;
         const low = run?.threshold_review;
         if (high != null) setThreshold(+high);
@@ -146,10 +151,10 @@ export default function ReviewScreen() {
     if (labelled !== "all") p.labelled = labelled;
     if (held !== "both") p.held = held;
     if (q) p.q = q;
-    if (brushLo != null) p.min_score = brushLo;
-    if (brushHi != null) p.max_score = brushHi;
+    if (brushLo != null) p[brushOnModel ? "min_gbt" : "min_score"] = brushLo;
+    if (brushHi != null) p[brushOnModel ? "max_gbt" : "max_score"] = brushHi;
     return p;
-  }, [page, sort, order, bucket, track, decidedBy, importFilter, labelled, held, q, brushLo, brushHi]);
+  }, [page, sort, order, bucket, track, decidedBy, importFilter, labelled, held, q, brushLo, brushHi, brushOnModel]);
 
   useEffect(() => {
     if (!runId) return;
@@ -178,6 +183,28 @@ export default function ReviewScreen() {
     };
     // selectedId is deliberately out: picking a row must not refetch the page.
   }, [runId, listParams, attempt]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* The read-only lines belong to the run, not to whatever version happens to be
+     active now, and each track has its own. The histogram answers for the track
+     it was asked about; the run's counts answer for any track. */
+  const modelTrack = track === "all" ? (tracks[0]?.key ?? null) : track;
+  const modelForTrack = useMemo(() => {
+    const src = histogram?.modelActive != null ? histogram : runInfo?.counts || {};
+    const per = (value) =>
+      value && typeof value === "object" && !Array.isArray(value)
+        ? modelTrack
+          ? value[modelTrack]
+          : Object.values(value)[0]
+        : value;
+    return {
+      active: !!src.modelActive,
+      graded: !!per(src.modelGraded),
+      version: per(src.modelVersion),
+      warning: per(src.modelWarning),
+      accept: per(src.modelAcceptLine),
+      reject: per(src.modelRejectLine),
+    };
+  }, [histogram, runInfo, modelTrack]);
 
   const items = data?.items || [];
   const counts = liveCounts || data?.counts || {};
@@ -264,9 +291,10 @@ export default function ReviewScreen() {
   }, [runId, threshold, reviewLow]);
 
   // ---------- brush ----------
-  const onBrush = useCallback((lo, hi) => {
+  const onBrush = useCallback((lo, hi, onModelScore) => {
     setBrushLo(lo);
     setBrushHi(hi);
+    setBrushOnModel(!!onModelScore);
     setPage(0);
     // Surface the most-likely-wrong first, as roe_ui does.
     setSort("score");
@@ -282,14 +310,17 @@ export default function ReviewScreen() {
   // ---------- bulk on the slice ----------
   const sliceParts = useMemo(() => {
     const parts = [`bucket: ${BUCKETS.find((b) => b.id === bucket)?.lab || bucket}`];
-    if (brushLo != null) parts.push(`score: ${brushLo.toFixed(2)}–${brushHi.toFixed(2)}`);
+    if (brushLo != null)
+      parts.push(
+        `${brushOnModel ? "model" : "Splink"} score: ${brushLo.toFixed(2)}–${brushHi.toFixed(2)}`
+      );
     if (track !== "all") parts.push(`track: ${tracks.find((t) => t.key === track)?.label || track}`);
     if (decidedBy !== "all") parts.push(`decided by: ${decidedBy}`);
     if (importFilter !== "all") parts.push(`earlier labels: ${importFilter}`);
     if (held !== "both") parts.push(held === "hide" ? "held groups hidden" : "held groups only");
     if (q) parts.push(`search: "${q}"`);
     return parts;
-  }, [bucket, brushLo, brushHi, track, decidedBy, importFilter, held, q, tracks]);
+  }, [bucket, brushLo, brushHi, brushOnModel, track, decidedBy, importFilter, held, q, tracks]);
 
   const stageSlice = useCallback(
     (verdict) => {
@@ -436,6 +467,7 @@ export default function ReviewScreen() {
         brushHi={brushHi}
         onBrush={onBrush}
         scoreEval={scoreEval}
+        model={modelForTrack}
       />
 
       {/* PRIMARY · label these pairs */}
@@ -455,7 +487,7 @@ export default function ReviewScreen() {
                 <span className="mono">
                   {brushLo.toFixed(2)}–{brushHi.toFixed(2)}
                 </span>{" "}
-                selected on the chart —{" "}
+                of the {brushOnModel ? "model" : "Splink"} score selected on the chart —{" "}
               </>
             ) : (
               <>Whole current view (drag a band on the chart to narrow) — </>
@@ -606,12 +638,21 @@ export default function ReviewScreen() {
             <option value="priority:desc">{priorityColumn.label}, highest first</option>
           )}
           <option value="name:asc">Name, A to Z</option>
+          <option value="useful:desc">Most useful to label</option>
         </select>
         <div className="spacer" />
         <span className="muted" style={{ fontSize: 12 }}>
           {fmtNumber(total)} pair{total === 1 ? "" : "s"} in this view
         </span>
       </div>
+
+      {sort === "useful" && (
+        <p className="muted" style={{ fontSize: 11.5, margin: "0 0 10px" }}>
+          First the pairs the model is least sure about, then the pairs where the model and Splink
+          disagree most. A pair worth more money is nudged up the order, never far enough to bury an
+          uncertain one.
+        </p>
+      )}
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
         {tracks.length > 1 && (
@@ -741,6 +782,7 @@ export default function ReviewScreen() {
           columns={columns}
           displayColumns={profile.display_columns || []}
           eventColumns={eventColumns}
+          profile={profile}
           labelOf={labelOf}
           onLabel={handleLabel}
           onLabelWithExtra={applyLabel}
@@ -856,15 +898,32 @@ function ReviewTable({
                   <UnitCell unit={m.left} />
                   <UnitCell unit={m.right} />
                   <td style={{ verticalAlign: "top" }}>
+                    {/* When a model has scored the run its score leads and the
+                        Splink score stays readable underneath. */}
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <ProbBar p={m.match_probability} w={44} high={threshold} review={reviewLow} />
+                      <ProbBar
+                        p={m.gbt_score ?? m.match_probability}
+                        w={44}
+                        high={threshold}
+                        review={reviewLow}
+                      />
                       <span className="mono" style={{ fontWeight: 600 }}>
-                        {fmtProb(m.match_probability)}
+                        {fmtProb(m.gbt_score ?? m.match_probability)}
                       </span>
                     </div>
+                    {m.gbt_score != null && (
+                      <div className="mono muted" style={{ fontSize: 11 }}>
+                        Splink {fmtProb(m.match_probability)}
+                      </div>
+                    )}
                     <div className="mono muted" style={{ fontSize: 11 }}>
                       {trackLabel(m.track)}
                     </div>
+                    {m.usefulness && (
+                      <div className="muted" style={{ fontSize: 11 }}>
+                        useful {(m.usefulness.score * 100).toFixed(0)}
+                      </div>
+                    )}
                   </td>
                   <td style={{ verticalAlign: "top", whiteSpace: "normal" }}>
                     <BucketTag bucket={m.bucket} decidedBy={m.decided_by} />
@@ -1063,6 +1122,7 @@ function ReviewDiff({
   columns,
   displayColumns,
   eventColumns,
+  profile,
   labelOf,
   onLabel,
   onLabelWithExtra,
@@ -1074,7 +1134,9 @@ function ReviewDiff({
 }) {
   const [detail, setDetail] = useState(null);
   const [detailError, setDetailError] = useState(null);
+  const [showAll, setShowAll] = useState(false);
   const cache = useRef({});
+  const hasFocus = (profile.evidence_focus || []).length > 0;
 
   useEffect(() => {
     if (!current) return;
@@ -1193,17 +1255,28 @@ function ReviewDiff({
       {/* The pair */}
       <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
         <DiffHero pair={pair} high={threshold} review={reviewLow} />
-        <UnitCompare pair={pair} columns={columns} displayColumns={displayColumns} />
+        <FocusStrip
+          pair={pair}
+          profile={profile}
+          showAll={showAll}
+          onToggle={() => setShowAll((v) => !v)}
+        />
+        {(showAll || !hasFocus) && (
+          <UnitCompare pair={pair} columns={columns} displayColumns={displayColumns} />
+        )}
         {detailError ? (
           <p style={{ fontSize: 12.5, color: "var(--ti-red)" }}>{detailError}</p>
         ) : (
           <>
+            <ModelExplain explanation={pair.model_explanation} />
             <PairExplain
               explanation={pair.explanation}
               matchWeight={pair.match_weight}
               matchProbability={pair.match_probability}
             />
-            <PairEvidence pair={pair} eventColumns={eventColumns} />
+            {(showAll || !hasFocus) && (
+              <PairEvidence pair={pair} eventColumns={eventColumns} />
+            )}
           </>
         )}
         <DiffControls

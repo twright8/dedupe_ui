@@ -592,19 +592,26 @@ def assign_tracks(df: pd.DataFrame, ruleset: dict) -> pd.Series:
 # ---------------------------------------------------------------------------
 
 
-def _rule_mask(rule: dict, frame: pd.DataFrame, token_lists: dict) -> pd.Series:
-    """The records one ordered rule's conditions all hold for.
+def when_mask(when, frame: pd.DataFrame, token_lists: dict) -> pd.Series:
+    """The records a list of ANDed conditions all hold for.
 
-    A condition naming a column the frame lacks makes the rule fire for nobody,
-    which is what a track rule already does.
+    The one place a ``when`` block is evaluated: track rules, derived-column
+    rules and match keys all come through here, so they cannot drift apart.
+    An empty list holds for everybody. A condition naming a column the frame
+    lacks holds for nobody, which is what a track rule has always done.
     """
     matches = pd.Series(True, index=frame.index)
-    for condition in rule.get("when") or []:
+    for condition in when or []:
         column = condition.get("column")
         if column not in frame.columns:
             return pd.Series(False, index=frame.index)
         matches &= conditions.evaluate(condition, frame[column], token_lists)
     return matches
+
+
+def _rule_mask(rule: dict, frame: pd.DataFrame, token_lists: dict) -> pd.Series:
+    """The records one ordered rule's conditions all hold for."""
+    return when_mask(rule.get("when"), frame, token_lists)
 
 
 def _same_values(left: pd.Series, right: pd.Series) -> pd.Series:
@@ -1203,11 +1210,34 @@ def _check_match_keys(ruleset: dict, per_track: dict, errors: list[dict]) -> Non
             _error(errors, f"{path}.on_guard_fail",
                    f"on_guard_fail must be one of {', '.join(ON_GUARD_FAIL)}")
 
+        _check_key_conditions(key, path, track, known, ruleset, errors)
+
         guards = key.get("guards", {})
         if not isinstance(guards, dict):
             _error(errors, f"{path}.guards", "guards must be an object")
             continue
         _check_key_guards(guards, path, track, known, ruleset, errors)
+
+
+def _check_key_conditions(key, path, track, known, ruleset, errors) -> None:
+    """A key's optional ``when``: the same conditions the rules use.
+
+    They run on the cleaned frame, so a raw column, a cleaning target and a
+    derived target are all readable — which is what *known* already holds.
+    """
+    when = key.get("when")
+    if when is None:
+        return
+    if not isinstance(when, list):
+        _error(errors, f"{path}.when", "when must be a list of conditions")
+        return
+
+    def check(column: str, at: str) -> None:
+        if known is not None and column not in known:
+            _error(errors, at, f"'{column}' is not a column of the {track} track")
+
+    for position, condition in enumerate(when):
+        _check_condition(condition, f"{path}.when[{position}]", ruleset, check, errors)
 
 
 def _check_key_guards(guards, path, track, known, ruleset, errors) -> None:

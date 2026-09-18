@@ -28,7 +28,7 @@ import {
   errorsOnSection,
   moveItem,
   nextId,
-  useColumns,
+  useColumnsForTracks,
   useCompleteRuns,
   useDebounced,
   RunPicker,
@@ -123,8 +123,10 @@ function LimitInput({ value, onChange, placeholder, width = 90 }) {
 export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
   const tracks = profile.tracks || [];
   const [track, setTrack] = useState(tracks[0]?.key || "person");
-  const cols = useColumns(ruleset, track);
-  const columnOptions = allColumnNames(cols);
+  // A key's condition may read raw columns, cleaning targets and derived
+  // targets, so the option list is the union for that key's track.
+  const cols = useColumnsForTracks(ruleset, [track]);
+  const columnOptions = (cols.union || []).map((c) => c.key);
 
   const keys = ruleset.match_keys;
   // Positions in the whole list, so edits and error paths keep using the index
@@ -272,6 +274,23 @@ export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
                               only records that no earlier key could use
                             </option>
                           </select>
+                        </div>
+
+                        {/* A key may apply to one kind of record only: a shared
+                            name settles a trade union but not a company (D13c). */}
+                        <div style={{ marginTop: 8 }}>
+                          <div className="eyebrow" style={{ marginBottom: 4 }}>
+                            Only for records where…
+                          </div>
+                          <ConditionList
+                            conditions={k.when}
+                            columns={cols.union || []}
+                            tokenLists={ruleset.token_lists}
+                            emptyNote="No condition, so this key applies to every record on this track."
+                            onChange={(when) =>
+                              updateKey(index, { when: when.length ? when : undefined })
+                            }
+                          />
                         </div>
 
                         <div style={{ marginTop: 8 }}>
@@ -677,6 +696,9 @@ function KeyPreview({ ruleset }) {
                               tier {k.tier} &middot; {fmtNumber(k.eligible_records)} eligible &middot;{" "}
                               {fmtNumber(k.records)} merged
                               {k.blocked_values ? ` · ${fmtNumber(k.blocked_values)} blocked` : ""}
+                              {k.excluded_by_condition
+                                ? ` · ${fmtNumber(k.excluded_by_condition)} not this kind of record`
+                                : ""}
                             </div>
                           </td>
                           <td className="mono tnum" style={{ textAlign: "right", verticalAlign: "top" }}>

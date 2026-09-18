@@ -43,15 +43,23 @@ export function ThresholdPanel({
   brushHi = null,
   onBrush,
   scoreEval,
+  model,
 }) {
   const [stack, setStack] = useState("bucket"); // bucket | import
   const histoRef = useRef(null);
   const [drag, setDrag] = useState(null);
 
+  // A run scored by a model is read on the model's score. Both sets of series
+  // share one shape: edges of length bins+1, and every series a flat array of
+  // length bins, so only the source object changes.
+  const onModel = !!model?.active && histogram?.score_column === "gbt_score";
+  const [showModelScore, setShowModelScore] = useState(true);
+  const useModel = onModel && showModelScore;
+  const series = useModel ? histogram?.by_score_column || {} : histogram || {};
   const edges = Array.isArray(histogram?.edges) ? histogram.edges : [];
   const nBins = Math.max(0, edges.length - 1);
-  const series = stack === "bucket" ? BUCKET_SERIES : IMPORT_SERIES;
-  const totals = Array.isArray(histogram?.total) ? histogram.total : [];
+  const stackSeries = stack === "bucket" ? BUCKET_SERIES : IMPORT_SERIES;
+  const totals = Array.isArray(series.total) ? series.total : [];
   const maxBin = totals.length ? Math.max(...totals, 1) : 1;
 
   const rangeMin = nBins ? edges[0] : 0;
@@ -70,7 +78,7 @@ export function ThresholdPanel({
     if (!d || !onBrush) return setDrag(null);
     const lo = Math.min(d.a, d.b);
     const hi = Math.max(d.a, d.b);
-    if (hi - lo > 0.005) onBrush(+lo.toFixed(2), +hi.toFixed(2));
+    if (hi - lo > 0.005) onBrush(+lo.toFixed(2), +hi.toFixed(2), useModel);
     setDrag(null);
   };
   const selLo = drag ? Math.min(drag.a, drag.b) : brushLo;
@@ -107,7 +115,7 @@ export function ThresholdPanel({
       </div>
       <div className="card-b" style={{ padding: "14px 18px 18px" }}>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-          {series.map((s) => (
+          {stackSeries.map((s) => (
             <span key={s.key} className="muted" style={{ fontSize: 11.5 }}>
               <span
                 style={{
@@ -123,6 +131,51 @@ export function ThresholdPanel({
             </span>
           ))}
         </div>
+
+        {onModel && (
+          <div
+            style={{
+              border: "1px solid var(--line)",
+              background: "var(--surface-sub)",
+              borderRadius: 5,
+              padding: "8px 10px",
+              fontSize: 12,
+              lineHeight: 1.5,
+              marginBottom: 10,
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              flexWrap: "wrap",
+            }}
+          >
+            <span>
+              This run is read on the trained model's score.
+              {model.accept != null && (
+                <>
+                  {" "}
+                  It accepts at <span className="mono">{model.accept.toFixed(2)}</span> and above.
+                </>
+              )}
+              {model.reject != null && (
+                <>
+                  {" "}
+                  It rejects below <span className="mono">{model.reject.toFixed(2)}</span>.
+                </>
+              )}{" "}
+              Those two lines come from the answers held back for testing, so they are not sliders.
+              {!model.graded && " This model is a cold start, so it only re-orders the queue."}
+            </span>
+            {model.warning && <span style={{ width: "100%" }}>{model.warning}</span>}
+            <div className="seg" style={{ marginLeft: "auto" }}>
+              <button className={showModelScore ? "on" : ""} onClick={() => setShowModelScore(true)}>
+                Model score
+              </button>
+              <button className={!showModelScore ? "on" : ""} onClick={() => setShowModelScore(false)}>
+                Splink score
+              </button>
+            </div>
+          </div>
+        )}
 
         <div style={{ position: "relative", padding: "0 4px" }}>
           {nBins > 0 ? (
@@ -160,9 +213,9 @@ export function ThresholdPanel({
                 const h = total > 0 ? Math.max(4, (Math.log(total + 1) / Math.log(maxBin + 1)) * 100) : 0;
                 const lo = edges[i];
                 const hi = edges[i + 1];
-                const parts = series.map((s) => ({
+                const parts = stackSeries.map((s) => ({
                   ...s,
-                  n: (Array.isArray(histogram?.[s.key]) ? histogram[s.key][i] : 0) || 0,
+                  n: (Array.isArray(series[s.key]) ? series[s.key][i] : 0) || 0,
                 }));
                 const title =
                   `${lo.toFixed(2)}–${hi.toFixed(2)}: ${fmtNumber(total)}\n` +
@@ -207,7 +260,7 @@ export function ThresholdPanel({
                   position: "absolute",
                   top: -3,
                   bottom: 0,
-                  left: pct(Math.max(threshold, rangeMin)),
+                  left: pct(Math.max(useModel && model?.accept != null ? model.accept : threshold, rangeMin)),
                   borderLeft: "2px solid var(--green)",
                   pointerEvents: "none",
                 }}
@@ -217,7 +270,7 @@ export function ThresholdPanel({
                   position: "absolute",
                   top: -3,
                   bottom: 0,
-                  left: pct(Math.max(reviewLow, rangeMin)),
+                  left: pct(Math.max(useModel && model?.reject != null ? model.reject : reviewLow, rangeMin)),
                   borderLeft: "2px solid var(--ti-red)",
                   pointerEvents: "none",
                 }}
@@ -313,7 +366,16 @@ export function ThresholdPanel({
                 lines moved from {committed.review.toFixed(2)} / {committed.high.toFixed(2)}
               </span>
             )}
-            <button className="btn sm" onClick={onCommit} disabled={committing || !moved}>
+            <button
+              className="btn sm"
+              onClick={onCommit}
+              disabled={committing || !moved || (onModel && model.graded)}
+              title={
+                onModel && model.graded
+                  ? "A graded model sets the lines from its test set"
+                  : undefined
+              }
+            >
               {committing ? "Applying…" : "Apply these lines to the run"}
             </button>
           </div>
@@ -356,6 +418,18 @@ function ScoreEvalStrip({ scoreEval }) {
       label: "The scorer on its own",
       value: scoreEval.score_only,
       help: "Without the pairs the earlier labels accepted. The honest number for tuning.",
+    },
+    {
+      key: "splink_only",
+      label: "The Splink score on its own",
+      value: scoreEval.splink_only,
+      help: "What Splink alone would have decided, with no model.",
+    },
+    {
+      key: "model_only",
+      label: "The model on its own",
+      value: scoreEval.model_only,
+      help: "What the model alone would have decided, with no earlier labels laid over it.",
     },
     {
       key: "with_human",

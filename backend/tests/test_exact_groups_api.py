@@ -435,7 +435,7 @@ class TestOneGroup:
         evaluation = client.get(f"/api/runs/{run_id}/exact-eval").json()
         assert evaluation["overall"]["merged_groups"] == 3
         assert evaluation["eval"]["pair_precision"] == 1.0
-        assert [k["id"] for k in evaluation["keys"]] == ["k1", "k3", "k2"]
+        assert [k["id"] for k in evaluation["keys"]] == ["k1", "k3", "k2", "k4"]
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +479,7 @@ class TestPreviewKeys:
     def test_the_shape(self, client, db_path, preview_run):
         body = _preview(client, default_ruleset()).json()
 
-        assert [k["id"] for k in body["keys"]] == ["k1", "k3", "k2"]
+        assert [k["id"] for k in body["keys"]] == ["k1", "k3", "k2", "k4"]
         assert set(body["overall"]) >= {
             "merged_groups", "merged_records", "held_groups", "held_records",
             "entities_after",
@@ -624,7 +624,7 @@ class TestPreviewKeys:
             "ruleset": default_ruleset(), "linkage_settings": {}, "note": "seed",
         })
         body = _preview(client).json()
-        assert [k["id"] for k in body["keys"]] == ["k1", "k3", "k2"]
+        assert [k["id"] for k in body["keys"]] == ["k1", "k3", "k2", "k4"]
 
     def test_an_invalid_draft_is_422_in_the_same_shape_as_a_save(self, client, db_path, preview_run):
         draft = default_ruleset()

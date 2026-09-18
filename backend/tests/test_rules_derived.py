@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 os.environ.setdefault("SITE_PASSWORD", "testpass123")
 
-from tests.rulesets import default_ruleset, small_ruleset
+from tests.rulesets import default_ruleset, replace_derived_columns, small_ruleset
 
 from app.profiles.donations import RAW_COLUMNS
 from app.rules import conditions, engine
@@ -94,9 +94,7 @@ def _records(rows):
 
 
 def _with_derived(ruleset, *columns):
-    ruleset = copy.deepcopy(ruleset)
-    ruleset["derived_columns"] = list(columns)
-    return ruleset
+    return replace_derived_columns(ruleset, *columns)
 
 
 def _column(**overrides):

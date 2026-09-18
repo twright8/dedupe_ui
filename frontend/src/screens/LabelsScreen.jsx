@@ -12,10 +12,11 @@
    ============================================================ */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useProfile } from "../profile";
 import { api } from "../api";
 import { Icons } from "../components/Icons";
 import { Empty } from "../components/Empty";
-import { fmtDateTime } from "../components/ProbBar";
+import { fmtDateTime, fmtNumber } from "../components/ProbBar";
 
 // --- Source: who produced the label (independent of its Role) ---
 function sourceKind(label) {
@@ -34,6 +35,7 @@ const SOURCE_META = {
 };
 
 export default function LabelsScreen() {
+  const profile = useProfile();
   const [labels, setLabels] = useState([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -55,10 +57,16 @@ export default function LabelsScreen() {
   const [bulkBusy, setBulkBusy] = useState(false);
   const [openHistory, setOpenHistory] = useState(null);
 
+  // The frozen test set is per track and lives with the model, because the model
+  // is what it grades.
+  const [testTrack, setTestTrack] = useState(() => (profile.tracks || [])[0]?.key || "person");
   function loadEval() {
-    api.evalSetStatus().then(setEvalSet).catch(() => setEvalSet(null));
+    api
+      .getTestSet(testTrack)
+      .then(setEvalSet)
+      .catch(() => setEvalSet(null));
   }
-  useEffect(loadEval, []);
+  useEffect(loadEval, [testTrack]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function loadLabels() {
     setLoading(true);
@@ -80,17 +88,17 @@ export default function LabelsScreen() {
   async function autoPickTests() {
     if (
       !window.confirm(
-        "Auto-pick a balanced Test set?\n\n" +
-          "This takes up to 200 of your NEWEST hand-made Match/Not-match labels, an equal " +
-          "number of each, and moves them to TESTS (the model stops learning from them and is " +
-          "graded on them instead). It never takes more than half of either, so there's always " +
-          "enough left to teach the model."
+        "Freeze a balanced test set?\n\n" +
+          "This takes up to 200 of your newest answers, an equal number of each verdict, and " +
+          "freezes them. The model stops learning from them and is graded on them instead.\n\n" +
+          "Only answers you gave one at a time, or by marking a band, can be frozen. It never " +
+          "takes more than half of either verdict. Freezing cannot be undone."
       )
     )
       return;
     setDesignating(true);
     try {
-      await api.designateEvalSet(200);
+      await api.designateTestSet(testTrack, 200);
       loadEval();
       loadLabels();
     } finally {
@@ -254,16 +262,34 @@ export default function LabelsScreen() {
         <div className="card-b" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
             <span className="eyebrow">Test set</span>
+            {(profile.tracks || []).length > 1 && (
+              <div className="seg">
+                {(profile.tracks || []).map((t) => (
+                  <button
+                    key={t.key}
+                    className={testTrack === t.key ? "on" : ""}
+                    onClick={() => setTestTrack(t.key)}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            )}
             <span style={{ fontSize: 13 }}>
               {evalSet ? (
                 <>
-                  <strong>{evalSet.total}</strong> labels held aside for testing
+                  <strong>{fmtNumber(evalSet.total)}</strong> frozen for testing
                   {evalSet.total > 0 && (
                     <span className="muted">
                       {" "}
                       · {evalSet.by_verdict?.TRUE || 0} Match / {evalSet.by_verdict?.FALSE || 0} No
                     </span>
                   )}
+                  <span className="muted">
+                    {" "}
+                    · {fmtNumber(evalSet.training)} still teaching ·{" "}
+                    {fmtNumber(evalSet.designatable)} could be frozen
+                  </span>
                 </>
               ) : (
                 "—"
@@ -275,13 +301,36 @@ export default function LabelsScreen() {
               onClick={autoPickTests}
               disabled={designating}
             >
-              {designating ? "Picking..." : "Auto-pick a balanced Test set"}
+              {designating ? "Freezing..." : "Freeze a balanced test set"}
             </button>
           </div>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <div className="kpi" style={{ padding: 10, minWidth: 150 }}>
+              <div className="label">Teaches</div>
+              <div className="value" style={{ fontSize: 22 }}>
+                {fmtNumber(labels.filter((l) => !l.held_out).length)}
+              </div>
+              <div className="delta muted">the model trains on these</div>
+            </div>
+            <div className="kpi" style={{ padding: 10, minWidth: 150 }}>
+              <div className="label">Tests</div>
+              <div className="value" style={{ fontSize: 22, color: "var(--violet)" }}>
+                {fmtNumber(labels.filter((l) => !!l.held_out).length)}
+              </div>
+              <div className="delta muted">held back to grade it</div>
+            </div>
+          </div>
           <p className="muted" style={{ fontSize: 12, margin: 0, lineHeight: 1.5 }}>
-            <strong>Test</strong> labels are hidden from the model so you can grade it on cases it
-            never studied. A model graded on the answers it learned from always looks too good.
-            Everything else <strong>teaches</strong> the model.
+            Only answers you gave one at a time, or by marking a band on the chart, can be frozen. A
+            decision on a whole group and an imported label cannot, because grading on those would
+            flatter the model. Freezing never takes more than half of either verdict, and it cannot
+            be undone.
+          </p>
+          <p className="muted" style={{ fontSize: 12, margin: 0, lineHeight: 1.5 }}>
+            <strong>Test</strong> answers are hidden from the model so it can be graded on cases it
+            never studied. The model's accept and reject lines are set from this frozen test set, so
+            without it the model can score pairs but may not decide any. Everything else{" "}
+            <strong>teaches</strong> the model.
           </p>
         </div>
       </div>

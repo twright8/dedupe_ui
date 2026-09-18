@@ -561,7 +561,7 @@ class TestStats:
         _, stats = keys.apply_match_keys(frame, a_ruleset(a_key()))
         assert set(stats["keys"][0]) == {
             "id", "name", "track", "tier", "eligible_records", "groups", "records",
-            "held_groups", "held_records", "blocked_values",
+            "held_groups", "held_records", "blocked_values", "excluded_by_condition",
         }
         assert set(stats["overall"]) >= {
             "merged_groups", "merged_records", "held_groups", "held_records",

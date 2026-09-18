@@ -1173,3 +1173,91 @@ def test_score_eval_keeps_the_entity_figures_after_a_label_write(
     assert "circular" in body["entities"]
     assert "versus_existing_entity_id" in body
     assert "identical_records" in body["versus_existing_entity_id"]
+
+
+# ---------------------------------------------------------------------------
+# What the second live flow found
+# ---------------------------------------------------------------------------
+
+
+def test_unscored_units_are_the_ones_splink_has_never_seen(tmp_path):
+    """Not "units in no pair" — that is most units in any run."""
+    from app.pipeline.dedupe.stage_3_score import (
+        never_scored, unit_fingerprint, write_scored_units,
+    )
+
+    units = units_frame([{"unit_id": u, "unit_size": 1} for u in ("1", "2", "3")])
+    write_scored_units(tmp_path, units)
+    # Nothing has changed, so nothing is new — even though 2 and 3 are in no pair.
+    assert never_scored(tmp_path, units) == []
+
+    merged = units_frame([{"unit_id": "1", "unit_size": 2},
+                          {"unit_id": "3", "unit_size": 1}])
+    # Unit 1 now holds two records, so it is a unit Splink has never compared.
+    assert never_scored(tmp_path, merged) == ["1"]
+    assert list(unit_fingerprint(merged)["unit_size"]) == [2, 1]
+
+
+def test_a_merge_re_points_its_pairs_instead_of_losing_them():
+    from app.pipeline.dedupe.stage_3_score import repoint_pairs
+
+    pairs = pairs_frame([
+        {"unit_id_l": "1", "unit_id_r": "2", "match_probability": 0.9},
+        {"unit_id_l": "2", "unit_id_r": "8", "match_probability": 0.4},
+        {"unit_id_l": "1", "unit_id_r": "8", "match_probability": 0.7},
+    ])
+    # Records 1 and 2 are now one unit, keyed on the smaller.
+    members = members_frame([("1", "1"), ("1", "2"), ("8", "8")])
+    moved = repoint_pairs(pairs, members)
+
+    # The pair inside the new unit is answered by the merge and goes.
+    assert len(moved) == 1
+    row = moved.iloc[0]
+    assert (row["unit_id_l"], row["unit_id_r"]) == ("1", "8")
+    # The better of the two outside scores survives, and it is not a fresh score.
+    assert row["match_probability"] == 0.7
+    assert bool(row["rescored"]) is False
+
+
+def test_reclustering_a_held_group_merge_is_quick_and_counts_honestly(
+    client, db_path, data_dir
+):
+    """A regression guard for the 214-second recluster.
+
+    The cost was a set of every record id rebuilt once per unit while counting
+    the unscored ones. On this frame it is milliseconds; on the real file it was
+    22,435 x 51,839.
+    """
+    import time as _time
+
+    run_dir = _seed_run(db_path, data_dir)
+    # A held group of three records, as stage 2 leaves one.
+    _groups([{"record_id": r, "group_id": "H-k3-1", "track": "person",
+              "status": "held", "key_ids": "k3", "guard": "max_group_size:3>2"}
+             for r in ("1", "2", "3")]).to_parquet(
+        run_dir / "exact_groups.parquet", index=False)
+    _cluster(db_path, run_dir)
+    from app.pipeline.dedupe.stage_3_score import write_scored_units
+
+    write_scored_units(run_dir, pd.read_parquet(run_dir / "units.parquet"))
+
+    decision = client.post(f"/api/runs/{RUN_ID}/clusters/H-k3-1/decision",
+                           json={"kind": "merge"}).json()
+    assert decision["labels_written"] == 2
+
+    started = _time.time()
+    body = client.post(f"/api/runs/{RUN_ID}/recluster").json()
+    elapsed = _time.time() - started
+
+    assert body["exact_groups_rebuilt"] is True
+    assert body["units_rebuilt"] is True
+    # Not "every unit that happens to be in no pair", which was 11,716 of
+    # 22,435 on the real file. never_scored has its own test above.
+    assert body["unscored_units"] < 3
+    assert elapsed < 10, f"recluster took {elapsed:.1f}s"
+
+    counts = client.get(f"/api/runs/{RUN_ID}").json()["counts"]
+    # The library and the run agree, whatever became of each label.
+    assert counts["labelsTotal"] == client.get("/api/labels").json()["total"] == 2
+    assert counts["labelsTrue"] == 2
+    assert counts["labelsFalse"] == 0

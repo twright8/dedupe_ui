@@ -326,6 +326,92 @@ def save_label(
     return new_row, len(prior)
 
 
+# ---------------------------------------------------------------------------
+# The frozen test set (docs/MODEL.md)
+# ---------------------------------------------------------------------------
+
+# Only a reviewer's own decision on that pair may be frozen. A cluster decision
+# writes a star of labels at once, so putting them in a test set would grade the
+# model on many correlated rows that one click produced, and an imported label
+# was never confirmed in this UI at all (D11).
+TEST_SET_PROVENANCES = HUMAN_PROVENANCES
+
+
+def test_set(db_path: str, track: str | None = None) -> dict:
+    """What the frozen test set holds, and what is left to designate.
+
+    `MODEL.md`: the test set is human labels with ``held_out = 1``. It is never
+    trained on, and grading and the accept and reject lines come from it alone.
+    """
+    where = "active = 1"
+    params: list = []
+    if track is not None:
+        where += " AND track = ?"
+        params.append(track)
+    marks = ", ".join("?" * len(TEST_SET_PROVENANCES))
+    row = query_db(
+        db_path,
+        f"""SELECT
+              count(*) FILTER (WHERE held_out = 1) AS held_out,
+              count(*) FILTER (WHERE held_out = 1 AND upper(is_match) = 'TRUE') AS t,
+              count(*) FILTER (WHERE held_out = 1 AND upper(is_match) = 'FALSE') AS f,
+              count(*) FILTER (WHERE held_out = 0) AS training,
+              count(*) FILTER (WHERE held_out = 0 AND provenance IN ({marks}))
+                AS designatable
+            FROM pair_labels WHERE {where}""",
+        tuple([*TEST_SET_PROVENANCES, *params]),
+    )[0]
+    return {
+        "track": track,
+        "total": int(row["held_out"]),
+        "by_verdict": {"TRUE": int(row["t"]), "FALSE": int(row["f"])},
+        "training": int(row["training"]),
+        "designatable": int(row["designatable"]),
+    }
+
+
+def designate_test_set(db_path: str, n: int = 200, track: str | None = None) -> dict:
+    """Freeze up to *n* human labels as the test set, balanced TRUE and FALSE.
+
+    Two rules, both `roe_ui`'s and both earned.
+
+    * Never take more than half of either verdict's labels. Designating a test
+      set must never empty the training pool, which is what happened in `roe_ui`
+      when there were only a handful of labels and the old code took them all.
+    * Newest first, because the newest labels were made with the most context.
+
+    Additive: a second call tops the set up rather than replacing it, so the
+    frozen set only ever grows and a number already quoted stays quotable.
+    """
+    half = max(1, int(n) // 2)
+    marks = ", ".join("?" * len(TEST_SET_PROVENANCES))
+    where = f"active = 1 AND held_out = 0 AND provenance IN ({marks})"
+    params: list = list(TEST_SET_PROVENANCES)
+    if track is not None:
+        where += " AND track = ?"
+        params.append(track)
+
+    chosen: list[int] = []
+    left = 0
+    for verdict in VERDICTS:
+        rows = query_db(
+            db_path,
+            f"""SELECT id FROM pair_labels
+                WHERE {where} AND upper(is_match) = ?
+                ORDER BY id DESC""",
+            tuple([*params, verdict]),
+        )
+        take = min(half, len(rows) // 2)
+        chosen.extend(row["id"] for row in rows[:take])
+        left += len(rows) - take
+
+    for label_id in chosen:
+        write_db(db_path, "UPDATE pair_labels SET held_out = 1 WHERE id = ?",
+                 (label_id,))
+    return {"designated": len(chosen), "left_for_training": left,
+            **test_set(db_path, track)}
+
+
 def new_decision_id() -> str:
     """A short id every label of one group decision shares."""
     return "d_" + uuid.uuid4().hex[:12]

@@ -35,6 +35,8 @@ import pandas as pd
 from app.pipeline.dedupe import label_overlay
 from app.pipeline.dedupe import units as units_module
 from app.pipeline.dedupe import score_eval
+from app.pipeline.dedupe import stage_3b_model
+from app.pipeline.dedupe.stage_3b_model import MODEL_SCORE_COLUMN
 from app.pipeline.dedupe.stage_0_load import EVENTS_FILENAME
 from app.pipeline.dedupe.stage_1_clean import RECORDS_FILENAME
 from app.pipeline.dedupe.stage_2_exact import EXACT_GROUPS_FILENAME
@@ -44,6 +46,8 @@ from app.rules import linkage
 logging.getLogger("splink").setLevel(logging.INFO)
 
 PAIRS_FILENAME = "pairs.parquet"
+# The units Splink saw, so a later recluster can say exactly which ones are new.
+SCORED_UNITS_FILENAME = "scored_units.parquet"
 BLOCKING_REPORT_FILENAME = "blocking_report.json"
 SCORE_EVAL_FILENAME = "score_eval.json"
 CONTRADICTIONS_FILENAME = "contradictions.json"
@@ -355,15 +359,43 @@ def bucket_of(scores, review: float, high: float) -> np.ndarray:
                     np.where(values >= review, "review", "reject"))
 
 
+def _model_buckets(pairs: pd.DataFrame, score_bucket: np.ndarray,
+                   model_lines: dict | None) -> tuple[np.ndarray, np.ndarray]:
+    """Replace the Splink bucket with the model's, for the tracks it decides.
+
+    ``model_lines`` is ``{track: (review, high)}`` for the graded models only
+    (``stage_3b_model.deciding_lines``). A track with no entry, a pair the model
+    never scored, and every track when no model is active all keep the Splink
+    bucket, so this does nothing unless a graded model really is in charge.
+    """
+    decided = np.full(len(pairs), False)
+    if not model_lines or MODEL_SCORE_COLUMN not in pairs.columns:
+        return np.asarray(score_bucket, dtype=object), decided
+    scores = pd.to_numeric(pairs[MODEL_SCORE_COLUMN], errors="coerce")
+    tracks = pairs["track"].to_numpy() if "track" in pairs.columns \
+        else np.full(len(pairs), None)
+    out = np.asarray(score_bucket, dtype=object)
+    for track, (review, high) in model_lines.items():
+        mask = (tracks == track) & scores.notna().to_numpy()
+        if not mask.any():
+            continue
+        out[mask] = bucket_of(scores[mask], review, high)
+        decided = decided | mask
+    return out, decided
+
+
 def apply_overlays(
     pairs: pd.DataFrame,
     units: pd.DataFrame,
     review: float,
     high: float,
+    model_lines: dict | None = None,
 ) -> pd.DataFrame:
     """Bucket the pairs and lay the imported labels on top.
 
-    The score decides first. Then, per LINKAGE.md:
+    The score decides first — Splink's, or a graded model's on the tracks
+    ``model_lines`` names (`MODEL.md`, stage 3b), which is where ``decided_by``
+    reads ``model`` rather than ``score``. Then, per LINKAGE.md:
 
       * two units carrying the same single existing id are accepted, with
         ``decided_by: "import"``;
@@ -389,10 +421,14 @@ def apply_overlays(
     agrees = (both & (left_id == right_id)).to_numpy()
     disagrees = (both & (left_id != right_id)).to_numpy()
 
-    score_bucket = bucket_of(pairs["match_probability"], review, high)
+    score_bucket, by_model = _model_buckets(
+        pairs, bucket_of(pairs["match_probability"], review, high), model_lines
+    )
     pairs["score_bucket"] = score_bucket
     pairs["bucket"] = np.where(agrees, "accept", score_bucket)
-    pairs["decided_by"] = np.where(agrees, "import", "score")
+    pairs["decided_by"] = np.where(
+        agrees, "import", np.where(by_model, stage_3b_model.DECIDED_BY_MODEL, "score")
+    )
     pairs["import_disagrees"] = disagrees
 
     left_held = pairs["unit_id_l"].map(lookup["held_group_id"])
@@ -420,7 +456,8 @@ def _priority_totals(pairs: pd.DataFrame, units: pd.DataFrame) -> pd.DataFrame:
 
 
 PAIR_HEAD = ["unit_id_l", "unit_id_r", "track", "match_probability", "match_weight",
-             "score_bucket", "bucket", "decided_by", "import_disagrees", "held_group_id"]
+             MODEL_SCORE_COLUMN, "score_bucket", "bucket", "decided_by",
+             "import_disagrees", "held_group_id"]
 
 
 def finalise_pairs(pairs: pd.DataFrame, units: pd.DataFrame) -> pd.DataFrame:
@@ -489,8 +526,95 @@ def _score_histogram(pairs: pd.DataFrame, track: str, review: float, high: float
 # ---------------------------------------------------------------------------
 
 
+def events_by_unit(events: pd.DataFrame | None,
+                   members: pd.DataFrame | None) -> pd.DataFrame | None:
+    """The evidence rows with a ``unit_id``, which is how a feature builder reads them.
+
+    ``events.parquet`` is keyed on ``record_id``, because a donation belongs to a
+    donor and not to whatever unit this run happens to pool them into.
+    """
+    if events is None or not len(events) or members is None or not len(members):
+        return None
+    joined = events.copy()
+    joined["record_id"] = joined["record_id"].astype(str)
+    keys = members[["record_id", "unit_id"]].copy()
+    keys["record_id"] = keys["record_id"].astype(str)
+    return joined.merge(keys, on="record_id", how="inner")
+
+
+def apply_active_models(
+    run_dir,
+    pairs: pd.DataFrame,
+    units: pd.DataFrame,
+    members: pd.DataFrame,
+    events: pd.DataFrame | None,
+    review: float,
+    high: float,
+    progress_callback=None,
+) -> tuple[pd.DataFrame, dict]:
+    """Stage 3b: score the pairs with each track's active model and re-bucket.
+
+    Returns the pairs and the state that was written. With no active model
+    nothing changes and the run's model state is cleared, so a run that was
+    scored by a model and then re-run without one does not keep claiming it.
+    """
+    models = stage_3b_model.active_models()
+    if not models or not len(pairs):
+        stage_3b_model.clear_state(run_dir)
+        return pairs, stage_3b_model.read_state(run_dir)
+
+    review_before = int((pairs["bucket"] == "review").sum())
+    _step(f"Scoring with the active model(s): "
+          + ", ".join(f"{t} v{m.version}" for t, m in models.items()) + "...",
+          progress_callback)
+    pairs, used = stage_3b_model.score_pairs(
+        pairs, units, models, events=events_by_unit(events, members),
+        profile=get_profile(),
+    )
+    lines = stage_3b_model.deciding_lines(used)
+    warning = None
+    if lines:
+        rebucketed = finalise_pairs(
+            apply_overlays(_strip_overlays(pairs), units, review, high,
+                           model_lines=lines), units
+        )
+        review_after = int((rebucketed["bucket"] == "review").sum())
+        warning = stage_3b_model.collapse_reason(
+            review_before, review_after, stage_3b_model.distinct_scores(rebucketed)
+        )
+        if warning is None:
+            pairs = rebucketed
+            _step(f"  buckets now follow the model ({review_after:,} in review)",
+                  progress_callback)
+        else:
+            lines = {}
+            _step(f"  WARNING: the model was not applied — {warning}. "
+                  "Buckets stay on the Splink score.", progress_callback)
+            if progress_callback:
+                progress_callback("warning", {"stage": 3, "message": warning})
+    elif used:
+        _step("  the model is not graded, so it re-orders the queue and decides "
+              "nothing", progress_callback)
+
+    state = stage_3b_model.write_state(
+        run_dir,
+        {t: m for t, m in used.items()} if warning is None else
+        {t: stage_3b_model.TrackModel(t, m.version, False, None, None)
+         for t, m in used.items()},
+        warning=warning, applied=bool(used),
+    )
+    return pairs, state
+
+
+def _strip_overlays(pairs: pd.DataFrame) -> pd.DataFrame:
+    """The pairs without the columns ``apply_overlays`` works out again."""
+    dropped = ("score_bucket", "bucket", "decided_by", "import_disagrees",
+               "held_group_id")
+    return pairs[[c for c in pairs.columns if c not in dropped]]
+
+
 def counts_from(units: pd.DataFrame, pairs: pd.DataFrame, evaluation: dict,
-                outcome: dict | None = None) -> dict:
+                outcome: dict | None = None, run_dir=None) -> dict:
     """The run counts stage 3 contributes, in the pipeline's snake_case.
 
     The bucket counts are the ones a reviewer sees, so they carry the human
@@ -498,6 +622,9 @@ def counts_from(units: pd.DataFrame, pairs: pd.DataFrame, evaluation: dict,
     evaluation has already laid the decisions on top of it.
     """
     with_human = evaluation.get("with_human") or {}
+    mine = (outcome or {}).get("mine")
+    verdicts = mine["is_match"].astype(str).str.upper() if mine is not None and len(mine) \
+        else pd.Series(dtype="object")
     buckets = with_human.get("by_bucket") or (
         pairs["bucket"].value_counts().to_dict() if len(pairs) else {}
     )
@@ -520,9 +647,10 @@ def counts_from(units: pd.DataFrame, pairs: pd.DataFrame, evaluation: dict,
         "labels_applied": int(len(applied)) if applied is not None else 0,
         "labels_satisfied": int(len(satisfied)) if satisfied is not None else 0,
         "labels_forced": int((outcome or {}).get("forced", 0)),
-        "labels_true": with_human.get("labels_true", 0),
-        "labels_false": with_human.get("labels_false", 0),
-        "labels_total": with_human.get("labels_applied", 0),
+        # Every active label about this run's records, whatever became of it.
+        "labels_true": int((verdicts == "TRUE").sum()),
+        "labels_false": int((verdicts == "FALSE").sum()),
+        "labels_total": int(len(verdicts)),
         "label_contradictions": len(contradictions),
         "entities_after_human": with_human.get("entities_after",
                                                evaluation["entities_after"]),
@@ -530,6 +658,10 @@ def counts_from(units: pd.DataFrame, pairs: pd.DataFrame, evaluation: dict,
                                                evaluation["pair_precision"]),
         "human_pair_recall": with_human.get("pair_recall", evaluation["pair_recall"]),
     }
+    if run_dir is not None:
+        # Which model decided this run, so the summary screen never has to guess
+        # whether it is reading Splink's numbers or a model's (MODEL_API.md).
+        counts.update(stage_3b_model.counts_from_state(run_dir))
     return counts
 
 
@@ -538,12 +670,108 @@ def counts_from(units: pd.DataFrame, pairs: pd.DataFrame, evaluation: dict,
 # ---------------------------------------------------------------------------
 
 
+def unit_fingerprint(units: pd.DataFrame) -> pd.DataFrame:
+    """``unit_id`` and ``unit_size`` — enough to tell one membership from another.
+
+    A unit's id is the smallest record in it, so two units with the same id and
+    the same size hold the same records: a merge adds members and changes the
+    size, a split removes them and changes it too. That makes the pair a
+    fingerprint without hashing a member list, which matters when there are 16
+    million of them.
+    """
+    return pd.DataFrame({
+        "unit_id": units["unit_id"].astype(str).to_numpy(),
+        "unit_size": units["unit_size"].astype("int64").to_numpy()
+        if "unit_size" in units.columns else 1,
+    })
+
+
+def write_scored_units(run_dir, units: pd.DataFrame) -> None:
+    """Record which units this scoring run compared."""
+    unit_fingerprint(units).to_parquet(
+        Path(run_dir) / SCORED_UNITS_FILENAME, index=False
+    )
+
+
+def never_scored(run_dir, units: pd.DataFrame) -> list[str]:
+    """The units that exist now and were not there when Splink last ran.
+
+    Not "units in no pair" — most units are in no pair in any run, because most
+    records have no candidate at all. These are the ones nothing has ever been
+    able to compare, so only a full rerun can score them.
+    """
+    path = Path(run_dir) / SCORED_UNITS_FILENAME
+    now = unit_fingerprint(units)
+    if not path.is_file():
+        return []
+    then = pd.read_parquet(path)
+    seen = set(zip(then["unit_id"].astype(str), then["unit_size"].astype("int64")))
+    fresh = [
+        unit_id for unit_id, size in zip(now["unit_id"], now["unit_size"])
+        if (unit_id, int(size)) not in seen
+    ]
+    return sorted(fresh)
+
+
+def repoint_pairs(pairs: pd.DataFrame, members: pd.DataFrame) -> pd.DataFrame:
+    """Move every pair onto the units that hold its records now.
+
+    A merge replaces several units with one. Their pairs with the outside world
+    are still evidence about the same records, so they follow the records rather
+    than being thrown away — otherwise merging a group would quietly lose every
+    candidate it had. Where two old pairs land on one new pair the better score
+    wins, and the row is marked ``rescored: false`` because Splink has not seen
+    this pairing.
+    """
+    if not len(pairs):
+        return pairs
+    lookup = pd.Series(
+        members["unit_id"].astype(str).to_numpy(),
+        index=members["record_id"].astype(str).to_numpy(),
+    )
+    lookup = lookup[~lookup.index.duplicated(keep="first")]
+    # A pair's unit id is the smallest record in that unit, so the record of the
+    # old id says where the pair belongs now.
+    moved = pairs.copy()
+    left = moved["unit_id_l"].astype(str)
+    right = moved["unit_id_r"].astype(str)
+    new_left = left.map(lookup).fillna(left)
+    new_right = right.map(lookup).fillna(right)
+    changed = (new_left != left) | (new_right != right)
+    lower = np.where(new_left <= new_right, new_left, new_right)
+    upper = np.where(new_left <= new_right, new_right, new_left)
+    moved["unit_id_l"] = lower
+    moved["unit_id_r"] = upper
+    moved["rescored"] = ~changed.to_numpy()
+    # A pair whose two sides are now one unit has been answered by the merge.
+    moved = moved[moved["unit_id_l"] != moved["unit_id_r"]]
+    if not len(moved):
+        return moved
+    # A new pair is only a scored one when nothing moved onto it: if any of the
+    # rows that landed here came from a unit that has since been merged, Splink
+    # has never compared this pairing.
+    fresh = moved.groupby(["unit_id_l", "unit_id_r"], sort=False)["rescored"].transform("all")
+    moved["rescored"] = fresh
+    moved = moved.sort_values("match_probability", ascending=False, kind="mergesort")
+    return moved.drop_duplicates(subset=["unit_id_l", "unit_id_r"],
+                                 keep="first").reset_index(drop=True)
+
+
 def label_outcomes(labels, members: pd.DataFrame, groups: pd.DataFrame) -> dict:
-    """Sort the active labels into applied, satisfied and contradicted."""
+    """Sort the active labels into applied, satisfied and contradicted.
+
+    ``mine`` is every active label about two records this run holds, whatever
+    became of it. The counts are taken from that, so the library and the run
+    always agree: a label the exact keys had already satisfied is still a label
+    a reviewer wrote.
+    """
     if labels is None or not len(labels):
         empty = pd.DataFrame(columns=["unit_id_l", "unit_id_r", "is_match"])
-        return {"applied": empty, "satisfied": empty, "contradictions": []}
-    return label_overlay.outcomes(labels, members, groups)
+        return {"applied": empty, "satisfied": empty, "contradictions": [],
+                "mine": empty}
+    outcome = label_overlay.outcomes(labels, members, groups)
+    outcome["mine"] = label_overlay.in_this_run(labels, members)
+    return outcome
 
 
 def write_contradictions(run_dir: Path, contradictions: list[dict]) -> None:
@@ -614,6 +842,7 @@ def run_stage_3_score(
     units, members = units_module.build_units(records, groups, events)
     units.to_parquet(run_dir / units_module.UNITS_FILENAME, index=False)
     members.to_parquet(run_dir / units_module.UNIT_MEMBERS_FILENAME, index=False)
+    write_scored_units(run_dir, units)
     _step(f"  {len(units):,} units", progress_callback)
 
     _step(f"Checking the blocking budget (DuckDB capped at {memory_limit()})...",
@@ -670,6 +899,11 @@ def run_stage_3_score(
         pairs = pd.concat([pairs, forced], ignore_index=True)
         _step(f"  {len(forced):,} labelled pair(s) added that scoring never produced",
               progress_callback)
+
+    # Stage 3b: the track's own model, when one is active (docs/MODEL.md).
+    pairs, model_state = apply_active_models(
+        run_dir, pairs, units, members, events, review, high, progress_callback
+    )
     pairs.to_parquet(run_dir / PAIRS_FILENAME, index=False)
 
     write_contradictions(run_dir, outcome["contradictions"])
@@ -679,13 +913,16 @@ def run_stage_3_score(
 
     _step("Evaluating the accepted pairs against the existing labels...",
           progress_callback)
-    evaluation = score_eval.evaluate(records, groups, units, members, pairs,
-                                     thresholds={"candidate": candidate,
-                                                 "review": review, "high": high},
-                                     applied=outcome["applied"])
+    evaluation = score_eval.evaluate(
+        records, groups, units, members, pairs,
+        thresholds={"candidate": candidate, "review": review, "high": high},
+        applied=outcome["applied"],
+        model_lines=stage_3b_model.deciding_lines(
+            stage_3b_model.models_from_state(run_dir)),
+    )
     _write_evaluation(run_dir, evaluation)
 
-    counts = counts_from(units, pairs, evaluation, outcome)
+    counts = counts_from(units, pairs, evaluation, outcome, run_dir=run_dir)
     elapsed = time.time() - t_start
     precision = evaluation["pair_precision"]
     _step(
@@ -723,11 +960,11 @@ def rebucket(
     groups = pd.read_parquet(run_dir / EXACT_GROUPS_FILENAME)
     pairs = pd.read_parquet(run_dir / PAIRS_FILENAME)
 
-    keep = [c for c in pairs.columns
-            if c not in ("score_bucket", "bucket", "decided_by",
-                         "import_disagrees", "held_group_id")]
-    pairs = apply_overlays(pairs[keep], units, float(threshold_review),
-                           float(threshold_high))
+    # A threshold move must not un-apply the model: the lines being moved are
+    # Splink's, and a graded model keeps deciding whichever tracks it decided.
+    lines = stage_3b_model.deciding_lines(stage_3b_model.models_from_state(run_dir))
+    pairs = apply_overlays(_strip_overlays(pairs), units, float(threshold_review),
+                           float(threshold_high), model_lines=lines)
     pairs = finalise_pairs(pairs, units)
     pairs.to_parquet(run_dir / PAIRS_FILENAME, index=False)
     outcome = label_outcomes(labels, members, groups)
@@ -744,10 +981,10 @@ def rebucket(
         records, groups, units, members, pairs,
         thresholds={"candidate": candidate, "review": float(threshold_review),
                     "high": float(threshold_high)},
-        applied=outcome["applied"],
+        applied=outcome["applied"], model_lines=lines,
     )
     _write_evaluation(run_dir, evaluation)
-    return counts_from(units, pairs, evaluation, outcome)
+    return counts_from(units, pairs, evaluation, outcome, run_dir=run_dir)
 
 
 def refresh_after_labels(run_dir: str, labels: pd.DataFrame | None) -> dict:
@@ -777,9 +1014,11 @@ def refresh_after_labels(run_dir: str, labels: pd.DataFrame | None) -> dict:
         records, groups, units, members, pairs,
         thresholds={"candidate": candidate, "review": review, "high": high},
         applied=outcome["applied"],
+        model_lines=stage_3b_model.deciding_lines(
+            stage_3b_model.models_from_state(run_dir)),
     )
     _write_evaluation(run_dir, evaluation)
-    return counts_from(units, pairs, evaluation, outcome)
+    return counts_from(units, pairs, evaluation, outcome, run_dir=run_dir)
 
 
 def _write_evaluation(run_dir: Path, evaluation: dict) -> None:

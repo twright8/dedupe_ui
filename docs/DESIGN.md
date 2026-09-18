@@ -79,6 +79,8 @@ The export carries the standard status and the standard ID, each with how it was
 
 **D13a. Evidence the reviewers use for individuals** (added 2026-09-18, from Tom). Beyond the name, the team judges two things by hand. (1) The size pattern of donations, for example a donor who always gives £10,000. This becomes a GBT feature family: typical single donation, shared exact amounts, share of round amounts, and distance between the two amount distributions. The review screen also shows each side's donation history, so the reviewer sees the same evidence. (2) Public reporting, for example a journalist confirming that one person gave to several parties. This cannot be computed. A label therefore carries notes and a source link, so the evidence is recorded with the decision.
 
+**D13c. What reviewers check, by kind of donor** (added 2026-09-18, from Steve Goodrich via Tom). Individuals: recipient, local unit, amount, date accepted, donation type. Public funds: nature of donation, amount, date accepted. Companies, LLPs, friendly societies and building societies: registration number, postcode, amount, date accepted. Trade unions: donor status and name are enough. Unincorporated associations, trusts and other: postcode, amount, date accepted. Three consequences. (1) The profile declares an `evidence_focus` per kind of donor, and the review and cluster screens show those fields side by side at the top of a pair. (2) A match key may carry a condition, so a key can apply to one kind of record only. Donations gains a default key for trade unions on standard status plus cleaned name, kept only if it holds precision against the existing labels. (3) The model gains the overlap in nature of donation, and the kind of donor as a category, so it can learn that a name settles a trade union but not a company.
+
 **D13b. Evidence rows.** A profile may supply child rows for each record, shown when a pair or group is opened. Donations: the individual donations (date, amount, recipient, local unit, type). PSC: the companies a person controls, with dates. Feature builders may read them.
 
 Known limit: the existing donations labels were made almost entirely on the name. Reviewers merged 99.6% of identical-name pairs of individuals, even across different parties. The labels therefore cannot show when two people with the same name are different. New "keep apart" labels from the UI are the fix. Context features (party, local unit, year gap, title and middle-initial conflict) are built in, and their value will show once such labels exist.
@@ -130,6 +132,27 @@ Each slice ends with something Tom can check in the browser.
 | 7 | Staging on the server, then the cutover with the chooser page | All tools on port 8000 |
 | 8 | PSC profile: bulk loader, person track, scale guards | A full PSC person run completes |
 | 9 | PSC organisation track | Placeholder numbers no longer merge silently |
+
+## Progress (updated 2026-09-18)
+
+| # | Slice | State |
+|---|---|---|
+| 1 | Profiles, base path, donations loader, Records tab | done, commit `d75e3ec` |
+| 2 | Rules: tracks, cleaning, tables, match keys with guards, exact groups | done, `a2e42fb` |
+| 2+ | Derived columns (status standardisation), conditional match keys, trade union key, evidence focus | done, `e02ee3f` and the slice 5 commit |
+| 3 | Scoring per track, symmetric labels, review cockpit, evidence rows | done, `3958c25` |
+| 4 | Clusters and gate, registry, group decisions, publish, export | done, `66f9dfd` |
+| 5 | GBT per track, cold start, explanations, model panel, "most useful to label" | built, in final checks |
+| 6 | Organisation track for donations | folded into slices 2 to 5: both tracks were built together |
+| 7 | Staging on the server, then the cutover with the chooser page | not started. Tom runs every command that changes the server |
+| 8 | PSC profile: bulk loader, person track, scale guards | not started. The full snapshot is still downloading |
+| 9 | PSC organisation track | not started |
+
+Contracts live beside this file: `RULESET.md`, `LINKAGE.md`, `PAIRS_API.md`, `ENTITIES.md`, `ENTITIES_API.md`, `MODEL.md`, `MODEL_API.md`.
+
+How to run it locally: `cd backend && PROFILE=donations BASE_PATH=/donations DATA_DIR=data SITE_PASSWORD=devpass SECRET_KEY=dev-only-fixed-key .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8100`, then open `http://127.0.0.1:8100/donations/`. Build the frontend first with `cd frontend && npm run build`. Tests: `cd backend && SITE_PASSWORD=testpass123 .venv/bin/python -m pytest tests -q`.
+
+Known follow-ups: tune Splink for organisations (a shared postcode now carries too much weight, precision 97.0%); the person track needs human "keep apart" labels before the model can be graded; six earlier groups join a person with an organisation and forced cross-track merges are not built; `build_units` is 3.4 s per 52,000 records and should be measured again on PSC data; the legacy `roe_ui` pipeline modules (`stage_0_preprocess.py`, `stage_1_exact_match.py`, `stage_2_probabilistic_link.py`, `stage_3_evaluate.py`, `gbt_*.py`, the old `labels` table and its services) are unreachable from a dedupe run and can be deleted once nothing imports them.
 
 ## Open items
 

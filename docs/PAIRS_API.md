@@ -43,16 +43,23 @@ strings so the smaller is always on the left. URL-encode the bar as `%7C`.
 |---|---|---|
 | `track` | `person`, `organisation` | every track |
 | `bucket` | `accept`, `review`, `reject` | every bucket |
-| `decided_by` | `score`, `import`, `human` | every one |
+| `decided_by` | `score`, `model`, `import`, `human` | every one |
 | `import` | `agrees`, `disagrees`, `unknown` | every one |
 | `labelled` | `yes`, `no` | both shown |
 | `held` | `hide`, `only` | both shown |
 | `min_score`, `max_score` | 0 to 1, inclusive | no limit |
+| `min_gbt`, `max_gbt` | 0 to 1, inclusive | no limit |
 | `q` | case-insensitive substring of either side's name or unit id | none |
-| `sort` | `score`, `priority`, `name` | `score` |
+| `sort` | `score`, `priority`, `name`, `useful` | `score` |
 | `order` | `asc`, `desc` | `desc` |
 | `offset` | 0 or more | 0 |
 | `limit` | 1 to 500 | 50 |
+
+`model`, `min_gbt`, `max_gbt`, `sort=useful` and the `gbt_score` field on every
+item belong to the GBT (`docs/MODEL.md`). They are set out in
+`docs/MODEL_API.md`, which is the contract for them; on a run no model has
+scored, `gbt_score` is `null`, the two `gbt` filters are ignored, and
+`sort=useful` falls back to the Splink score.
 
 `import` is the two units' imported entity ids compared: `agrees` when both
 carry the same single old id, `disagrees` when both carry ids and they differ,
@@ -194,8 +201,9 @@ Field notes:
 - `bucket` is what the pair ends up as, after the overlays. `score_bucket` is
   what the score alone made of it. They differ when the imported labels or a
   human decided the pair, and the difference is worth showing.
-- `decided_by` is `score`, `import` or `human`. A human decision always wins,
-  then the import overlay, then the score.
+- `decided_by` is `score`, `model`, `import` or `human`. A human decision always
+  wins, then the import overlay, then the score — `model` in place of `score`
+  where a graded GBT is what set the bucket (`docs/MODEL_API.md`).
 - `label` is the active human decision on this pair, or `null`:
   `{is_match, reviewer, created_at, notes, evidence_url, provenance, held_out}`.
   `is_match` is `"TRUE"` or `"FALSE"`; `held_out` is `0` (Teaches — the model
@@ -329,6 +337,10 @@ is **404** with `{"detail": "No pair '9|99' in this run"}`.
 
 `track` is optional and `bins` defaults to 50 (maximum 200). Every series has
 one entry per bin, in order; `edges` has `bins + 1` entries.
+
+On a run a model has scored, the response also carries `score_column`,
+`by_score_column` (the same series over `gbt_score`) and the six `model*` keys.
+`docs/MODEL_API.md` sets those out.
 
 Real response for `?track=person&bins=10`:
 
@@ -723,6 +735,35 @@ so a screen can lay out an evidence table before it has opened a pair. It is
 `event_columns` to a group's members, in the same shape: the rows for every
 member record, newest first, capped at 200, with `events_truncated`. Without
 `events=1` the response is unchanged, because the group list does not need them.
+
+## Evidence focus
+
+`GET /api/profile` also carries `evidence_focus`: what a reviewer actually
+checks, by kind of record (D13c). It is `[]` for a profile that judges every
+record the same way.
+
+```json
+{ "id": "individual", "label": "Individual",
+  "when": [ { "column": "donor_status_std", "op": "in", "values": ["Individual"] } ],
+  "record_columns": ["name"],
+  "event_columns": ["recipient", "unit", "value", "date", "donation_type"] }
+```
+
+The entries are tried in order and the first whose conditions all hold decides
+the focus, exactly as a track rule does. The last entry has an empty `when` and
+catches everything else. Two entries may share an `id`: donations tests the
+standardised donor status first and the raw one second, which is one focus
+reached two ways.
+
+`record_columns` name `display_columns` keys and `event_columns` name
+`event_columns` keys, so a screen can show those fields at the top of a pair, a
+cluster or an exact group without knowing anything about donations.
+
+The conditions use only `equals`, `in`, `is_null`, `not_null` and `starts_with`
+— the subset a browser can evaluate in a line of JavaScript — because the
+review screen picks the focus for each side itself. Anything server-side that
+needs the same answer calls `Profile.evidence_focus_for(row)`, which is the one
+implementation of the rule.
 
 ## Run counts the score stage adds
 

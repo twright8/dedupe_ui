@@ -150,6 +150,41 @@ function ConditionRow({ cond, onChange, onRemove, columns, tokenLists, canRemove
   );
 }
 
+/* The "when all of these hold" block on its own, so a match key's condition can
+   use the very same builder as a track rule or a derived-column rule. */
+export function ConditionList({ conditions, onChange, columns, tokenLists, emptyNote, max = MAX_CONDITIONS }) {
+  const list = Array.isArray(conditions) ? conditions : [];
+  return (
+    <>
+      {list.map((c, ci) => (
+        <ConditionRow
+          key={ci}
+          cond={c}
+          columns={columns}
+          tokenLists={tokenLists}
+          canRemove={list.length > 1 || !!emptyNote}
+          onChange={(cond) => onChange(list.map((x, cj) => (cj === ci ? cond : x)))}
+          onRemove={() => onChange(list.filter((_, cj) => cj !== ci))}
+        />
+      ))}
+      {list.length === 0 && emptyNote && (
+        <div className="muted" style={{ fontSize: 11.5, marginBottom: 6 }}>
+          {emptyNote}
+        </div>
+      )}
+      {list.length < max && (
+        <button
+          className="btn sm ghost"
+          onClick={() => onChange([...list, blankCondition(columns)])}
+        >
+          <Icons.plus size={12} />
+          Add condition
+        </button>
+      )}
+    </>
+  );
+}
+
 /**
  * @param rules        the ordered list
  * @param editRules    (list => list) => void
@@ -254,30 +289,12 @@ export default function RuleList({
                     <div className="eyebrow" style={{ marginBottom: 6 }}>
                       When all of these hold
                     </div>
-                    {conditions.map((c, ci) => (
-                      <ConditionRow
-                        key={ci}
-                        cond={c}
-                        columns={columns}
-                        tokenLists={tokenLists}
-                        canRemove={conditions.length > 1}
-                        onChange={(cond) => updateCondition(i, ci, cond)}
-                        onRemove={() =>
-                          updateRule(i, { when: conditions.filter((_, cj) => cj !== ci) })
-                        }
-                      />
-                    ))}
-                    {conditions.length < MAX_CONDITIONS && (
-                      <button
-                        className="btn sm ghost"
-                        onClick={() =>
-                          updateRule(i, { when: [...conditions, blankCondition(columns)] })
-                        }
-                      >
-                        <Icons.plus size={12} />
-                        Add condition
-                      </button>
-                    )}
+                    <ConditionList
+                      conditions={conditions}
+                      columns={columns}
+                      tokenLists={tokenLists}
+                      onChange={(when) => updateRule(i, { when })}
+                    />
                   </td>
                   <td style={{ verticalAlign: "top", paddingTop: 9 }}>
                     {renderResult(r, (patch) => updateRule(i, patch))}

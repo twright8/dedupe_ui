@@ -7,7 +7,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from app.profiles.base import DEFAULT_TRACKS, DisplayColumn, InputSpec, Profile
+from app.profiles import donations_features
+from app.profiles.base import (
+    DEFAULT_TRACKS,
+    DisplayColumn,
+    EvidenceFocus,
+    InputSpec,
+    Profile,
+)
 
 # Columns build_records produces, in frame order. The ruleset may read these and
 # may not overwrite them.
@@ -32,6 +39,52 @@ EVENT_COLUMNS = [
     ("reporting_period", "Reporting period", "text"),
     ("ec_ref", "EC reference", "text"),
 ]
+
+# What the team actually checks, by kind of donor (D13c, from Steve Goodrich).
+#   id, label, the statuses it covers, record columns, event columns
+_FOCUS_KINDS = [
+    # An individual is settled by who they gave to, from where, how much and when.
+    ("individual", "Individual", ["Individual"],
+     ["name"], ["recipient", "unit", "value", "date", "donation_type"]),
+    # A public fund is settled by what the money was for.
+    ("public_fund", "Public fund", ["Public Fund"],
+     ["name"], ["nature", "value", "date"]),
+    # An incorporated body has a registration number, which settles it outright.
+    ("incorporated", "Company, LLP or society",
+     ["Company", "Limited Liability Partnership", "Friendly Society", "Building Society"],
+     ["company_number", "postcode", "name"], ["value", "date"]),
+    # A trade union needs no donation history: status and name are enough.
+    ("trade_union", "Trade union", ["Trade Union"], ["donor_status", "name"], []),
+]
+
+
+def _evidence_focus() -> list[EvidenceFocus]:
+    """The focuses in order: standardised status first, raw status as a fallback.
+
+    Stage 1 copies the raw status into ``donor_status_std`` wherever no rule
+    changed it, so the first pass catches almost everything. The raw pass is for
+    a unit from a run made before the derived column existed, which carries no
+    standardised status at all. The two share an id, because they are the same
+    focus reached two ways.
+    """
+    focuses = []
+    for column in ("donor_status_std", "donor_status"):
+        for focus_id, label, statuses, record_columns, event_columns in _FOCUS_KINDS:
+            focuses.append(EvidenceFocus(
+                id=focus_id, label=label,
+                when=[{"column": column, "op": "in", "values": list(statuses)}],
+                record_columns=list(record_columns),
+                event_columns=list(event_columns),
+            ))
+    # Everything else — associations, trusts, other — comes down to the address.
+    focuses.append(EvidenceFocus(
+        id="other", label="Association, trust or other", when=[],
+        record_columns=["postcode", "name"], event_columns=["value", "date"],
+    ))
+    return focuses
+
+
+EVIDENCE_FOCUS = _evidence_focus()
 
 # Reviewers judge a donor partly on the size pattern of their giving (D13a), so
 # the amount profile is worked out once per record and again per unit.
@@ -512,6 +565,19 @@ class DonationsProfile(Profile):
             raw_columns=list(RAW_COLUMNS),
             event_columns=[DisplayColumn(*c) for c in EVENT_COLUMNS],
             consensus_columns=["donor_status_std"],
+            evidence_focus=list(EVIDENCE_FOCUS),
+            references=list(donations_features.REFERENCES),
+        )
+
+    # -- the model's features (docs/MODEL.md) --------------------------------
+
+    def pair_feature_metadata(self, track: str) -> list:
+        return donations_features.metadata(track)
+
+    def build_pair_features(self, pairs, units, events=None, references=None,
+                            track: str = "person"):
+        return donations_features.build(
+            pairs, units, events=events, references=references, track=track
         )
 
     # -- entity ids (D15) ----------------------------------------------------

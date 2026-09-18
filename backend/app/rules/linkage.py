@@ -330,4 +330,11 @@ def validate_linkage_settings(settings, ruleset: dict, raw_columns) -> list[dict
             _error(errors, "linkage_settings.probability_two_random_records_match",
                    "probability_two_random_records_match must be null or between 0 and 1")
 
+    # The GBT's own numbers sit under a `model` key beside the Splink ones
+    # (docs/MODEL.md). Every one has a default, so a config version with no such
+    # key is valid; a key with a bad value in it is not.
+    from app.model import settings as model_settings
+
+    errors.extend(model_settings.validate(settings))
+
     return errors

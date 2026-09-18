@@ -245,33 +245,39 @@ export const api = {
     return post("/api/labels/import", { csv: csvText });
   },
 
-  // --- Model (GBT) ---
-  modelStatus() {
-    return get("/api/model");
+  // --- Model (GBT), one per track ---
+  getModel(track) {
+    return get(`/api/model/${track}`);
   },
-  trainModel(runId) {
-    return post("/api/model/train", { run_id: runId });
+  getModelVersion(track, n) {
+    return get(`/api/model/${track}/versions/${n}`);
   },
-  applyModel(runId) {
-    return post("/api/model/apply", { run_id: runId });
+  getModelFeatures(track) {
+    return get(`/api/model/${track}/features`);
   },
-  activeBatch(runId, n) {
-    return post("/api/model/active-batch", { run_id: runId, n: n || 50 });
+  trainModel(track, body) {
+    return post(`/api/model/${track}/train`, body);
   },
-  importLabels(runId, results) {
-    return post("/api/model/import-labels", { run_id: runId, results });
+  getTrainJob(track, jobId) {
+    return get(`/api/model/${track}/train/${jobId}`);
   },
-  importModelLabelsCsv(runId, csvText) {
-    return post("/api/model/import-labels-csv", { run_id: runId, csv: csvText });
+  activateModel(track, body) {
+    return post(`/api/model/${track}/activate`, body || {});
   },
-  explainPair(runId, pair) {
-    return post("/api/model/explain", { run_id: runId, ...pair });
+  deactivateModel(track) {
+    return post(`/api/model/${track}/deactivate`);
   },
-  evalSetStatus() {
-    return get("/api/model/eval-set");
+  applyModelToRun(id, body) {
+    return post(`/api/runs/${id}/apply-model`, body || { force: false });
   },
-  designateEvalSet(n) {
-    return post("/api/model/eval-set/designate", { n: n || 200 });
+  revertModelOnRun(id) {
+    return post(`/api/runs/${id}/revert-model`);
+  },
+  getTestSet(track) {
+    return get(`/api/model/${track}/test-set`);
+  },
+  designateTestSet(track, n) {
+    return post(`/api/model/${track}/test-set/designate`, { n: n || 200 });
   },
 
   // --- Config ---

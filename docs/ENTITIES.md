@@ -107,3 +107,22 @@ Profile hook `export(run, scope) -> file`. Donations: the original input sheet, 
 ## Run counts
 
 `hasEntities`, `reviewQueue`, `idCollisions`, `publishedAt`, `clustersTotal`, `clustersWithheld`, `clustersByStatus` (object), `heldGroupsOpen`, `entitiesProposed`, `entitiesNew`, `entitiesKept`, `entitiesMerged`, `attributeTies`, `decisionsTotal`.
+
+## Reclustering after a decision
+
+Splink is not run again, so two questions have to be answered honestly.
+
+**Which units has nothing ever compared?** Stage 3 writes `scored_units.parquet`
+— each unit's id and size, which together fingerprint its membership, because a
+unit's id is its smallest record and any change of membership changes the size.
+A recluster calls a unit **unscored** when that pair is not in the file. It is
+not "a unit in no pair": most units are in no pair in any run, because most
+records have no candidate at all. Merging one held group of 66 units makes
+exactly one unscored unit, not 11,716.
+
+**What happens to the pairs of the units a merge replaced?** They follow their
+records onto whichever unit now holds them. A pair whose two sides end up in one
+unit is answered by the merge and goes; where two old pairs land on one new pair
+the better score survives. Any pair that moved is marked `rescored: false`,
+because Splink has not seen that pairing. Dropping them instead would mean a
+merge quietly lost every candidate its members had.

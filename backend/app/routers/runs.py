@@ -21,6 +21,7 @@ from app.services import exact_groups_reader
 from app.services import pairs_reader
 from app.services import pipeline_runner
 from app.services import records_reader
+from app.services import run_counts
 from app.services.audit_logger import log_event
 from app.services.label_applier import apply_labels as _apply_labels
 from app.services.match_reader import get_matches as _get_matches
@@ -387,6 +388,18 @@ def _normalize_counts(raw):
         "attributeTies": raw.get("attribute_ties", 0),
         "idCollisions": raw.get("id_collisions", 0),
         "publishedAt": raw.get("published_at"),
+        # Stage 3b — which model, if any, decided this run, and on what lines
+        # (docs/MODEL_API.md). The three per-track values are objects keyed by
+        # track. They are recorded on the run, so activating a newer version
+        # never changes what a finished run says it was decided by.
+        # `modelGraded` is true only when every track that scored is graded, so
+        # a half-graded run never reads as decided by the model.
+        "modelActive": bool(raw.get("model_active", False)),
+        "modelVersion": raw.get("model_version") or {},
+        "modelAcceptLine": raw.get("model_accept_line") or {},
+        "modelRejectLine": raw.get("model_reject_line") or {},
+        "modelGraded": bool(raw.get("model_graded", False)),
+        "modelWarning": raw.get("model_warning"),
         # Every count above defaults to 0, so a screen cannot tell "nothing yet"
         # from "zero" by value. These flags say which stages have run.
         "hasRecords": "records_total" in raw,
@@ -1107,7 +1120,7 @@ def get_pairs(
     run_id: str,
     track: str | None = Query(None, description="person | organisation"),
     bucket: str | None = Query(None, description="accept | review | reject"),
-    decided_by: str | None = Query(None, description="score | import | human"),
+    decided_by: str | None = Query(None, description="score | import | human | model"),
     import_state: str | None = Query(
         None, alias="import", description="agrees | disagrees | unknown"
     ),
@@ -1115,10 +1128,13 @@ def get_pairs(
     held: str | None = Query(None, description="hide | only"),
     min_score: float | None = Query(None, ge=0, le=1),
     max_score: float | None = Query(None, ge=0, le=1),
+    min_gbt: float | None = Query(None, ge=0, le=1),
+    max_gbt: float | None = Query(None, ge=0, le=1),
     q: str | None = Query(
         None, description="Case-insensitive substring over either side's name or unit id"
     ),
-    sort: str = Query(pairs_reader.DEFAULT_SORT, description="score | priority | name"),
+    sort: str = Query(pairs_reader.DEFAULT_SORT,
+                      description="score | priority | name | useful"),
     order: str = Query("desc", description="asc | desc"),
     offset: int = Query(0, ge=0),
     limit: int = Query(pairs_reader.DEFAULT_LIMIT, ge=1, le=pairs_reader.MAX_LIMIT),
@@ -1133,7 +1149,8 @@ def get_pairs(
         return pairs_reader.get_pairs(
             run_dir=run_dir, track=track, bucket=bucket, decided_by=decided_by,
             import_state=import_state, held=held, min_score=min_score,
-            max_score=max_score, q=q, sort=sort, order=order,
+            max_score=max_score, min_gbt=min_gbt, max_gbt=max_gbt,
+            q=q, sort=sort, order=order,
             offset=offset, limit=limit, labelled=labelled,
             labels=_run_labels(_db_path()),
         )
@@ -1185,18 +1202,10 @@ def _refresh_after_labels(db_path: str, run_dir: str, run_id: str) -> dict:
     are read. Only the derived numbers have to move.
     """
     from app.pipeline.dedupe.stage_3_score import refresh_after_labels
+    from app.services import run_counts
 
-    stored: dict = {}
-    rows = query_db(db_path, "SELECT counts_json FROM runs WHERE id = ?", (run_id,))
-    if rows and rows[0]["counts_json"]:
-        try:
-            stored = json.loads(rows[0]["counts_json"])
-        except (ValueError, TypeError):
-            stored = {}
-    counts = {**stored, **refresh_after_labels(run_dir, _run_labels(db_path))}
-    write_db(db_path, "UPDATE runs SET counts_json = ? WHERE id = ?",
-             (json.dumps(counts), run_id))
-    return counts
+    return run_counts.merge(db_path, run_id,
+                            refresh_after_labels(run_dir, _run_labels(db_path)))
 
 
 @router.post("/{run_id}/labels")
@@ -1307,6 +1316,76 @@ def delete_label(run_id: str, pair_id: str, user_name: str = Depends(current_use
         "decided_by": pair["decided_by"] if pair else None,
         "counts": _normalize_counts(counts),
     }
+
+
+class ApplyModelRequest(BaseModel):
+    force: bool = False
+
+
+@router.post("/{run_id}/apply-model")
+def apply_model(run_id: str, body: ApplyModelRequest | None = None,
+                user_name: str = Depends(current_user)):
+    """Score this run with each track's active model and re-bucket on it.
+
+    Splink is not re-run (`docs/MODEL.md`): the pairs it already produced are
+    read back, given a `gbt_score`, and re-bucketed where a graded model is in
+    charge. The overlays are unchanged — an imported agreement still accepts, a
+    human label still wins.
+    """
+    from app.services import model_apply
+
+    db_path = _db_path()
+    run_dir = _run_dir_or_404(run_id)
+    try:
+        result = model_apply.apply_model(run_dir, _run_labels(db_path),
+                                         force=bool(body and body.force),
+                                         db_path=db_path)
+    except model_apply.ModelApplyError as exc:
+        status = 409 if exc.detail.get("reason") else 400
+        log_event(db_path, user=user_name or "unknown", kind="model",
+                  description=f"Model not applied to run {run_id}: {exc}",
+                  metadata={"run_id": run_id, **exc.detail})
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    # Merged, never replaced: applying a model recomputes stage 3's keys and no
+    # others, and writing that partial dict back would blank the record, exact
+    # group and entity counts the run screen decides its tabs from.
+    merged = run_counts.merge(db_path, run_id, result["counts"])
+    log_event(
+        db_path, user=user_name or "unknown", kind="model",
+        description=f"Applied the model to run {run_id} ("
+                    + ", ".join(f"{t['track']} v{t['version']}"
+                                for t in result["tracks"]) + ")",
+        metadata={"run_id": run_id, "tracks": result["tracks"],
+                  "reclustered": result["reclustered"],
+                  "review_before": result["review_before"],
+                  "review_after": result["review_after"]},
+    )
+    return {"ok": True, "tracks": result["tracks"],
+            "counts": _normalize_counts(merged) or {},
+            "reclustered": result["reclustered"],
+            "review_before": result["review_before"],
+            "review_after": result["review_after"]}
+
+
+@router.post("/{run_id}/revert-model")
+def revert_model(run_id: str, user_name: str = Depends(current_user)):
+    """Take the model off this run and bucket on the Splink score again."""
+    from app.services import model_apply
+
+    db_path = _db_path()
+    run_dir = _run_dir_or_404(run_id)
+    try:
+        result = model_apply.revert_model(run_dir, _run_labels(db_path),
+                                          db_path=db_path)
+    except model_apply.ModelApplyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    merged = run_counts.merge(db_path, run_id, result["counts"])
+    log_event(db_path, user=user_name or "unknown", kind="model",
+              description=f"Reverted run {run_id} to the Splink score",
+              metadata={"run_id": run_id, "reclustered": result["reclustered"]})
+    return {"ok": True, "counts": _normalize_counts(merged) or {},
+            "reclustered": result["reclustered"]}
 
 
 @router.get("/{run_id}/contradictions")

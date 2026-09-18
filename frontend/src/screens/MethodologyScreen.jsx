@@ -271,13 +271,42 @@ export default function MethodologyScreen() {
               Two lines then sort every scored pair into three buckets. If the score is 0.92 or
               more, the pair is accepted without review. If the score is between 0.50 and 0.92, the
               pair goes to you. If the score is below 0.50, the pair is rejected. Both lines are
-              yours to move. Out come the scored pairs, which you read in the{" "}
-              <Click>Review queue</Click>.
+              yours to move. Out come the scored pairs. When a trained model is in use, stage 6
+              re-scores them and its score sets the buckets instead.
             </p>
           </Stage>
 
           <Stage
             n="6"
+            tone="var(--violet)"
+            kicker="The model"
+            title="A trained model re-scores the pairs"
+            tech="Diagnostics → Trained model"
+          >
+            <p>
+              In go the scored pairs. A model learns from the answers people have saved: your own
+              answers, the decisions taken on whole groups, and at a lower weight the earlier manual
+              grouping. Each track has its own model. Out comes a second score for every pair.
+            </p>
+            <p>
+              A model that has seen fewer than fifty of your answers is a cold start. It re-orders
+              the review queue so the pairs worth your time come first, and it decides nothing.
+            </p>
+            <p>
+              A model becomes graded once it has enough of your answers and a set of answers held
+              back for testing. Only then may it set the buckets, and its accept and reject lines
+              are worked out from that held-back set rather than chosen by hand.
+            </p>
+            <p>
+              The model can only learn from what it has been told. The earlier grouping was made
+              almost entirely on the name, so it cannot teach the model when two people with one
+              name are different people. Only new answers that say two records are not the same can
+              do that.
+            </p>
+          </Stage>
+
+          <Stage
+            n="7"
             tone="var(--ti-red)"
             kicker="Review"
             title="You answer the pairs the tool is unsure about"
@@ -305,7 +334,7 @@ export default function MethodologyScreen() {
           </Stage>
 
           <Stage
-            n="7"
+            n="8"
             tone="var(--violet)"
             kicker="Clusters"
             title="Join the accepted pairs into groups"
@@ -329,7 +358,7 @@ export default function MethodologyScreen() {
           </Stage>
 
           <Stage
-            n="8"
+            n="9"
             tone="var(--violet)"
             kicker="Entity IDs"
             title="Give each group one ID, then publish"
