@@ -43,9 +43,10 @@ strings so the smaller is always on the left. URL-encode the bar as `%7C`.
 |---|---|---|
 | `track` | `person`, `organisation` | every track |
 | `bucket` | `accept`, `review`, `reject` | every bucket |
-| `decided_by` | `score`, `model`, `import`, `human` | every one |
+| `decided_by` | `score`, `model`, `veto`, `import`, `human` | every one |
 | `import` | `agrees`, `disagrees`, `unknown` | every one |
 | `labelled` | `yes`, `no` | both shown |
+| `vetoed` | `yes`, `no` | both shown |
 | `held` | `hide`, `only` | both shown |
 | `min_score`, `max_score` | 0 to 1, inclusive | no limit |
 | `min_gbt`, `max_gbt` | 0 to 1, inclusive | no limit |
@@ -68,6 +69,12 @@ distinct old ids counts as having none.
 
 `labelled=yes` is the pairs a human has decided, which is the same set as
 `decided_by=human`. `labelled=no` is the rest — the work queue.
+
+`vetoed=yes` is the pairs a veto rule hit (`docs/RULESET.md`, "Vetoes"), which
+is **not** the same set as `decided_by=veto`: a vetoed pair the imported labels
+accept reads `decided_by: "import"` and is still `vetoed=yes`. On a run scored
+before vetoes existed, `vetoed=yes` is empty and `vetoed=no` is everything,
+which is the truth about it.
 
 `priority` sorts on the pair's summed priority columns (donations: the two
 units' total donated). `name` sorts on the left unit's name, and units with no
@@ -102,6 +109,9 @@ every column of `units.parquet`:
       "decided_by": "score",
       "import_disagrees": false,
       "import_agreement": "unknown",
+      "vetoed_by": null,
+      "veto_reason": null,
+      "veto_conflicts_import": false,
       "held_group_id": null,
       "left": {
         "unit_id": "104841",
@@ -183,7 +193,9 @@ every column of `units.parquet`:
     "labelled": 10,
     "unlabelled": 28833,
     "person": 25503,
-    "organisation": 3340
+    "organisation": 3340,
+    "vetoed": 293,
+    "veto_conflicts_import": 24
   },
   "columns": [
     { "key": "unit_id", "label": "unit_id", "type": "text", "source": "cleaning" },
@@ -199,11 +211,20 @@ Field notes:
 - `match_probability` is Splink's score, 0 to 1. `match_weight` is the same
   evidence in bits: 0 means even odds, and each point doubles them.
 - `bucket` is what the pair ends up as, after the overlays. `score_bucket` is
-  what the score alone made of it. They differ when the imported labels or a
-  human decided the pair, and the difference is worth showing.
-- `decided_by` is `score`, `model`, `import` or `human`. A human decision always
-  wins, then the import overlay, then the score — `model` in place of `score`
-  where a graded GBT is what set the bucket (`docs/MODEL_API.md`).
+  what the score alone made of it. They differ when a veto, the imported labels
+  or a human decided the pair, and the difference is worth showing.
+- `decided_by` is `score`, `model`, `veto`, `import` or `human`. A human decision
+  always wins, then the import overlay, then a veto, then the score — `model` in
+  place of `score` where a graded GBT is what set the bucket
+  (`docs/MODEL_API.md`).
+- `vetoed_by` is the id of the veto rule that hit this pair, or `null`, and
+  `veto_reason` is its reason with the two values filled in: "Born 1958 and
+  1995". **Show the reason on the review screen whenever it is set**, including
+  on a pair whose `decided_by` is `import` — that is the case the flag
+  `veto_conflicts_import` marks, where an earlier real grouping accepted a pair
+  a rule says is impossible, and it is the one a reviewer most needs to see.
+  These come off `pairs.parquet`: the vetoes are materialised at scoring time
+  and re-applied by every path that moves a bucket (`docs/LINKAGE.md`).
 - `label` is the active human decision on this pair, or `null`:
   `{is_match, reviewer, created_at, notes, evidence_url, provenance, held_out}`.
   `is_match` is `"TRUE"` or `"FALSE"`; `held_out` is `0` (Teaches — the model
@@ -247,6 +268,9 @@ repeated unit columns cut:
   "decided_by": "score",
   "import_disagrees": false,
   "import_agreement": "unknown",
+  "vetoed_by": null,
+  "veto_reason": null,
+  "veto_conflicts_import": false,
   "held_group_id": null,
   "left": {
     "unit_id": "104841",
@@ -333,6 +357,91 @@ repeated unit columns cut:
 A pair id with no bar in it is **400**. A well-formed id that is not in this run
 is **404** with `{"detail": "No pair '9|99' in this run"}`.
 
+`custom.NumericDifferenceAtThresholds` (`docs/LINKAGE.md`) reads here like any
+other comparison, because its levels carry their own words. On the PSC person
+track, where `dob_year_clean` has thresholds `[0, 1]`:
+
+```json
+[
+  { "column": "dob_year_clean", "gamma": 2.0, "label": "Equal dob_year_clean",
+    "match_weight": 3.02, "m_probability": 0.16463, "u_probability": 0.02026 },
+  { "column": "dob_year_clean", "gamma": 1.0, "label": "dob_year_clean within 1",
+    "match_weight": 0.22, "m_probability": 0.04716, "u_probability": 0.04051 },
+  { "column": "dob_year_clean", "gamma": 0.0, "label": "All other",
+    "match_weight": -0.25, "m_probability": 0.78821, "u_probability": 0.93923 },
+  { "column": "dob_year_clean", "gamma": -1.0, "label": "dob_year_clean is NULL",
+    "match_weight": null, "m_probability": null, "u_probability": null }
+]
+```
+
+## Vetoes
+
+A veto is a rule about a pair that stops the scorer accepting something a person
+never would. The rules are in the ruleset and the contract is the "Vetoes"
+section of `docs/RULESET.md`; this is the wire shape.
+
+The review screen needs two things from the list and detail responses above:
+`veto_reason`, shown wherever it is set, and `veto_conflicts_import`, which
+marks a pair an old grouping accepted and a rule says is impossible.
+
+### `POST /api/config/preview-vetoes`
+
+What the DRAFT vetoes would do to a run that has already been scored. Nothing is
+re-scored: the pairs and the two sides' values are read back and the rules are
+run over them.
+
+Body: `{"ruleset": {...}, "run_id": "psc_sample"}`. `ruleset` is optional and the
+saved one is used without it, exactly as `preview-keys` and `preview-derived` do.
+An invalid draft is **422** in the same shape as `POST /api/config`. A run with
+no `pairs.parquet` is **404**. A run with more than **1,000,000 scored pairs** is
+**400** — the same guard the other previews put on the record count, moved to the
+number that matters here:
+
+```json
+{ "detail": "This run has 1,141,832 scored pairs. The veto preview runs the rules in memory and is capped at 1,000,000; start the run to see the vetoes on a dataset this size." }
+```
+
+Only the columns the vetoes name are read out of `units.parquet`, so a
+63-column PSC units file costs three or four of them.
+
+```json
+{
+  "run_id": "run_2026_09_18a",
+  "pairs_total": 28843,
+  "vetoes": [
+    {
+      "id": "dv2",
+      "track": "organisation",
+      "description": "Two different company numbers, both present, are two companies.",
+      "action": "review",
+      "columns": ["company_number_clean"],
+      "pairs_hit": 293,
+      "accepted_pairs_hit": 139,
+      "examples": [
+        { "pair_id": "100547|101619",
+          "left_name": "Cairns Didge UK Limited",
+          "right_name": "CAIRNS DIDGE PROPERTY UK LTD",
+          "left_value": "04345773", "right_value": "05132672",
+          "score": 0.9897,
+          "reason": "Company numbers 04345773 and 05132672" }
+      ]
+    }
+  ]
+}
+```
+
+- `accepted_pairs_hit` is the number that matters: pairs the run would otherwise
+  have accepted, whether the score accepted them or the import overlay did. A
+  veto with a large `pairs_hit` and an `accepted_pairs_hit` of zero is only
+  catching pairs that were already rejected, and it is doing nothing.
+- `examples` leads with the accepted hits and falls back to the rest, up to five.
+  `left_value` and `right_value` are the two sides' values of the **first**
+  column the veto's conditions name — the same two the `{left}` and `{right}` in
+  `reason` are filled from. `score` is `null` on a pair the scorer never scored.
+- A veto nothing hits still appears, with zeroes and an empty `examples`, so the
+  Vetoes tab shows every rule rather than silently dropping the idle ones.
+- Every veto in the draft is reported, in document order, whatever its track.
+
 ## `GET /api/runs/{id}/pairs/histogram`
 
 `track` is optional and `bins` defaults to 50 (maximum 200). Every series has
@@ -378,6 +487,12 @@ rules against. Shape, with the real figures:
   "by_score_bucket": { "accept": 4102, "review": 21854, "reject": 2887 },
   "decided_by_import": 24808,
   "import_disagrees": 1164,
+  "vetoes": {
+    "vetoed": 293,
+    "vetoed_from_accept": 139,
+    "conflicts_import": 24,
+    "by_veto": { "dv2": { "pairs": 293, "from_accept": 139 } }
+  },
   "entities_after": 18744,
   "pair_precision": 0.969327,
   "pair_recall": 0.788848,
@@ -420,6 +535,20 @@ rules against. Shape, with the real figures:
     "pair_recall": 0.772776,
     "by_track": {}
   },
+  "without_vetoes": {
+    "entities_after": 18581,
+    "pair_precision": 0.948546,
+    "pair_recall": 0.820416,
+    "accepted_pairs": 27072,
+    "by_track": {},
+    "score_only": {
+      "entities_after": 19507,
+      "pair_precision": 0.965657,
+      "pair_recall": 0.781240,
+      "accepted_pairs": 4431,
+      "by_track": {}
+    }
+  },
   "with_human": {
     "entities_after": 18739,
     "pair_precision": 0.969325,
@@ -439,15 +568,22 @@ rules against. Shape, with the real figures:
 }
 ```
 
-Four sets of figures, all measured the same way, so a screen can show them side
+Five sets of figures, all measured the same way, so a screen can show them side
 by side:
 
 - the top level is the exact groups **plus every accepted pair**, which is the
-  score and the import overlay together;
+  score, the vetoes and the import overlay together;
 - `score_only` leaves out the pairs the import overlay accepted. Those were
   accepted because the two units already carry the same old entity id, so they
-  cannot be evidence that the scorer found anything. This is the honest number
-  for tuning;
+  cannot be evidence that the scorer found anything. A vetoed pair is not in it
+  either, because a vetoed pair is not accepted. This is the honest number for
+  tuning;
+- `without_vetoes` is the whole run as it would read with no veto in the
+  ruleset, carrying a `score_only` of its own. Reading the two side by side is
+  how "what did this veto cost in recall and buy in precision" is answered off
+  the file. On a run whose ruleset has no vetoes it equals the top level and
+  `score_only` exactly. `vetoes` beside it counts what the rules did, overall
+  and per track, with a `by_veto` breakdown;
 - `with_human` is the top level with the human decisions laid on top: TRUE
   labels joined up, FALSE labels pulled apart. It is what the run would publish
   today, and it equals the top level exactly while nobody has labelled anything;
@@ -849,6 +985,9 @@ implementation of the rule.
 | `pairsAccept`, `pairsReview`, `pairsReject` | final buckets |
 | `pairsDecidedByImport` | accepted because the old ids agree |
 | `pairsImportDisagrees` | flagged because the old ids differ |
+| `pairsVetoed` | pairs a veto rule hit, whatever bucket they were in |
+| `pairsVetoedFromAccept` | of those, the ones the run would otherwise have accepted — the number that says what a veto is worth |
+| `vetoConflictsImport` | vetoed pairs an imported label accepted anyway |
 | `entitiesAfterScore` | components over units once the accepts are joined up |
 | `scorePairPrecision`, `scorePairRecall` | exact groups plus accepted pairs, or `null` |
 | `labelsTotal`, `labelsTrue`, `labelsFalse` | active human labels this run could apply |

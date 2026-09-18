@@ -27,7 +27,7 @@ from app.pipeline.dedupe.stage_2_exact import EXACT_GROUPS_FILENAME
 from app.pipeline.dedupe.stage_0_load import EVENTS_FILENAME
 from app.pipeline.dedupe.stage_3_score import (
     PAIRS_FILENAME, _strip_overlays, _write_evaluation, apply_overlays,
-    counts_from, events_by_unit, finalise_pairs, label_outcomes,
+    counts_from, events_by_unit, finalise_pairs, label_outcomes, run_ruleset,
     write_contradictions,
 )
 from app.profiles import get_profile
@@ -166,9 +166,11 @@ def apply_model(run_dir, labels: pd.DataFrame | None = None,
         )
 
     lines = stage_3b_model.deciding_lines(used)
+    # The vetoes are re-applied here: a model decides a bucket, and a veto
+    # overrides the model exactly as it overrides Splink (RULESET.md, Vetoes).
     pairs = finalise_pairs(
         apply_overlays(_strip_overlays(pairs), data["units"], review, high,
-                       model_lines=lines),
+                       model_lines=lines, ruleset=run_ruleset(run_dir)),
         data["units"],
     )
     review_after = int((pairs["bucket"] == "review").sum())
@@ -227,7 +229,8 @@ def revert_model(run_dir, labels: pd.DataFrame | None = None,
     if stage_3b_model.MODEL_SCORE_COLUMN in pairs.columns:
         pairs = pairs.drop(columns=[stage_3b_model.MODEL_SCORE_COLUMN])
     pairs = finalise_pairs(
-        apply_overlays(_strip_overlays(pairs), data["units"], review, high),
+        apply_overlays(_strip_overlays(pairs), data["units"], review, high,
+                       ruleset=run_ruleset(run_dir)),
         data["units"],
     )
     stage_3b_model.clear_state(run_dir)

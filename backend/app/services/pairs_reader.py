@@ -43,11 +43,12 @@ MAX_BINS = 200
 TRACKS = ("person", "organisation")
 BUCKETS = ("accept", "review", "reject")
 # `model` joins the three when a graded model is what put the pair in its bucket
-# (docs/MODEL.md, stage 3b).
-DECIDED_BY = ("score", "import", "human", "model")
+# (docs/MODEL.md, stage 3b), and `veto` when a pair rule did (RULESET.md).
+DECIDED_BY = ("score", "import", "human", "model", "veto")
 IMPORT_STATES = ("agrees", "disagrees", "unknown")
 HELD_STATES = ("hide", "only")
 LABELLED_STATES = ("yes", "no")
+VETOED_STATES = ("yes", "no")
 SORTS = ("score", "priority", "name", "useful")
 
 PAIR_ID_SEPARATOR = "|"
@@ -293,6 +294,11 @@ def _item(row: dict, priority: list[str], gammas: list[str]) -> dict:
         "decided_by": row.get("decided_by"),
         "import_disagrees": bool(row.get("import_disagrees")),
         "import_agreement": row.get("import_agreement"),
+        # A veto is materialised into pairs.parquet at scoring time, so these
+        # come straight off the row (docs/RULESET.md, "Vetoes").
+        "vetoed_by": _json_safe(row.get("vetoed_by")),
+        "veto_reason": _json_safe(row.get("veto_reason")),
+        "veto_conflicts_import": bool(row.get("veto_conflicts_import")),
         "held_group_id": _json_safe(row.get("held_group_id")),
         "left": _json_safe(row.get("left_unit") or {}),
         "right": _json_safe(row.get("right_unit") or {}),
@@ -337,6 +343,7 @@ def _rows(cursor) -> list[dict]:
 def _filters(
     track, bucket, decided_by, import_state, held, min_score, max_score, q,
     labelled=None, min_gbt=None, max_gbt=None, has_model=False,
+    vetoed=None, has_veto=False,
 ) -> tuple[list[str], list]:
     where: list[str] = []
     params: list = []
@@ -356,6 +363,13 @@ def _filters(
         where.append("label_is_match IS NOT NULL")
     elif labelled == "no":
         where.append("label_is_match IS NULL")
+    # A run scored before vetoes existed has no such column. Asking for the
+    # vetoed pairs of one is an empty list, and asking for the rest is all of
+    # them — which is the truth, not a missing feature.
+    if vetoed == "yes":
+        where.append("vetoed_by IS NOT NULL" if has_veto else "FALSE")
+    elif vetoed == "no" and has_veto:
+        where.append("vetoed_by IS NULL")
     if held == "hide":
         where.append("held_group_id IS NULL")
     elif held == "only":
@@ -403,6 +417,7 @@ def get_pairs(
     labels=None,
     min_gbt: float | None = None,
     max_gbt: float | None = None,
+    vetoed: str | None = None,
 ) -> dict:
     """One page of a run's scored pairs, both units on every row.
 
@@ -419,6 +434,7 @@ def get_pairs(
     _check(import_state, IMPORT_STATES, "import")
     _check(held, HELD_STATES, "held")
     _check(labelled, LABELLED_STATES, "labelled")
+    _check(vetoed, VETOED_STATES, "vetoed")
     sort_key = sort or DEFAULT_SORT
     if sort_key not in SORTS:
         raise InvalidQuery(f"sort must be one of {', '.join(SORTS)}")
@@ -436,15 +452,19 @@ def get_pairs(
         priority = _priority_columns(pair_columns)
         gammas = _gamma_columns(pair_columns)
         has_model = MODEL_SCORE_COLUMN in pair_columns
+        has_veto = "vetoed_by" in pair_columns
         with_labels, label_params = _prepare_labels(con, run_dir, labels)
         base = _base_sql(unit_columns, with_labels)
         base_params = [str(pairs), str(units), *label_params]
 
         where, params = _filters(track, bucket, decided_by, import_state, held,
                                  min_score, max_score, q, labelled,
-                                 min_gbt, max_gbt, has_model)
+                                 min_gbt, max_gbt, has_model, vetoed, has_veto)
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
 
+        vetoed_sql = "vetoed_by IS NOT NULL" if has_veto else "FALSE"
+        conflict_sql = "veto_conflicts_import" if \
+            "veto_conflicts_import" in pair_columns else "FALSE"
         counts_row = con.execute(
             f"""SELECT count(*),
                        count(*) FILTER (WHERE bucket = 'accept'),
@@ -460,14 +480,17 @@ def get_pairs(
                        count(*) FILTER (WHERE label_is_match IS NOT NULL),
                        count(*) FILTER (WHERE label_is_match IS NULL),
                        count(*) FILTER (WHERE track = 'person'),
-                       count(*) FILTER (WHERE track = 'organisation')
+                       count(*) FILTER (WHERE track = 'organisation'),
+                       count(*) FILTER (WHERE {vetoed_sql}),
+                       count(*) FILTER (WHERE {conflict_sql})
                 FROM ({base})""",
             base_params,
         ).fetchone()
         counts = dict(zip(
             ("all", "accept", "review", "reject", "score", "import", "human",
              "import_agrees", "import_disagrees", "import_unknown", "held",
-             "labelled", "unlabelled", "person", "organisation"),
+             "labelled", "unlabelled", "person", "organisation",
+             "vetoed", "veto_conflicts_import"),
             (int(v) for v in counts_row),
         ))
 
@@ -627,17 +650,26 @@ def _members(con, run_dir: str, unit_id: str) -> tuple[list[dict], bool]:
 
 
 def unit_events(con, run_dir: str, unit_id: str) -> tuple[list[dict], bool]:
-    """A unit's evidence rows, newest first (D13b). Empty when a profile has none."""
+    """A unit's evidence rows, newest first (D13b). Empty when a profile has none.
+
+    "Newest first" needs a `date`, and only donations has one: PSC's evidence
+    rows are the companies a person controls, keyed on `notified_on`. Ordering
+    on a column the file does not carry is a hard DuckDB error, so the sort
+    falls back to the record id and the rows still come back.
+    """
     members = Path(run_dir) / UNIT_MEMBERS_FILENAME
     events = Path(run_dir) / EVENTS_FILENAME
     if not members.is_file() or not events.is_file():
         return [], False
+    columns = _column_names(con, events)
+    newest = next((c for c in ("date", "notified_on") if c in columns), None)
+    order = f"e.{newest} DESC NULLS LAST, " if newest else ""
     cursor = con.execute(
-        """SELECT e.* FROM read_parquet(?) m
+        f"""SELECT e.* FROM read_parquet(?) m
            JOIN read_parquet(?) e
              ON CAST(e.record_id AS VARCHAR) = CAST(m.record_id AS VARCHAR)
            WHERE CAST(m.unit_id AS VARCHAR) = ?
-           ORDER BY e.date DESC NULLS LAST, CAST(e.record_id AS VARCHAR)
+           ORDER BY {order}CAST(e.record_id AS VARCHAR)
            LIMIT ?""",
         [str(members), str(events), str(unit_id), MAX_EVENTS + 1],
     )

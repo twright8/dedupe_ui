@@ -43,7 +43,11 @@ Stored beside the ruleset in each config version. Users edit it on the "Threshol
 ```
 
 - A blocking rule is SQL over `l.` and `r.` columns of the representative rows. A rule of the form `l.col = r.col` becomes Splink's `block_on`. Anything else is passed through as a custom rule.
-- `splink_function` is one of a fixed allow-list: `cl.ExactMatch`, `cl.JaroWinklerAtThresholds`, `cl.JaroAtThresholds`, `cl.LevenshteinAtThresholds`, `cl.DamerauLevenshteinAtThresholds`, `cl.JaccardAtThresholds`, `cl.NameComparison`, `cl.ForenameSurnameComparison`, `cl.PostcodeComparison`, `cl.ArrayIntersectAtSizes`. The UI offers these and nothing else.
+- `splink_function` is one of a fixed allow-list: `cl.ExactMatch`, `cl.JaroWinklerAtThresholds`, `cl.JaroAtThresholds`, `cl.LevenshteinAtThresholds`, `cl.DamerauLevenshteinAtThresholds`, `cl.JaccardAtThresholds`, `cl.NameComparison`, `cl.ForenameSurnameComparison`, `cl.PostcodeComparison`, `cl.ArrayIntersectAtSizes`. The UI offers these and nothing else. One more comparison is built by this tool rather than taken from Splink's library: `custom.NumericDifferenceAtThresholds` with `splink_args: {"thresholds": [0, 1, 2]}`. It makes one level per threshold ("equal", "within 1", "within 2") plus "all other", so a large gap between two numbers, such as two birth years, learns its own weight and is not averaged in with near misses. Friendly name: "Numeric difference".
+
+  `thresholds` must be a non-empty list of numbers, each zero or more, in ascending order. A term-frequency adjustment is refused on it: the levels are gaps between numbers, not values, and down-weighting a common birth year is the mistake that let a 37-year gap score 1.0 in the first PSC sample. It is built from Splink's `CustomComparison` over a `NullLevel`, one `AbsoluteDifferenceLevel` per threshold and an `ElseLevel`, with the labels "Equal `<column>`", "`<column>` within N" and "All other", so the per-pair explanation reads in words.
+
+  **The column must be a number, and cleaning writes text.** `dob_year_clean` leaves `nullify_outside_range` as a string of digits. Stage 3 therefore casts every column a numeric-difference comparison names — and only those — with `pd.to_numeric(..., errors="coerce")` as it builds the frame it hands Splink (`_splink_frame`). `units.parquet` keeps the text, so the review screen, the exports and the vetoes still see what was filed. A value that is not a number becomes null and lands on the null level.
 - `term_frequency: true` turns on Splink's term-frequency adjustment for that column.
 - `probability_two_random_records_match: null` means "estimate it from the deterministic rules". The deterministic rules are that track's match keys, read out of the ruleset, and `deterministic_recall` (default 0.8) is how much of the truth they are assumed to find. An estimate that fails is logged and Splink's own default stands, because a prior is not worth losing a run over.
 - `max_pairs` is the blocking budget. Before Splink predicts, the stage counts the pairs each blocking rule would create. If the total is over budget, the run fails with a structured error that names each rule and its count. Nothing is scored.
@@ -59,14 +63,19 @@ Every scored pair lands in one bucket:
 | `review` | score between `threshold_review` and `threshold_high` |
 | `reject` | score below `threshold_review` (kept in the file down to `threshold_candidate`) |
 
-The bucket the score alone gives is kept as `score_bucket`, beside the `bucket` the overlays below leave behind. Without it, "how many review pairs do the imported labels agree with" is zero by construction — the first overlay has already moved every agreeing pair to `accept` — and the owner cannot see what the score is doing on its own.
+The bucket the score alone gives is kept as `score_bucket`, beside the `bucket` the overlays below leave behind. Without it, "how many review pairs do the imported labels agree with" is zero by construction — the first overlay has already moved every agreeing pair to `accept` — and the owner cannot see what the score is doing on its own. Vetoes never touch `score_bucket` either, so what the score made of a pair on its own is always readable.
 
-Two overlays then apply, in this order. The later one wins.
+Three overlays then apply, in this order. The later one wins.
 
-1. **Imported labels** (D11). If the two units carry the same single `existing_entity_id`, the pair is `accept` with `decided_by: "import"`. Scoring only decides pairs blocking produced, so stage 4 goes further and joins every unit carrying one such id to the others carrying it, within its track, as `import` edges — an earlier real group is a trusted merge and a run must not keep it apart (`ENTITIES.md`). If they carry different ones, the pair keeps its score bucket and gets `import_disagrees: true`. That flag is a weak signal for training and for sorting. It never decides a pair.
-2. **Human labels** from the UI. A TRUE label makes the pair `accept`, a FALSE label makes it `reject`, both with `decided_by: "human"`. A human label always wins.
+1. **Vetoes** (`RULESET.md`, "Vetoes"). A `review` veto caps the pair at review and a `reject` veto puts it in reject, whatever the score or a graded model said. The pair records `vetoed_by` and `veto_reason`, and `decided_by` becomes `veto`.
+2. **Imported labels** (D11). If the two units carry the same single `existing_entity_id`, the pair is `accept` with `decided_by: "import"`, **even when a veto hit it** — an earlier real group is a trusted merge. Such a pair keeps its `vetoed_by` and `veto_reason` and is flagged `veto_conflicts_import: true` so a reviewer can look. Scoring only decides pairs blocking produced, so stage 4 goes further and joins every unit carrying one such id to the others carrying it, within its track, as `import` edges (`ENTITIES.md`). If the two units carry different ids, the pair keeps its bucket and gets `import_disagrees: true`. That flag is a weak signal for training and for sorting. It never decides a pair.
+3. **Human labels** from the UI. A TRUE label makes the pair `accept`, a FALSE label makes it `reject`, both with `decided_by: "human"`. A human label always wins.
 
-`pairs.parquet` holds the score and the first overlay only. The second is joined on where the pairs are read — in SQL by `pairs_reader`, in pandas by `label_overlay.apply_to_pairs` — because a label is a row in a table and recording one must not rewrite a file that will one day hold millions of rows. Only the run's counts and its evaluation are worked out again.
+`pairs.parquet` holds the score and the first two overlays. The human one is joined on where the pairs are read — in SQL by `pairs_reader`, in pandas by `label_overlay.apply_to_pairs` — because a label is a row in a table and recording one must not rewrite a file that will one day hold millions of rows. Only the run's counts and its evaluation are worked out again.
+
+**Vetoes are materialised, not joined at read time.** A run snapshots its ruleset into `config/ruleset.json` when it starts, so the vetoes cannot change under a finished run, and materialising them means the pairs list, the histogram, stage 4 and `score_eval` all read one answer rather than four copies of the rule. The cost is that every path that moves a bucket has to apply them again. They all do it through one function, `stage_3_score.apply_overlays`, which takes the ruleset: stage 3 itself, the re-bucket, applying a model and reverting one. `_strip_overlays` drops `vetoed_by`, `veto_reason` and `veto_conflicts_import` with the other overlay columns, so a stale veto cannot survive a re-bucket.
+
+When more than one veto hits a pair, the strongest action applies — `reject` beats `review` — and `vetoed_by` names the first veto in document order with that action. `{left}` and `{right}` in a reason are filled from the two sides' values of the **first** column the veto's conditions name.
 
 Pairs whose two units sit in the same held group are flagged with that `held_group_id`. The review screen can show or hide them as one block.
 
@@ -92,7 +101,7 @@ Table `pair_labels`. One row per decision, append-only:
 | `events.parquet` | the profile's evidence rows, keyed on `record_id` (D13b). Written by stage 0 when the profile supplies them |
 | `units.parquet` | one representative row per unit |
 | `unit_members.parquet` | `unit_id`, `record_id` |
-| `pairs.parquet` | `unit_id_l`, `unit_id_r`, `track`, `match_probability`, `match_weight`, the `gamma_` columns, `score_bucket`, `bucket`, `decided_by`, `import_disagrees`, `held_group_id`, and the summed priority columns of both units, each named `priority_<column>` |
+| `pairs.parquet` | `unit_id_l`, `unit_id_r`, `track`, `match_probability`, `match_weight`, the `gamma_` columns, `score_bucket`, `bucket`, `decided_by`, `import_disagrees`, `vetoed_by`, `veto_reason`, `veto_conflicts_import`, `held_group_id`, and the summed priority columns of both units, each named `priority_<column>` |
 | `splink_model_<track>.json`, `diagnostics/` | the trained model and Splink's charts |
 | `blocking_report.json` | pairs per blocking rule, per track, and the budget |
 | `score_eval.json` | what the exact groups plus the accepted pairs do to the existing labels |
@@ -102,10 +111,11 @@ Table `pair_labels`. One row per decision, append-only:
 
 `score_eval.json` does for the whole chain what `exact_eval.json` does for the match keys. Every accepted pair is an edge between two units; the connected components over those edges are the entities the run would publish. Precision and recall are then counted exactly as in `RULESET.md`, from component sizes, so the two files can be read side by side.
 
-It reports four sets of figures:
+It reports five sets of figures:
 
-- the top level: the exact groups plus **every** accepted pair — the score and the import overlay together;
-- `score_only`: the same, leaving out the pairs the import overlay accepted. Those were accepted because the two units already carry the same old entity id, so counting them as recall would be measuring the labels against themselves. This is the number to tune rules against;
+- the top level: the exact groups plus **every** accepted pair — the score, the vetoes and the import overlay together;
+- `score_only`: the same, leaving out the pairs the import overlay accepted. Those were accepted because the two units already carry the same old entity id, so counting them as recall would be measuring the labels against themselves. A vetoed pair is not in it either, because a vetoed pair is not accepted. This is the number to tune rules against;
+- `without_vetoes`: the whole run as it would read with no veto in the ruleset, with a `score_only` of its own inside it. Reading it beside the two above is how "what did this veto cost in recall and buy in precision" is answered from the file. It equals the top level and `score_only` exactly while the ruleset has no vetoes. Beside it, `vetoes` counts `vetoed`, `vetoed_from_accept`, `conflicts_import` and a `by_veto` breakdown, overall and per track;
 - `with_human`: the top level with the reviewers' decisions on top — TRUE labels joined up, FALSE labels pulled apart. It is what the run would publish today, and it equals the top level exactly while nobody has labelled anything;
 - `exact_only`: the match keys on their own, the same figures `exact_eval.json` holds.
 

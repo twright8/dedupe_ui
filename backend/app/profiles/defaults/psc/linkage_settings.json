@@ -75,10 +75,15 @@
         {
           "id": "pc4",
           "column": "dob_year_clean",
-          "splink_function": "cl.ExactMatch",
-          "splink_args": {},
+          "splink_function": "custom.NumericDifferenceAtThresholds",
+          "splink_args": {
+            "thresholds": [
+              0,
+              1
+            ]
+          },
           "term_frequency": false,
-          "description": "Birth year, exact. No term-frequency adjustment: a birth year is not a name, and down-weighting a common year is what let a 37-year gap score 1.0 in the first sample run."
+          "description": "Birth year as a graded numeric difference: equal, within 1, then all other. The binary exact/all-other comparison could not express '37 years apart' at all — EM put m = 0.835 on 'all other', because its training block is full of different people who share a name, so a disagreement cost 0.23 bits. A gap of two years or more now has a level of its own and learns its own weight. No term-frequency adjustment: these levels are gaps between years, not years."
         },
         {
           "id": "pc7",
@@ -110,7 +115,7 @@
         "l.dob_year_clean = r.dob_year_clean AND l.dob_month_clean = r.dob_month_clean AND l.postcode_district = r.postcode_district"
       ],
       "max_pairs": 20000000,
-      "_lost_in_translation": "deduping used three custom comparison ladders this settings document cannot express, and the nuance moves to the model features instead. (1) dob_joint: one comparison over year AND month with a graded 'year off by one, same month' level. Here the year is an exact comparison and the month is carried by the blocking, and dob_year_gap / dob_month_equal are features. (2) address_freq: postcode levels split by how many records share that postcode (rare <=20, mid <=1000, then district). cl.PostcodeComparison has the geographic ladder but not the frequency split; the junk-postcode nullify removes the worst of it and the model sees postcode_equal and postcode_district_equal. (3) Every comparison there ended in a fixed neutral else with the EM output clamped so no interior level could become a penalty; this document has no clamp, so a level CAN learn a penalty here.",
+      "_lost_in_translation": "deduping used three custom comparison ladders. (1) dob_joint is now BUILT: dob_year_clean is a custom.NumericDifferenceAtThresholds with thresholds [0, 1] — equal, within 1, all other — and the month stays a separate exact comparison, so agreeing on both is two pieces of evidence. (2) address_freq: postcode levels split by how many records share that postcode (rare <=20, mid <=1000, then district). cl.PostcodeComparison has the geographic ladder but not the frequency split; the junk-postcode nullify removes the worst of it and the model sees postcode_equal and postcode_district_equal. (3) Every comparison there ended in a fixed neutral else with the EM output clamped so no interior level could become a penalty; this document has no clamp, so a level CAN learn a penalty here.",
       "_em_note": "Two rules on purpose. Splink cannot estimate a comparison whose columns the training rule holds equal, so one rule fixes the name sounds (and estimates the date of birth, nationality and postcode) and the other fixes the date of birth (and estimates the names). With the single name+DOB rule this file shipped with, dob_year_clean came back m=None on every level: the comparison was dead weight, and pairs 37 birth-years apart scored 1.0.",
       "_em_cost_note": "The second rule carries postcode_district as well, and it is there for cost, not for accuracy. Year plus month alone is far too coarse to block on: it puts 449,397 sample units into 1,058 blocks and makes 170,613,604 training pairs, against 2.4M for the whole of prediction. That is what hung the first re-score — 53 GB of DuckDB spill and a 40-minute timeout. Adding the district takes it to 165,464 pairs over 331,596 blocks while still leaving both name comparisons free to be estimated, which is the rule's whole purpose. It covers 418,915 of 449,397 person units (93.2%); the rest have no postcode and simply do not train this rule. The budget check now prices em_blocking_rules too, so a regression here fails the run instead of hanging it."
     },

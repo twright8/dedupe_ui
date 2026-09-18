@@ -900,5 +900,27 @@
       "on_guard_fail": "review"
     }
   ],
-  "vetoes": []
+  "vetoes": [
+    {
+      "id": "dv2",
+      "track": "organisation",
+      "description": "Two different company numbers, both present, are two companies. Review and not reject: a number is mistyped often enough that a human should see the pair. Measured against the September 2026 sheet: it vetoes 293 pairs, 139 of which the run would otherwise have accepted, and it moves score_only organisation precision from 0.965094 to 0.965416 for 0.000054 of recall.",
+      "when": [
+        {
+          "column": "company_number_clean",
+          "op": "differs"
+        }
+      ],
+      "action": "review",
+      "reason": "Company numbers {left} and {right}"
+    }
+  ],
+  "_vetoes_measured_and_not_shipped": [
+    {
+      "id": "dv1",
+      "track": "person",
+      "rule": "title both_in_and_differ [gendered_titles] -> review",
+      "why_not": "It fails the keep rule: score_only person precision falls from 0.987201 to 0.987175 and recall from 0.623617 to 0.622330. The reason is in the examples. MR, SIR and LORD all mark the same gender, so what the veto really catches is an honorific: 'Mr Jonathan P Marland' against 'Lord Jonathan Marland', 'Sir Christopher Gent' against 'Mr Christopher C Gent'. It vetoed 1,688 pairs, 1,589 of which the imported labels had already accepted. A title veto would need a title-to-gender lookup with the honorifics collapsed, not a token list of gendered titles."
+    }
+  ]
 }

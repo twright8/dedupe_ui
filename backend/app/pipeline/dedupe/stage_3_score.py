@@ -43,9 +43,12 @@ from app.pipeline.dedupe.stage_0_load import EVENTS_FILENAME
 from app.pipeline.dedupe.stage_1_clean import RECORDS_FILENAME
 from app.pipeline.dedupe.stage_2_exact import EXACT_GROUPS_FILENAME
 from app.profiles import get_profile
-from app.rules import linkage
+from app.rules import linkage, vetoes
 
 logging.getLogger("splink").setLevel(logging.INFO)
+
+# `decided_by` when a veto is what put the pair where it is (docs/PAIRS_API.md).
+DECIDED_BY_VETO = "veto"
 
 PAIRS_FILENAME = "pairs.parquet"
 # The units Splink saw, so a later recluster can say exactly which ones are new.
@@ -299,6 +302,13 @@ def _splink_frame(rows: pd.DataFrame, config: dict,
             keep.append(column)
     frame = rows[keep].copy()
     frame["unit_id"] = frame["unit_id"].astype(str)
+    # `custom.NumericDifferenceAtThresholds` compares numbers, and the cleaning
+    # engine writes text: `dob_year_clean` is a string of digits. Cast here, in
+    # the frame Splink sees, so `units.parquet` keeps what was filed and the
+    # review screen and the vetoes still read it (docs/LINKAGE.md).
+    for column in linkage.numeric_columns(config):
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
     return frame
 
 
@@ -456,28 +466,37 @@ def apply_overlays(
     review: float,
     high: float,
     model_lines: dict | None = None,
+    ruleset: dict | None = None,
 ) -> pd.DataFrame:
-    """Bucket the pairs and lay the imported labels on top.
+    """Bucket the pairs, apply the vetoes, and lay the imported labels on top.
 
     The score decides first — Splink's, or a graded model's on the tracks
     ``model_lines`` names (`MODEL.md`, stage 3b), which is where ``decided_by``
-    reads ``model`` rather than ``score``. Then, per LINKAGE.md:
+    reads ``model`` rather than ``score``. Then, per LINKAGE.md and the "Vetoes"
+    section of RULESET.md, lowest precedence first:
 
+      * a veto caps the pair at review or puts it in reject, and records
+        ``vetoed_by`` and ``veto_reason``. It overrides the scorer and the model;
       * two units carrying the same single existing id are accepted, with
-        ``decided_by: "import"``;
-      * two units carrying different single ids keep their score bucket and are
+        ``decided_by: "import"``. An imported label beats a veto, and a pair
+        where the two disagree is flagged ``veto_conflicts_import``;
+      * two units carrying different single ids keep their bucket and are
         flagged ``import_disagrees``, which is a signal and never a decision.
 
     This is everything ``pairs.parquet`` holds. The human overlay comes last and
     is applied where it is read — ``label_overlay.apply_to_pairs`` in memory and
     the same rule in SQL in ``pairs_reader`` — so recording one decision never
-    rewrites a file with millions of rows in it.
+    rewrites a file with millions of rows in it. The vetoes are materialised
+    here instead, because a run's ruleset is snapshotted and cannot change under
+    it, and every path that moves a bucket calls this function again.
     """
     pairs = _ordered_pairs(pairs)
     if not len(pairs):
-        for column in ("score_bucket", "bucket", "decided_by", "held_group_id"):
+        for column in ("score_bucket", "bucket", "decided_by", "held_group_id",
+                       "vetoed_by", "veto_reason"):
             pairs[column] = pd.Series(dtype="object")
         pairs["import_disagrees"] = pd.Series(dtype="bool")
+        pairs["veto_conflicts_import"] = pd.Series(dtype="bool")
         return pairs
 
     lookup = units.set_index(units["unit_id"].astype(str))
@@ -490,12 +509,20 @@ def apply_overlays(
     score_bucket, by_model = _model_buckets(
         pairs, bucket_of(pairs["match_probability"], review, high), model_lines
     )
+    vetoed = vetoes.apply_to_buckets(pairs, units, ruleset or {}, score_bucket)
     pairs["score_bucket"] = score_bucket
-    pairs["bucket"] = np.where(agrees, "accept", score_bucket)
+    pairs["bucket"] = np.where(agrees, "accept", vetoed["bucket"])
     pairs["decided_by"] = np.where(
-        agrees, "import", np.where(by_model, stage_3b_model.DECIDED_BY_MODEL, "score")
+        agrees, "import",
+        np.where(vetoed["any"], DECIDED_BY_VETO,
+                 np.where(by_model, stage_3b_model.DECIDED_BY_MODEL, "score")),
     )
     pairs["import_disagrees"] = disagrees
+    pairs["vetoed_by"] = pd.Series(vetoed["vetoed_by"], index=pairs.index,
+                                   dtype="object")
+    pairs["veto_reason"] = pd.Series(vetoed["veto_reason"], index=pairs.index,
+                                     dtype="object")
+    pairs["veto_conflicts_import"] = vetoed["any"] & agrees
 
     left_held = pairs["unit_id_l"].map(lookup["held_group_id"])
     right_held = pairs["unit_id_r"].map(lookup["held_group_id"])
@@ -523,7 +550,8 @@ def _priority_totals(pairs: pd.DataFrame, units: pd.DataFrame) -> pd.DataFrame:
 
 PAIR_HEAD = ["unit_id_l", "unit_id_r", "track", "match_probability", "match_weight",
              MODEL_SCORE_COLUMN, "score_bucket", "bucket", "decided_by",
-             "import_disagrees", "held_group_id"]
+             "import_disagrees", "vetoed_by", "veto_reason",
+             "veto_conflicts_import", "held_group_id"]
 
 
 def finalise_pairs(pairs: pd.DataFrame, units: pd.DataFrame) -> pd.DataFrame:
@@ -617,6 +645,7 @@ def apply_active_models(
     review: float,
     high: float,
     progress_callback=None,
+    ruleset: dict | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Stage 3b: score the pairs with each track's active model and re-bucket.
 
@@ -642,7 +671,7 @@ def apply_active_models(
     if lines:
         rebucketed = finalise_pairs(
             apply_overlays(_strip_overlays(pairs), units, review, high,
-                           model_lines=lines), units
+                           model_lines=lines, ruleset=ruleset), units
         )
         review_after = int((rebucketed["bucket"] == "review").sum())
         warning = stage_3b_model.collapse_reason(
@@ -673,9 +702,13 @@ def apply_active_models(
 
 
 def _strip_overlays(pairs: pd.DataFrame) -> pd.DataFrame:
-    """The pairs without the columns ``apply_overlays`` works out again."""
+    """The pairs without the columns ``apply_overlays`` works out again.
+
+    The veto columns go with them, so a re-bucket, an apply-model and a
+    revert-model all run the vetoes again rather than carrying stale ones.
+    """
     dropped = ("score_bucket", "bucket", "decided_by", "import_disagrees",
-               "held_group_id")
+               "held_group_id", *vetoes.VETO_COLUMNS)
     return pairs[[c for c in pairs.columns if c not in dropped]]
 
 
@@ -709,6 +742,7 @@ def counts_from(units: pd.DataFrame, pairs: pd.DataFrame, evaluation: dict,
             (pairs["decided_by"] == "import").sum()) if len(pairs) else 0,
         "pairs_import_disagrees": int(
             pairs["import_disagrees"].fillna(False).sum()) if len(pairs) else 0,
+        **vetoes.counts_from(pairs),
         "entities_after_score": evaluation["entities_after"],
         "score_pair_precision": evaluation["pair_precision"],
         "score_pair_recall": evaluation["pair_recall"],
@@ -1012,7 +1046,10 @@ def run_stage_3_score(
         pairs["track"] = track
         with _phase(f"Applying the {track} overlays to {len(pairs):,} pairs",
                     progress_callback):
-            pairs = apply_overlays(pairs, units, review, high)
+            pairs = apply_overlays(pairs, units, review, high, ruleset=ruleset)
+        vetoed = int(pairs["vetoed_by"].notna().sum()) if len(pairs) else 0
+        if vetoed:
+            _step(f"  {vetoed:,} {track} pair(s) vetoed", progress_callback)
         scored.append(pairs)
 
         if render_diagnostics:
@@ -1036,7 +1073,8 @@ def run_stage_3_score(
     if len(forced):
         # A human decided these; blocking or the candidate floor never offered
         # them. They join the file with no score rather than being lost.
-        forced = finalise_pairs(apply_overlays(forced, units, review, high), units)
+        forced = finalise_pairs(
+            apply_overlays(forced, units, review, high, ruleset=ruleset), units)
         pairs = pd.concat([pairs, forced], ignore_index=True)
         _step(f"  {len(forced):,} labelled pair(s) added that scoring never produced",
               progress_callback)
@@ -1044,7 +1082,8 @@ def run_stage_3_score(
     # Stage 3b: the track's own model, when one is active (docs/MODEL.md).
     with _phase("Applying the active track models", progress_callback):
         pairs, model_state = apply_active_models(
-            run_dir, pairs, units, members, events, review, high, progress_callback
+            run_dir, pairs, units, members, events, review, high, progress_callback,
+            ruleset=ruleset,
         )
     with _phase(f"Writing {len(pairs):,} pairs", progress_callback):
         pairs.to_parquet(run_dir / PAIRS_FILENAME, index=False)
@@ -1092,6 +1131,24 @@ def run_stage_3_score(
     return counts
 
 
+def run_ruleset(run_dir) -> dict:
+    """The ruleset this run was started with, from its config snapshot.
+
+    A run's rules are fixed once it starts, which is what makes materialising
+    the vetoes into ``pairs.parquet`` safe: every later path that moves a bucket
+    reads the same document back and applies the same vetoes.
+    """
+    from app.pipeline.dedupe.stage_1_clean import load_ruleset
+
+    config_dir = Path(run_dir) / "config"
+    if not (config_dir / "ruleset.json").is_file():
+        return {}
+    try:
+        return load_ruleset(config_dir)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def rebucket(
     run_dir: str,
     threshold_high: float,
@@ -1102,7 +1159,8 @@ def rebucket(
 
     Moving a threshold must not need a rerun, so this reads the scored pairs
     back, applies the buckets and the overlays again, and rewrites the pairs and
-    the evaluation.
+    the evaluation. The vetoes are re-applied with them, from the run's own
+    snapshotted ruleset.
     """
     run_dir = Path(run_dir)
     units = pd.read_parquet(run_dir / units_module.UNITS_FILENAME)
@@ -1110,12 +1168,13 @@ def rebucket(
     records = pd.read_parquet(run_dir / RECORDS_FILENAME)
     groups = pd.read_parquet(run_dir / EXACT_GROUPS_FILENAME)
     pairs = pd.read_parquet(run_dir / PAIRS_FILENAME)
+    ruleset = run_ruleset(run_dir)
 
     # A threshold move must not un-apply the model: the lines being moved are
     # Splink's, and a graded model keeps deciding whichever tracks it decided.
     lines = stage_3b_model.deciding_lines(stage_3b_model.models_from_state(run_dir))
     pairs = apply_overlays(_strip_overlays(pairs), units, float(threshold_review),
-                           float(threshold_high), model_lines=lines)
+                           float(threshold_high), model_lines=lines, ruleset=ruleset)
     pairs = finalise_pairs(pairs, units)
     pairs.to_parquet(run_dir / PAIRS_FILENAME, index=False)
     outcome = label_outcomes(labels, members, groups)

@@ -8,6 +8,13 @@ began making the pipeline out-of-core. Fact, not plan.
 > measured at scale, because the laptop ran out of disk before anything could
 > run — read section 7 first, it blocks everything else.
 
+> **Third session, same day.** **Section 14 is the one to read.** The date-of-
+> birth defect of section 10 is closed, and not by the comparison. Vetoes are
+> built (the fourth rule type of D8, never built until now) and
+> `custom.NumericDifferenceAtThresholds` is built. The graded birth-year ladder
+> turned out to change almost nothing — the veto is what fixes it. Section 14
+> has the numbers, the sample was re-run end to end, and section 4 is updated.
+
 ## 1. Running PSC outside the web server
 
 Use a scratch `DATA_DIR`. Never `backend/data` — the donations dev server on
@@ -38,10 +45,22 @@ stage_5_entities.run_stage_5_entities(run_dir=run)
 Env knobs: `CLEAN_BATCH_ROWS` (500,000), `PSC_QUICK_ROWS` (200,000),
 `PSC_DUCKDB_MEMORY` (2GB), `PSC_DUCKDB_THREADS` (2).
 
-Run it in the background; it is finished when `pgrep -f <script>` prints nothing
-and the log ends with the stage 5 line. **My scratch directory was session-local
-and is gone — re-run.** The re-score with the fixed DOB settings was still
-training when I stopped, so **no numbers from it are here**.
+Run it in the background; it is finished when the log ends with the stage 5 line.
+
+**The scratch directory is `/home/tomwright/psc_scratch`** and it survives:
+
+| path | what |
+|---|---|
+| `pscdata/runs/psc_sample` | the run of section 10 — no vetoes, exact birth-year comparison |
+| `pscdata/runs/psc_vetoes` | the run of section 14 — the shipped vetoes and the graded ladder |
+| `run_sample.py` | stages 0 to 5, per-stage timing and peak RSS |
+| `run_vetoes.py` | stages **1** to 5 into `psc_vetoes`, copying stage 0's output across |
+| `evidence.py` | weights, buckets, per-veto hits, the top accepted and review pairs |
+| `donations_vetoes.py` | the donations veto measurement against the earlier labels |
+
+`run_vetoes.py` skips stage 0 because the loader has not changed;
+`records_raw.parquet` and `events.parquet` are copied from `psc_sample`. Stage 1
+**does** have to run, because the ruleset now writes a `numeric_suffix` column.
 
 ### Reading a finished run
 
@@ -110,10 +129,10 @@ donations was checked and is clean.
 
 ## 4. What remains
 
-*(Updated. Closed: the stage-3 defect (6), the run lock (8), the sample re-run
-(10), bounded spill (11), stage-2 projection (12). Section 7's disk blocker is
-cleared. **Still open: B4, B5, B6, C, and — new and more important than any of
-them — the date-of-birth weight in section 10.**)*
+*(Updated again. Closed: the stage-3 defect (6), the run lock (8), the sample
+re-run (10), bounded spill (11), stage-2 projection (12), **and the date-of-birth
+weight (14)**. Section 7's disk blocker is cleared. **Still open: B5 — the owner
+has now decided what it should do, see section 15 — then B4, B6, C.**)*
 
 - **B5, the rest.** Full-frame `pd.read_parquet` in `stage_4_cluster` (units,
   members, pairs, groups), `stage_5_entities` (clusters, members, records),
@@ -121,9 +140,9 @@ them — the date-of-birth weight in section 10.**)*
 - **The units corpus read** in `pairs_reader.model_explanation`. The pair and
   events reads are now by key in DuckDB; `units` is still whole, because the
   organisation feature builder fits TF-IDF over every unit and filtering it
-  would change a number donations reviewers already see. Proposed fix: a profile
-  flag saying whether its builder needs a corpus, plus **persisting the fitted
-  IDF at scoring time** so a one-pair explanation reuses it instead of refitting.
+  would change a number donations reviewers already see. **The owner has decided
+  what this becomes: PSC fits over every unit like donations, with the fitted
+  vocabulary and IDF persisted at scoring time.** Section 15.
 - **B3** projection-only stage 2 proof at 16M. **B4** `build_units` at 16M — the
   per-column modal vote may need narrowing to the columns Splink, the features,
   the evidence focus and the display actually use. **B6** full-scale blocking
@@ -461,33 +480,38 @@ full scale.
 
 ## 13. Still open, in the order I would take them
 
-1. **The date-of-birth weight (section 10).** Bigger than anything below. The
-   person track currently accepts people born 37 years apart at p = 1.0 and
-   every automated guard says the run is fine.
+*(Rewritten. The date-of-birth weight was item 1 and is closed — section 14.)*
+
+1. **B5** the remaining full-frame reads and the persisted TF-IDF. **The owner
+   has decided what it should do: PSC will fit TF-IDF over every unit, like
+   donations, and the fitted vocabulary and IDF are persisted at scoring time.**
+   That is a behaviour change for PSC — its `name_core_tfidf` numbers will move,
+   because `psc_features._tfidf_cosine` fits over only the units named in the
+   pairs it was handed today, so the same pair already scores differently
+   depending on how many pairs it was built with — and a **no-op for
+   donations**, whose builder already fits over the whole frame on purpose.
+   Whoever does it should assert exactly that: a donations regression test
+   holding its feature values byte-identical, and a PSC test that one pair
+   explained on its own reproduces the scoring run's number, which it cannot do
+   today. The remaining full-frame `pd.read_parquet` calls go with it:
+   `stage_4_cluster` (units, members, pairs, groups), `stage_5_entities`
+   (clusters, members, records), `psc_export`, and the units corpus read in
+   `pairs_reader.model_explanation`.
 2. **B4** `build_units` at 16M. Not started. It is the heaviest step of stage 3
-   (about 75 s of the sample's 128 s) and it is where the per-column modal vote
+   (about 75 s of the sample's 150 s) and it is where the per-column modal vote
    lives.
-3. **B5** the remaining full-frame reads and the persisted TF-IDF. Not started —
-   see the note below, the PSC and donations builders disagree about what the
-   corpus even is, so this is a design decision before it is a refactor.
-4. **B6 + C** the full snapshot, the token lists, full-scale pricing and
+3. **B6 + C** the full snapshot, the token lists, full-scale pricing and
    `max_block_size`. Not started.
-
-**A B5 finding worth having before anyone starts it.** The two feature builders
-do not agree on what "corpus" means, and only one of them is right:
-
-- `donations_features._tfidf_cosine` fits over **every unit in the frame**, on
-  purpose and documented — which is why `model_explanation` still reads the
-  whole units file.
-- `psc_features._tfidf_cosine` fits over **only the units named in the pairs it
-  was handed** (`subset`). So the same PSC pair already scores differently
-  depending on how many pairs it was built with, and a one-pair explanation
-  cannot reproduce a scoring run's number today.
-
-Persisting the fitted vocabulary and IDF at scoring time fixes both, but note
-that it is a **behaviour change for PSC** (its numbers will move) and a
-**no-op for donations** (its numbers must not). Whoever does it should assert
-exactly that.
+4. **Two veto columns the data is not clean enough for**, recorded in
+   `_vetoes_measured_and_not_shipped` in `defaults/psc/ruleset.json` with the
+   measurements: a canonical `legal_form` lookup, and enough `countries` rows
+   that a misspelt country stops reading as a different country. Section 14 has
+   the numbers.
+5. **Postcode is still out of proportion** (section 10): exact postcode is
+   +12.82 bits against an exact surname's +10.27, and postcode district alone
+   (+8.80) beats an exact forename (+7.10). The vetoes now stop that producing
+   an impossible accept, but they treat the symptom. deduping's D7 warned about
+   this and it is still unresolved.
 
 ## 9. One stale test, fixed in passing
 
@@ -497,3 +521,230 @@ grew a `warnings` key beside `errors` (section 3), and the test still asserted
 `r.json() == {"errors": []}` exactly. The endpoint was right and the test was
 stale, so the assertion now expects both keys. Worth knowing that the suite was
 not green at the start of this session.
+
+## 14. Vetoes, and why the graded birth-year comparison was not enough
+
+Section 10 said the person track accepted people born 37 years apart at
+p = 1.000000 and every automated guard said the run was fine. It also proposed
+the smallest fix: a graded ladder on `dob_year_clean` instead of exact /
+all-other. **That was built, and on its own it changes almost nothing.** The
+vetoes are what close the defect.
+
+### The graded comparison, measured
+
+`dob_year_clean` is now `custom.NumericDifferenceAtThresholds` with thresholds
+`[0, 1]`, so the levels are equal / within 1 / all other, and a gap of two years
+or more has a level to itself. Re-trained on the same 500,000-record sample:
+
+| level | m | bits |
+|---|---|---|
+| equal | 0.16463 | **+3.02** |
+| within 1 | 0.04716 | +0.22 |
+| all other (two years or more) | 0.78821 | **−0.25** |
+
+The old binary comparison put "all other" at m = 0.835 and **−0.23 bits**. The
+new one puts a two-year-or-more gap at **−0.25 bits**. Against a postcode worth
++12.82 and a surname worth +10.27, that is the same nothing it was before. The
+score bucket barely moved: person accepts went from 249,480 to 249,633.
+
+**Why.** EM's contamination is upstream of the comparison's shape. `em1` blocks
+on both name sounds, so its "match" class is full of different people who share
+a name, and their birth-year disagreement is learned as normal-for-a-match.
+Giving the disagreement three levels instead of one does not make EM believe it
+is rare. The fix had to be a rule, not a weight. The ladder is still worth
+keeping — it is the honest way to express the column, it costs nothing, and it
+is what a future fix to the training rules will need — but it is not the fix.
+
+The other weights are unchanged from section 10: postcode exact +12.82, surname
+exact +10.27, postcode district +8.80, forename exact +7.10, middle +4.68,
+birth month +1.37, nationality +0.35.
+
+### What the vetoes do
+
+Four ship in `defaults/psc/ruleset.json`. Measured on the same sample:
+
+| id | track | rule | action | pairs hit | of those, would have been accepted |
+|---|---|---|---|---|---|
+| v1 | person | birth years more than 1 apart | reject | 490,855 | **75,711** |
+| v2 | person | forenames differ AND Jaro-Winkler < 0.7 | review | 99,906 | **19,676** |
+| ov1 | organisation | registration numbers differ | reject | 1,042 | **712** |
+| ov4 | organisation | numeric suffix differs (Fund II / Fund III) | reject | 1 | 0 |
+
+Five examples each, all at p = 1.000000 unless shown:
+
+```
+v1   SABELO SHONGWE   1958-07 PO8 0BT   / SABELO SHONGWE   1995-07 PO8 0BT
+     ELIYAU MAGZIMOF  1985-10 LS2 9PS   / ELIYAU MAGZIMOF  1995-10 LS2 9PS
+     OIVIND STENERSEN 1946-10 DA12 5EH  / OIVIND STENERSEN 1936-10 DA12 5EH
+     AISHE EZAT       1982-04 E12 5AW   / AISHE EZAT       1992-04 E12 5AW
+     LAJOS BOZI       1956-08 ME16 9FY  / LAJOS BOZI       1958-05 ME16 9FY
+
+v2   GREGORY KARAOLIS  1985 N3 1AN      / CHRISTOS KARAOLIS 1984 N3 1AN
+     BELISA CORREIA    1978 PE3 7EG     / TELMO CORREIA     1978 PE3 7EG
+     PERMINDER BOLLA   1953 LN5 8XF     / MANDHIR BOLLA     1953 LN5 8XF
+     CRISTINA PLUGARU  1987 RH19 3BT    / IULIAN PLUGARU    1987 RH19 3BT
+     SUSAN BARNSLEY    1963 IP11 7JU    / PETER BARNSLEY    1963 IP11 7JU
+
+ov1  PATRIZIA PIM           reg 02776714 / reg 01878842
+     BRITISH ENGINES        reg 07159418 / reg 07159707
+     COUNTRYSIDE PROPERTIES reg 00614864 / reg 05722274
+     REGUS                  reg 00101523 / reg N101523
+     SWANSWAY               reg 07105866 / reg 07105886   (p=0.999998)
+
+ov4  one pair, already in reject. Nothing to show. Unproven at sample scale.
+```
+
+v2 is exactly the "siblings and spouses at one address" the review queue was
+full of. They are now review pairs, not accepts: never auto-merged, and a human
+can still decide.
+
+### Three vetoes measured and NOT shipped
+
+They are kept with their measurements in `_vetoes_measured_and_not_shipped` in
+the two default rulesets, so nobody re-derives them.
+
+- **v3, nationality differs → review.** 86,802 hits, **10,509** of them accepts.
+  The accepted ones look like one person, not two: `Mr Talat Mahmood BRITISH`
+  against `Mr Talat Mahmood Pakistani`; `Mrs Selina Nyasha Bota Zimbabwean`
+  against `Mrs Selina Nyasha Chimwara BRITISH`. Naturalisation and a married
+  name both change a filing. `nationality_norm` also holds comma-joined
+  multi-values (`British,Cypriot`), which `differs` reads as one string.
+- **ov2, country of registration differs → review** (deduping's veto D). 509
+  hits, 506 of them accepts — and **503 of the 509 carry the same registration
+  number**. Every example is one company filed twice with the country misspelt:
+  `UK` against `UNITED KINGDSOM`, `ENGALND`, `UNITIED KINGDOM`, `UNITED KINGDOM
+  ENGLAND AND WALES COMPANIES HOUSE`. `country_canonical` carries 435 distinct
+  values where it should carry about 200 codes, because the `countries` lookup
+  is `fallback: passthrough`. Turn this on once the lookup covers the spellings.
+- **ov3, legal form differs → review** (deduping's veto A). 104 hits, 79 of them
+  accepts, and every example is one form spelled two ways: `LIMITED` against
+  `LTD`, `HOLDINGS LIMITED` against `GROUP HOLDINGS LIMITED`. `legal_form_clean`
+  is the raw token `strip_tokens` took off the end, and the sample holds 139 of
+  them (LIMITED 14,175, LTD 4,819, HOLDINGS LIMITED 3,123, GROUP LIMITED 1,857).
+  **What is missing is a `legal_form` lookup** mapping those onto a canonical
+  form — the same shape as deduping's `has_*_suffix` priority ladder. The veto
+  itself is fine; the column is not.
+
+deduping's other three corporate vetoes are not portable to these operators:
+subject-phrase mismatch and the Holdings asymmetry both need a parsed name the
+cleaning does not produce, and the house-number veto needs `parse_address`.
+
+### The sample re-run, end to end
+
+500,000 records, `CLEAN_BATCH_ROWS=100000`, `SPLINK_MEMORY_LIMIT=6GB`,
+`DUCKDB_MAX_TEMP=20GB`, in `/home/tomwright/psc_scratch/pscdata/runs/psc_vetoes`
+(`run_vetoes.py` beside it re-runs stages 1 to 5; stage 0's output is copied
+from the previous run because the loader has not changed). Disk went 53.1 GB to
+52.9 GB.
+
+| stage | time | peak RSS |
+|---|---|---|
+| 1 clean | 19.9 s | 1,296 MB |
+| 2 exact | 6.3 s | 1,416 MB |
+| 3 score | **150.1 s** | **8,528 MB** |
+| 4 cluster | 37.1 s | 5,695 MB |
+| 5 entities | 29.9 s | 3,210 MB |
+
+Stage 3 went from 128.5 s to 150.1 s — the vetoes cost about 21 s over 1.14M
+pairs, most of it the Jaro-Winkler in v2 — and its peak RSS is unchanged at
+8.5 GB, still over the server's budget. A re-bucket on the finished run takes
+45.4 s and reproduces every count exactly, which is the proof that the
+re-application path works at this scale.
+
+Pairs by bucket, before and after:
+
+| | previous run | this run, `score_bucket` (before vetoes) | this run, `bucket` (after) |
+|---|---|---|---|
+| person accept | 249,480 | 249,633 | **154,246** |
+| person review | 242,927 | 243,634 | 65,994 |
+| person reject | 580,566 | 579,721 | 852,748 |
+| organisation accept | 68,307 | 68,307 | **67,595** |
+| organisation review | 375 | 375 | 183 |
+| organisation reject | 162 | 162 | 1,066 |
+
+1,141,832 pairs scored (1,141,817 before), `untrained_comparisons` 0,
+`pairsVetoed` 591,804, `pairsVetoedFromAccept` **96,099**,
+`vetoConflictsImport` 0 — PSC carries no imported entity ids, so that flag can
+only fire on donations.
+
+Clusters **394,436 → 457,941** and entities proposed **399,915 → 458,349**. The
+run proposes 58,434 more entities because it has stopped merging people who are
+not the same person.
+
+### The ten highest-scoring accepted person pairs
+
+None is more than one year apart and none has a different forename, which is
+what the owner asked to be able to read off the top of the list:
+
+```
+p=1.000000  SHANDOR ALVES      (no year)-06 SE27 9QQ / SHANDOR ALVES      1986-06 SE27 9QQ
+p=1.000000  YULISA MADDY            1976-03 IG8 8PX  / YULISA MADDY       1976-03 IG8 8HD
+p=1.000000  PASUTH SONSUNGNOEN      1965-12 WS13 6PW / PASUTH SONSUNGNOEN 1965-12 WS13 6QA
+p=1.000000  ISRAEL LINSHE           1971-12 N16 6EU  / ISRAEL LINSHE      1971-11 N16 6EU
+p=1.000000  AZARJA EVERS            1984-12 NW4 1NJ  / AZARJA EVERS       1984-12 NW4 3NL
+p=1.000000  KAZARE NYAKYOMA         1976-11 MK11 3HF / KAZARE NYAKYOMA    1976-11 MK46 5GF
+p=1.000000  NEFIZE NUR              1968-05 B5 4EN   / NEFIZE NUR         1969-05 B5 4EN
+p=1.000000  RETHABILE DIJENG        1983-06 LE5 4EZ  / RETHABILE DIJENG   1983-06 (none)
+p=1.000000  BLIMA STROH             1952-07 N16 5NQ  / BLIMA STROH        1952-07 N16 5QU
+p=1.000000  AGATHANGELOS VOUNIOTIS  1972-11 E2 8HD   / AGATHANGELOS VOUNIOTIS 1972-11 E2 6GG
+```
+
+The first is the null rule working as the contract says: one side has no birth
+year, so the condition is false and no veto fires. `NEFIZE NUR` is one year
+apart, which `abs_diff_gt 1` deliberately allows.
+
+The ten highest-scoring person **review** pairs are all v2, and all of them are
+two people at one address: `GREGORY / CHRISTOS KARAOLIS`, `BELISA / TELMO
+CORREIA`, `PERMINDER / MANDHIR BOLLA`, `CRISTINA / IULIAN PLUGARU`, `SUSAN /
+PETER BARNSLEY`, `MITJA / BOJANA KRAMBERGER`, `CHRISTINE / BRENDAN MULREANY`,
+`LAURI / MARGO KARP`, `MUNIR / NADIM TARAZI`, `MARIA / CECILIA GARRIDO ORTEGA`.
+
+### Donations
+
+One veto ships, `dv2`, measured on `run_2026_09_18a` (28,843 pairs, the run the
+earlier labels are scored against). The rule was: keep a veto only if
+`score_only` precision rises or holds and recall falls by less than 0.002.
+
+| veto | vetoed | of those, accepts | organisation `score_only` P | R | kept |
+|---|---|---|---|---|---|
+| dv2 company numbers differ → review | 293 | 139 | 0.965094 → **0.965416** | 0.786615 → 0.786561 (−0.000054) | **yes** |
+| dv1 gendered titles differ → review | 1,688 | 1,590 | person 0.987201 → 0.987175 | 0.623617 → 0.622330 (−0.001287) | **no** |
+
+dv1 fails on precision, and the examples say why: MR, SIR and LORD all mark the
+same gender, so what it really catches is an honorific. `Mr Jonathan P Marland`
+against `Lord Jonathan Marland`; `Sir Christopher Gent` against `Mr Christopher
+C Gent`; `Mr John S Wheeler` against `Sir John Stuart Wheeler`. 1,589 of its
+1,688 hits were pairs the imported labels had already accepted. A title veto
+needs a title-to-gender lookup with the honorifics collapsed, not a token list.
+
+dv2's hits read right: `Cairns Didge UK Limited` 04345773 against `CAIRNS DIDGE
+PROPERTY UK LTD` 05132672; `Bestway (Holdings) Limited` 01392861 against
+`Bestway Wholesale` 01207120; `Dalglen (No. 1813) Limited` SC570493 against
+`Dalglen (No 1811) Limited` SC559988. Overall `score_only` precision 0.965657 →
+0.965971, recall 0.781240 → 0.781187. Entities after 18,581 → 18,666.
+
+The `without_vetoes` figure set in `score_eval.json` reproduces the no-veto
+baseline exactly, which is the check that the two are comparable.
+
+## 15. The B5 corpus decision (from the owner)
+
+**PSC will fit TF-IDF over every unit, like donations, and the fitted vocabulary
+and IDF are persisted at scoring time.** That settles the design question
+section 13 used to record as open. It is a behaviour change for PSC and a no-op
+for donations, and whoever builds it should assert exactly that — see item 1 of
+section 13.
+
+## 16. One more bug fixed in passing: PSC pair detail was a 500
+
+`GET /api/runs/{id}/pairs/{pair_id}` failed on **every** PSC pair, before any of
+this session's work — the old `psc_sample` run reproduces it too. `unit_events`
+in `pairs_reader` ordered the evidence rows with `ORDER BY e.date`, and PSC's
+evidence rows are the companies a person controls: `record_id`,
+`company_number`, `notified_on`, `ceased_on`, `natures_of_control`, `kind`,
+`postcode`, `locality`. No `date`, and DuckDB refuses to bind it, so the whole
+request raised `BinderException`.
+
+It sorts on `date`, then `notified_on`, then nothing, falling back to the record
+id. Donations is unaffected and still comes back newest first. Worth knowing
+because it means the PSC review screen has never opened a pair, and the veto
+reason this slice adds is shown there.

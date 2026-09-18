@@ -29,6 +29,17 @@ SPLINK_FUNCTIONS = (
     "cl.ArrayIntersectAtSizes",
 )
 
+# Comparisons this tool builds rather than taking from Splink's library
+# (docs/LINKAGE.md). `custom.NumericDifferenceAtThresholds` makes one level per
+# threshold in ascending order plus "all other", so a large gap between two
+# numbers — two birth years decades apart — learns its own weight instead of
+# being averaged in with off-by-one typos.
+NUMERIC_DIFFERENCE = "custom.NumericDifferenceAtThresholds"
+CUSTOM_FUNCTIONS = (NUMERIC_DIFFERENCE,)
+
+# Everything a `splink_function` may be. The UI offers these and nothing else.
+COMPARISON_FUNCTIONS = SPLINK_FUNCTIONS + CUSTOM_FUNCTIONS
+
 DEFAULT_CANDIDATE = 0.05
 DEFAULT_REVIEW = 0.50
 DEFAULT_HIGH = 0.92
@@ -142,13 +153,83 @@ def build_blocking_rule(sql: str):
     return CustomRule(sql)
 
 
+def numeric_thresholds(spec: dict) -> list:
+    """The ascending thresholds of a ``custom.NumericDifferenceAtThresholds``.
+
+    The numbers come back as they were written, so a whole number stays whole
+    and the generated SQL reads ``<= 1`` rather than ``<= 1.0``.
+    """
+    raw = (spec.get("splink_args") or {}).get("thresholds")
+    if not isinstance(raw, list):
+        return []
+    return [value for value in raw
+            if not isinstance(value, bool) and isinstance(value, (int, float))]
+
+
+def numeric_columns(track_config: dict) -> list[str]:
+    """The columns a numeric-difference comparison reads.
+
+    Cleaning writes text — ``dob_year_clean`` is a string of digits out of
+    ``nullify_outside_range`` — and ``ABS(l - r)`` needs numbers, so the scoring
+    frame casts exactly these columns and nothing else. ``units.parquet`` keeps
+    the text, so the review screen and the vetoes still see what was filed.
+    """
+    out = []
+    for spec in comparisons(track_config):
+        if spec.get("splink_function") in CUSTOM_FUNCTIONS:
+            column = spec.get("column")
+            if isinstance(column, str) and column and column not in out:
+                out.append(column)
+    return out
+
+
+def build_numeric_difference(spec: dict):
+    """``custom.NumericDifferenceAtThresholds`` as a Splink ``CustomComparison``.
+
+    Null level first, then one level per threshold in ascending order, then
+    "all other". A threshold of 0 is an exact match and is labelled as one, so
+    the per-pair explanation reads in plain words.
+    """
+    import splink.comparison_level_library as cll
+    import splink.comparison_library as cl
+
+    column = spec["column"]
+    thresholds = numeric_thresholds(spec)
+    if not thresholds:
+        raise ValueError(f"'{NUMERIC_DIFFERENCE}' needs a thresholds list")
+
+    levels = [cll.NullLevel(column)]
+    for threshold in thresholds:
+        if threshold == 0:
+            label = f"Equal {column}"
+        elif float(threshold).is_integer():
+            label = f"{column} within {int(threshold)}"
+        else:
+            label = f"{column} within {threshold}"
+        levels.append(
+            cll.AbsoluteDifferenceLevel(column, threshold).configure(
+                label_for_charts=label
+            )
+        )
+    levels.append(cll.ElseLevel().configure(label_for_charts="All other"))
+    return cl.CustomComparison(
+        comparison_levels=levels,
+        output_column_name=column,
+        comparison_description=spec.get("description")
+        or f"Numeric difference on {column}",
+    )
+
+
 def build_comparison(spec: dict):
     """A Splink comparison from one ``comparisons`` entry."""
     import splink.comparison_library as cl
 
     name = spec.get("splink_function")
-    if name not in SPLINK_FUNCTIONS:
+    if name not in COMPARISON_FUNCTIONS:
         raise ValueError(f"'{name}' is not an allowed splink_function")
+    if name in CUSTOM_FUNCTIONS:
+        # Term frequency is refused by validation, so nothing to configure.
+        return build_numeric_difference(spec)
     factory = getattr(cl, name.split(".", 1)[1])
     args = spec.get("splink_args") or {}
     comparison = factory(spec["column"], **args)
@@ -194,6 +275,47 @@ def _check_thresholds(settings: dict, errors: list[dict]) -> None:
                "The high threshold must be at or above the review threshold")
 
 
+def _check_numeric_difference(spec: dict, path: str, errors: list[dict]) -> None:
+    """``thresholds``: a non-empty ascending list of numbers, zero or more.
+
+    Term frequency is refused. The levels here are gaps between two numbers, not
+    values; down-weighting a common birth year is exactly the mistake that let a
+    37-year gap score 1.0 in the first PSC sample run.
+    """
+    args = spec.get("splink_args")
+    if args is not None and not isinstance(args, dict):
+        return  # already reported as "splink_args must be an object"
+    raw = (args or {}).get("thresholds")
+    if not isinstance(raw, list) or not raw:
+        _error(errors, f"{path}.splink_args.thresholds",
+               f"{NUMERIC_DIFFERENCE} needs a non-empty list of thresholds")
+    else:
+        previous = None
+        bad = False
+        for index, value in enumerate(raw):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                _error(errors, f"{path}.splink_args.thresholds[{index}]",
+                       "A threshold must be a number")
+                bad = True
+                continue
+            if float(value) < 0:
+                _error(errors, f"{path}.splink_args.thresholds[{index}]",
+                       "A threshold must be zero or more")
+                bad = True
+                continue
+            if previous is not None and float(value) <= previous:
+                _error(errors, f"{path}.splink_args.thresholds[{index}]",
+                       "Thresholds must be in ascending order")
+                bad = True
+            previous = float(value)
+        if bad:
+            return
+    if spec.get("term_frequency"):
+        _error(errors, f"{path}.term_frequency",
+               f"{NUMERIC_DIFFERENCE} cannot use a term-frequency adjustment: "
+               "its levels are gaps between numbers, not values")
+
+
 def _check_track(track: str, config: dict, known: set[str], errors: list[dict]) -> None:
     base = f"linkage_settings.tracks.{track}"
     if not isinstance(config, dict):
@@ -231,9 +353,12 @@ def _check_track(track: str, config: dict, known: set[str], errors: list[dict]) 
                 _error(errors, path, "A comparison must be an object")
                 continue
             function = spec.get("splink_function")
-            if function not in SPLINK_FUNCTIONS:
+            if function not in COMPARISON_FUNCTIONS:
                 _error(errors, f"{path}.splink_function",
-                       f"splink_function must be one of {', '.join(SPLINK_FUNCTIONS)}")
+                       "splink_function must be one of "
+                       f"{', '.join(COMPARISON_FUNCTIONS)}")
+            elif function == NUMERIC_DIFFERENCE:
+                _check_numeric_difference(spec, path, errors)
             column = spec.get("column")
             if not isinstance(column, str) or not column:
                 _error(errors, f"{path}.column", "A comparison needs a column")

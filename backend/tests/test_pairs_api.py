@@ -172,6 +172,9 @@ def test_the_counts_describe_the_whole_run_and_ignore_the_filters(client, db_pat
         "import_agrees": 1, "import_disagrees": 2, "import_unknown": 1,
         "held": 1, "labelled": 0, "unlabelled": 4,
         "person": 3, "organisation": 1,
+        # This run was scored before vetoes existed, so its pairs file has no
+        # veto column at all — and "nothing was vetoed" is the truth about it.
+        "vetoed": 0, "veto_conflicts_import": 0,
     }
 
 
@@ -368,3 +371,24 @@ def test_re_bucketing_refuses_a_review_line_above_the_accept_line(client, db_pat
     response = client.post(f"/api/runs/{RUN_ID}/re-bucket",
                            json={"threshold_high": 0.5, "threshold_review": 0.9})
     assert response.status_code == 400
+
+
+def test_evidence_rows_come_back_when_a_profile_has_no_date_column(
+    client, db_path, data_dir
+):
+    """PSC's evidence rows are companies, keyed on `notified_on`, not donations.
+
+    Ordering on a column the events file does not carry is a hard DuckDB error,
+    so the pair detail used to 500 on every PSC pair.
+    """
+    run_dir = _seed_run(db_path, data_dir)
+    pd.DataFrame({
+        "record_id": ["1", "1b", "2"],
+        "company_number": ["00000001", "00000002", "00000003"],
+        "notified_on": ["2020-01-01", "2021-01-01", "2019-01-01"],
+    }).to_parquet(run_dir / "events.parquet", index=False)
+
+    body = client.get(f"/api/runs/{RUN_ID}/pairs/1%7C2").json()
+    assert [row["company_number"] for row in body["events"]["left"]] == \
+        ["00000002", "00000001"]
+    assert body["events"]["right"][0]["company_number"] == "00000003"

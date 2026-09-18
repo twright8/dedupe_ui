@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from app.pipeline.dedupe import label_overlay
-from app.rules import keys, keys_eval
+from app.rules import keys, keys_eval, vetoes
 
 HISTOGRAM_BINS = 50
 
@@ -194,6 +194,71 @@ def _accepted_at(pairs: pd.DataFrame, column: str, high: float,
     return pairs[(values >= limits).to_numpy()]
 
 
+def _vetoed(pairs: pd.DataFrame) -> np.ndarray:
+    """Which pairs a veto stopped. All False on a run with no vetoes."""
+    if not len(pairs) or "vetoed_by" not in pairs.columns:
+        return np.zeros(len(pairs), dtype=bool)
+    return pairs["vetoed_by"].notna().to_numpy()
+
+
+def _without_vetoes(records, members, units, pairs: pd.DataFrame) -> dict:
+    """The whole figure set as it would read if no veto had run.
+
+    The top level is the score plus the import overlay with the vetoes taken
+    off; ``score_only`` under it leaves the import-only accepts out, the same
+    way the real ``score_only`` does.
+    """
+    if len(pairs):
+        accepted = pairs[vetoes.bucket_without_vetoes(pairs) == "accept"]
+        score_accepted = pairs[pairs["score_bucket"] == "accept"]
+    else:
+        accepted = score_accepted = pairs
+    figures, entities = _figures(records, members, units, accepted)
+    score_figures, score_entities = _figures(records, members, units, score_accepted)
+    return {
+        "entities_after": entities,
+        "pair_precision": figures["pair_precision"],
+        "pair_recall": figures["pair_recall"],
+        "accepted_pairs": int(len(accepted)),
+        "by_track": figures["by_track"],
+        "score_only": {
+            "entities_after": score_entities,
+            "pair_precision": score_figures["pair_precision"],
+            "pair_recall": score_figures["pair_recall"],
+            "accepted_pairs": int(len(score_accepted)),
+            "by_track": score_figures["by_track"],
+        },
+    }
+
+
+def _veto_counts(frame: pd.DataFrame) -> dict:
+    """What the vetoes did to one slice of the pairs.
+
+    ``without_vetoes`` beside it is the same arithmetic on the buckets the run
+    would have had with no veto at all, so "what did the vetoes cost in recall"
+    is readable straight off the file.
+    """
+    if not len(frame) or "vetoed_by" not in frame.columns:
+        return {"vetoed": 0, "vetoed_from_accept": 0, "conflicts_import": 0,
+                "by_veto": {}}
+    vetoed = frame["vetoed_by"].notna().to_numpy()
+    would_accept = vetoes.bucket_without_vetoes(frame) == "accept"
+    conflicts = frame["veto_conflicts_import"].fillna(False).to_numpy() \
+        if "veto_conflicts_import" in frame.columns \
+        else np.zeros(len(frame), dtype=bool)
+    by_veto = {}
+    for veto_id, rows in frame[vetoed].groupby(frame.loc[vetoed, "vetoed_by"]):
+        hit = vetoes.bucket_without_vetoes(rows) == "accept"
+        by_veto[str(veto_id)] = {"pairs": int(len(rows)),
+                                 "from_accept": int(hit.sum())}
+    return {
+        "vetoed": int(vetoed.sum()),
+        "vetoed_from_accept": int((vetoed & would_accept).sum()),
+        "conflicts_import": int(conflicts.sum()),
+        "by_veto": by_veto,
+    }
+
+
 def _comparison_set(records, members, units, accepted) -> dict | None:
     if accepted is None:
         return None
@@ -238,8 +303,15 @@ def evaluate(
     # same old entity id, so those accepts cannot be evidence that the scorer
     # found anything. The score-only figures leave them out, and they are the
     # ones to tune blocking rules and comparisons against.
-    score_accepted = pairs[pairs["score_bucket"] == "accept"] if len(pairs) else pairs
+    stopped = _vetoed(pairs)
+    score_accepted = pairs[(pairs["score_bucket"] == "accept") & ~stopped] \
+        if len(pairs) else pairs
     score_only, score_only_entities = _figures(records, members, units, score_accepted)
+
+    # The same run with no veto in it, so the cost of a veto in recall and its
+    # gain in precision can be read side by side (RULESET.md, Vetoes). With no
+    # veto in the ruleset this is the top level and `score_only` exactly.
+    without_vetoes = _without_vetoes(records, members, units, pairs)
 
     with_human = _human_figures(records, members, units, pairs, applied)
 
@@ -258,8 +330,13 @@ def evaluate(
             "import_disagrees": int(subset["import_disagrees"].fillna(False).sum()),
             "review": _review_block(subset, agreement[mask]),
             "histogram": _histogram(subset["match_probability"], agreement[mask]),
+            "vetoes": _veto_counts(subset),
             **{k: v for k, v in (combined["by_track"].get(str(track)) or {}).items()},
             "score_only": score_only["by_track"].get(str(track)),
+            "without_vetoes": {
+                **(without_vetoes["by_track"].get(str(track)) or {}),
+                "score_only": without_vetoes["score_only"]["by_track"].get(str(track)),
+            },
             "with_human": with_human["by_track"].get(str(track)),
             "exact_only": exact_only["by_track"].get(str(track)),
             "units": int((units["track"] == track).sum())
@@ -276,6 +353,7 @@ def evaluate(
                            {"accept": 0, "review": 0, "reject": 0},
         "decided_by_import": int((pairs["decided_by"] == "import").sum()) if len(pairs) else 0,
         "import_disagrees": int(pairs["import_disagrees"].fillna(False).sum()) if len(pairs) else 0,
+        "vetoes": _veto_counts(pairs),
         "entities_after": entities_after,
         "pair_precision": combined["pair_precision"],
         "pair_recall": combined["pair_recall"],
@@ -294,6 +372,7 @@ def evaluate(
             "pair_recall": score_only["pair_recall"],
             "by_track": score_only["by_track"],
         },
+        "without_vetoes": without_vetoes,
         "with_human": with_human,
         "exact_only": {
             "entities_after": int(len(units)),

@@ -16,7 +16,7 @@ from datetime import date
 import pandas as pd
 
 from app.pipeline.standardise import accent_fold
-from app.rules import conditions, functions
+from app.rules import conditions, functions, vetoes
 
 TRACK_KEYS = ("person", "organisation")
 POSITIONS = ("leading", "trailing", "anywhere")
@@ -1393,8 +1393,8 @@ def validate_ruleset(ruleset, raw_columns) -> list[dict]:
     # column as well as a cleaning target.
     with_derived = _check_derived_columns(ruleset, raw, per_track, errors)
     _check_match_keys(ruleset, with_derived, errors)
-
-    if not isinstance(ruleset.get("vetoes", []), list):
-        _error(errors, "vetoes", "vetoes must be a list")
+    # A veto reads a unit's representative row, which carries the same columns
+    # stage 1 wrote: raw, cleaning targets and derived targets.
+    vetoes.validate(ruleset, with_derived, errors)
 
     return errors

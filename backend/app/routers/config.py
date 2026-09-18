@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from app.auth import current_user
 from app.profiles import get_profile
-from app.rules import engine, functions, linkage
+from app.rules import engine, functions, linkage, vetoes
 from app.services import config_manager
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -152,6 +152,11 @@ class PreviewTracksBody(BaseModel):
 
 
 class PreviewKeysBody(BaseModel):
+    ruleset: Optional[dict[str, Any]] = None
+    run_id: str
+
+
+class PreviewVetoesBody(BaseModel):
     ruleset: Optional[dict[str, Any]] = None
     run_id: str
 
@@ -521,6 +526,80 @@ def preview_keys(body: PreviewKeysBody):
             "by_agreement": evaluation["by_agreement"],
         },
         "baseline": _saved_baseline(body.run_id),
+    }
+
+
+PREVIEW_MAX_VETO_EXAMPLES = 5
+
+# What a veto preview reads off a pair row. Everything else in pairs.parquet —
+# the gammas, the summed priority columns — says nothing about a veto.
+_VETO_PAIR_COLUMNS = ("unit_id_l", "unit_id_r", "track", "match_probability",
+                      "score_bucket", "bucket", "decided_by",
+                      "veto_conflicts_import")
+
+
+def _parquet_columns(path: Path) -> list[str]:
+    import pyarrow.parquet as pq
+
+    return list(pq.ParquetFile(path).schema_arrow.names)
+
+
+@router.post("/preview-vetoes")
+def preview_vetoes(body: PreviewVetoesBody):
+    """What the DRAFT vetoes would stop, veto by veto, on a run's scored pairs.
+
+    ``accepted_pairs_hit`` is the number that matters: pairs the run would
+    otherwise have accepted. The examples lead with those, because a veto that
+    only catches pairs already in reject is not doing anything.
+
+    Only the columns the vetoes name are read out of ``units.parquet``, so a
+    63-column PSC units file costs three or four of them.
+    """
+    import pyarrow.parquet as pq
+
+    from app.services import pairs_reader
+
+    ruleset = _validated(_ruleset_or_current(body.ruleset))
+    run_dir = _data_dir() / "runs" / body.run_id
+    pairs_path = pairs_reader.pairs_path(str(run_dir))
+    units_path = pairs_reader.units_path(str(run_dir))
+    if not pairs_path.is_file() or not units_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run '{body.run_id}' has no scored pairs to preview against",
+        )
+
+    total_pairs = pq.ParquetFile(pairs_path).metadata.num_rows
+    if total_pairs > PREVIEW_MAX_RECORDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This run has {total_pairs:,} scored pairs. The veto preview runs "
+                f"the rules in memory and is capped at {PREVIEW_MAX_RECORDS:,}; "
+                "start the run to see the vetoes on a dataset this size."
+            ),
+        )
+
+    have = set(_parquet_columns(pairs_path))
+    pairs = pd.read_parquet(
+        pairs_path, columns=[c for c in _VETO_PAIR_COLUMNS if c in have]
+    )
+    unit_columns = ["unit_id", "track"]
+    name_column = "name"
+    unit_have = set(_parquet_columns(units_path))
+    if name_column in unit_have:
+        unit_columns.append(name_column)
+    for column in vetoes.columns_needed(ruleset):
+        if column in unit_have and column not in unit_columns:
+            unit_columns.append(column)
+    units = pd.read_parquet(units_path, columns=unit_columns)
+
+    return {
+        "run_id": body.run_id,
+        "pairs_total": int(total_pairs),
+        "vetoes": vetoes.report(pairs, units, ruleset,
+                                max_examples=PREVIEW_MAX_VETO_EXAMPLES,
+                                name_column=name_column),
     }
 
 

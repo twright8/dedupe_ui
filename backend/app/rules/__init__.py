@@ -8,6 +8,7 @@ here, so a preview can never disagree with a run.
   functions.py   the fixed function library, with the metadata the UI lists
   conditions.py  the condition operators a track or derived rule may use
   engine.py      validation, track assignment, cleaning, derived columns
+  vetoes.py      the pair rules that stop a score accepting an impossible pair
 """
 
 from app.rules.engine import (  # noqa: F401  (re-exported for convenience)

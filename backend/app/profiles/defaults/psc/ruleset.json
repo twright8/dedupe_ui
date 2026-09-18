@@ -895,6 +895,24 @@
           "canonical": "AE"
         }
       ]
+    },
+    "roman_numerals": {
+      "description": "Roman numerals as digits, so FUND II and FUND 2 carry the same suffix. Passthrough, because a suffix that is already a number stays one.",
+      "fallback": "passthrough",
+      "rows": [
+        { "raw": "I", "canonical": "1" },
+        { "raw": "II", "canonical": "2" },
+        { "raw": "III", "canonical": "3" },
+        { "raw": "IV", "canonical": "4" },
+        { "raw": "V", "canonical": "5" },
+        { "raw": "VI", "canonical": "6" },
+        { "raw": "VII", "canonical": "7" },
+        { "raw": "VIII", "canonical": "8" },
+        { "raw": "IX", "canonical": "9" },
+        { "raw": "X", "canonical": "10" },
+        { "raw": "XI", "canonical": "11" },
+        { "raw": "XII", "canonical": "12" }
+      ]
     }
   },
   "track_rules": [
@@ -1406,6 +1424,33 @@
         "target": "type_bucket_default",
         "pattern": "^.+$",
         "replacement": "OTHER"
+      },
+      {
+        "id": "o26",
+        "description": "Blank every core name that does not end in a numeral, so what survives is a suffix and nothing else. A one-letter roman numeral is deliberately not counted: PROJECT X is a name, not project ten, and this veto rejects.",
+        "op": "regex_replace",
+        "source": "name_core",
+        "target": "numeric_suffix",
+        "pattern": "^(?!.*\\s(?:II|III|IV|VI|VII|VIII|IX|XI|XII|XIII|[0-9]{1,4})$).*$",
+        "replacement": ""
+      },
+      {
+        "id": "o27",
+        "description": "Keep the trailing numeral on its own: SMITH FUND III becomes III",
+        "op": "regex_replace",
+        "source": "numeric_suffix",
+        "target": "numeric_suffix",
+        "pattern": "^.*\\s(II|III|IV|VI|VII|VIII|IX|XI|XII|XIII|[0-9]{1,4})$",
+        "replacement": "\\1"
+      },
+      {
+        "id": "o28",
+        "description": "Roman numerals as digits, so FUND II and FUND 2 do not read as different funds",
+        "op": "lookup",
+        "source": "numeric_suffix",
+        "target": "numeric_suffix",
+        "table": "roman_numerals",
+        "scope": "value"
       }
     ]
   },
@@ -1621,5 +1666,84 @@
       "on_guard_fail": "review"
     }
   ],
-  "vetoes": []
+  "vetoes": [
+    {
+      "id": "v1",
+      "track": "person",
+      "description": "Birth years more than one year apart are different people. The 500,000-record sample accepted SABELO SHONGWE born 1958-07 against SABELO SHONGWE born 1995-07 at p = 1.000000: a birth-year disagreement cost 0.23 bits against a postcode worth 12.82 and a surname worth 10.27, so the score could never express it. One year of slack is left for an off-by-one filing.",
+      "when": [
+        {
+          "column": "dob_year_clean",
+          "op": "abs_diff_gt",
+          "value": 1
+        }
+      ],
+      "action": "reject",
+      "reason": "Born {left} and {right}"
+    },
+    {
+      "id": "v2",
+      "track": "person",
+      "description": "Two clearly different forenames are siblings or spouses at one address, not one person. Review and not reject: a filing may carry a middle name where another carries a first name, and the nickname lookup has already had its chance, so a human decides.",
+      "when": [
+        {
+          "column": "forename_canon",
+          "op": "differs"
+        },
+        {
+          "column": "forename_canon",
+          "op": "similarity_lt",
+          "value": 0.7
+        }
+      ],
+      "action": "review",
+      "reason": "Forenames {left} and {right}"
+    },
+    {
+      "id": "ov1",
+      "track": "organisation",
+      "description": "Two different registration numbers, both present, are two registrations. deduping's corporate veto set, ported.",
+      "when": [
+        {
+          "column": "regnum_clean",
+          "op": "differs"
+        }
+      ],
+      "action": "reject",
+      "reason": "Registered as {left} and {right}"
+    },
+    {
+      "id": "ov4",
+      "track": "organisation",
+      "description": "Fund II is not Fund III (deduping's veto B), over the cleaned numeric suffix with roman numerals read as digits.",
+      "when": [
+        {
+          "column": "numeric_suffix",
+          "op": "differs"
+        }
+      ],
+      "action": "reject",
+      "reason": "Numbered {left} and {right}"
+    }
+  ],
+  "_vetoes_measured_and_not_shipped": [
+    {
+      "id": "v3",
+      "track": "person",
+      "rule": "nationality_norm differs -> review",
+      "why_not": "It hits 86,802 pairs on the 500,000-record sample, 10,509 of which the run would otherwise have accepted, and the accepted ones look like one person rather than two: Mr Talat Mahmood BRITISH against Mr Talat Mahmood Pakistani, Mrs Selina Nyasha Bota Zimbabwean against Mrs Selina Nyasha Chimwara BRITISH. Naturalisation and a married name both change the filing, so a nationality disagreement is not evidence of two people. nationality_norm also holds comma-joined multi-values ('British,Cypriot'), which `differs` reads as one string."
+    },
+    {
+      "id": "ov2",
+      "track": "organisation",
+      "rule": "country_canonical differs -> review",
+      "why_not": "deduping's veto D. It hits 509 pairs, 506 of which the run would otherwise have accepted, and 503 of the 509 carry the SAME registration number. Every example is one company filed twice with the country misspelt: UK against UNITED KINGDSOM, ENGALND, UNITIED KINGDOM, UNITED KINGDOM ENGLAND AND WALES COMPANIES HOUSE. country_canonical carries 435 distinct values where it should carry about 200 codes, because the `countries` lookup is fallback: passthrough and leaves a misspelling as it found it. Turn this on once that lookup covers the spellings, or once its fallback is null."
+    },
+    {
+      "id": "ov3",
+      "track": "organisation",
+      "rule": "legal_form_clean differs -> review",
+      "why_not": "deduping's veto A. It hits 104 pairs, 79 of which the run would otherwise have accepted, and every example is one form spelled two ways: LIMITED against LTD, HOLDINGS LIMITED against GROUP HOLDINGS LIMITED. legal_form_clean is the raw token strip_tokens took off the end, not a canonical form, and the sample holds 139 of them (LIMITED 14,175, LTD 4,819, HOLDINGS LIMITED 3,123, GROUP LIMITED 1,857). What is missing is a `legal_form` lookup mapping those spellings onto a canonical form, the same shape as deduping's has_*_suffix priority ladder. Turn this on against that column, not this one."
+    }
+  ]
 }

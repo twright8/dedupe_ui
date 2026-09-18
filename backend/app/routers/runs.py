@@ -360,6 +360,11 @@ def _normalize_counts(raw):
         "pairsReject": raw.get("pairs_reject", 0),
         "pairsDecidedByImport": raw.get("pairs_decided_by_import", 0),
         "pairsImportDisagrees": raw.get("pairs_import_disagrees", 0),
+        # Vetoes (docs/RULESET.md). `pairsVetoedFromAccept` is the one that
+        # matters: pairs the run would otherwise have auto-accepted.
+        "pairsVetoed": raw.get("pairs_vetoed", 0),
+        "pairsVetoedFromAccept": raw.get("pairs_vetoed_from_accept", 0),
+        "vetoConflictsImport": raw.get("veto_conflicts_import", 0),
         "entitiesAfterScore": raw.get("entities_after_score", 0),
         "scorePairPrecision": raw.get("score_pair_precision"),
         "scorePairRecall": raw.get("score_pair_recall"),
@@ -1124,11 +1129,13 @@ def get_pairs(
     run_id: str,
     track: str | None = Query(None, description="person | organisation"),
     bucket: str | None = Query(None, description="accept | review | reject"),
-    decided_by: str | None = Query(None, description="score | import | human | model"),
+    decided_by: str | None = Query(
+        None, description="score | import | human | model | veto"),
     import_state: str | None = Query(
         None, alias="import", description="agrees | disagrees | unknown"
     ),
     labelled: str | None = Query(None, description="yes | no"),
+    vetoed: str | None = Query(None, description="yes | no"),
     held: str | None = Query(None, description="hide | only"),
     min_score: float | None = Query(None, ge=0, le=1),
     max_score: float | None = Query(None, ge=0, le=1),
@@ -1155,7 +1162,7 @@ def get_pairs(
             import_state=import_state, held=held, min_score=min_score,
             max_score=max_score, min_gbt=min_gbt, max_gbt=max_gbt,
             q=q, sort=sort, order=order,
-            offset=offset, limit=limit, labelled=labelled,
+            offset=offset, limit=limit, labelled=labelled, vetoed=vetoed,
             labels=_run_labels(_db_path()),
         )
     except pairs_reader.PairsNotFound:

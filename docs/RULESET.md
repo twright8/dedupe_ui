@@ -22,7 +22,7 @@ Matching is case-insensitive everywhere. A null input stays null unless a step s
 }
 ```
 
-`vetoes` is reserved for the scoring slice and stays empty until then.
+`vetoes` are described in the section "Vetoes" below.
 
 ## Token lists and lookups
 
@@ -185,6 +185,37 @@ Both scores are reported overall and per track under `by_track`, and are null ra
 
 The donations labels have a known bias (`DESIGN.md`, D13): reviewers merged 99.6% of identical-name pairs of individuals, so they cannot show when two people with the same name are different. Precision here is an agreement figure, not an accuracy figure.
 
+## Vetoes
+
+Implements the fourth rule type of D8. A veto is a rule about a **pair**. It stops the scorer from accepting a pair that a person would never accept, whatever the score says. Example: two people whose birth years are 37 years apart are not one person, even when the name and the postcode agree.
+
+```json
+"vetoes": [
+  { "id": "v1", "track": "person", "description": "Birth years more than 2 apart are different people",
+    "when": [ { "column": "dob_year_clean", "op": "abs_diff_gt", "value": 2 } ],
+    "action": "reject",
+    "reason": "Born {left} and {right}: more than 2 years apart" }
+]
+```
+
+- A veto applies to scored pairs of units on its `track`. Every condition in `when` must hold. Conditions compare the LEFT unit's value with the RIGHT unit's value of one column. A condition is false when either side is null, so missing data never triggers a veto.
+- Pair operators: `differs` (both present, not equal), `abs_diff_gt` and `abs_diff_gte` (numeric difference, `value`), `similarity_lt` (Jaro-Winkler below `value`), `both_in_and_differ` (`lists`: both values are in the named token lists and they differ), `no_overlap` (the two " | "-joined sets share nothing).
+- `action`: `review` caps the pair at the review bucket (it can never be auto-accepted, a human decides), `reject` puts it in the reject bucket. There is no action that accepts.
+- Order of precedence, lowest to highest: score or model, **veto**, imported label, human label. A veto therefore overrides the scorer and the model. It never overrides a human label, and it never overrides an imported earlier grouping, though a vetoed pair that an imported label accepts is flagged `veto_conflicts_import` so a reviewer can look.
+- A vetoed pair records `vetoed_by` (the veto id) and `veto_reason` (the reason with `{left}` and `{right}` filled in). The review screen shows the reason. Vetoed pairs are excluded from cluster edges exactly as any non-accepted pair is.
+- The model trains on labels only, so vetoes do not change training. They do apply to model-decided buckets.
+- Vetoes run in stage 3 after scoring and again on re-bucket, apply-model and revert-model, without rescoring.
+
+Preview: `POST /api/config/preview-vetoes` body `{ruleset?, run_id}` returns, per veto, `{id, description, action, pairs_hit, accepted_pairs_hit, examples: [{pair_id, left_name, right_name, left_value, right_value, score, reason}]}`. `accepted_pairs_hit` is the number that matters: pairs the run would otherwise have accepted. Written out with a real response in `PAIRS_API.md`, "Vetoes".
+
+Run counts: `pairsVetoed`, `pairsVetoedFromAccept`, `vetoConflictsImport`. Pair items gain `vetoed_by` and `veto_reason`. The pairs list gains the filter `vetoed=yes|no`.
+
+Three things the rules above leave open, settled in the build and written out in `LINKAGE.md`:
+
+- **Where they are applied.** Materialised into `pairs.parquet` at stage 3 and re-applied by the re-bucket, apply-model and revert-model paths, not joined at read time like a human label. A run's ruleset is snapshotted when it starts, so the vetoes cannot change under it.
+- **`decided_by` gains the value `veto`**, beside `score`, `model`, `import` and `human`, so a reviewer can see why a pair scoring 1.0 is sitting in review. `vetoed=yes|no` is a different question from `decided_by=veto`: a vetoed pair an imported label accepted reads `decided_by: "import"` and is still `vetoed=yes`.
+- **More than one veto on one pair.** The strongest action applies — `reject` beats `review` — and `vetoed_by` names the first veto in document order carrying that action. `{left}` and `{right}` are filled from the two sides' values of the first column the veto's conditions name, and a whole number loses its `.0`.
+
 ## API
 
 | Endpoint | Purpose |
@@ -200,6 +231,7 @@ The donations labels have a known bias (`DESIGN.md`, D13): reviewers merged 99.6
 | `GET /api/config/diff/{v1}/{v2}` | one entry per ruleset section plus `linkage_settings` |
 | `POST /api/config/preview-derived` | body `{ruleset?, run_id}`. Returns `{columns: [...]}` — see "Derived columns" |
 | `POST /api/config/preview-keys` | body `{ruleset?, run_id}`. Returns `{keys, overall, eval, baseline}` |
+| `POST /api/config/preview-vetoes` | body `{ruleset?, run_id}`. Returns `{run_id, pairs_total, vetoes}` — see "Vetoes" and `PAIRS_API.md` |
 | `GET /api/pipeline/stages` | the stages that exist today: `[{key, label, description}]` |
 | `GET /api/runs/{id}/exact-groups` | one page of the groups stage 2 made |
 | `GET /api/runs/{id}/exact-groups/{group_id}` | one group plus its member records |
