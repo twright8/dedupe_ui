@@ -143,7 +143,8 @@ def test_diff_covers_every_section(db_path, ruleset):
     diff = _two_versions(db_path, ruleset, ruleset)
     assert set(diff) == {
         "token_lists", "lookups", "track_rules", "default_track",
-        "cleaning.person", "cleaning.organisation", "match_keys", "vetoes",
+        "cleaning.person", "cleaning.organisation", "derived_columns",
+        "match_keys", "vetoes",
         "linkage_settings",
     }
     assert all(section["changed"] is False for section in diff.values())

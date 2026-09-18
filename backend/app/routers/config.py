@@ -141,6 +141,11 @@ class PreviewCleaningBody(BaseModel):
     n: int = PREVIEW_DEFAULT_N
 
 
+class PreviewDerivedBody(BaseModel):
+    ruleset: Optional[dict[str, Any]] = None
+    run_id: str
+
+
 class PreviewTracksBody(BaseModel):
     ruleset: Optional[dict[str, Any]] = None
     run_id: str
@@ -239,6 +244,9 @@ def _columns_response(ruleset: dict, track: str) -> dict:
     return {
         "raw": [{"key": key, "label": labels.get(key, key)} for key in columns["raw"]],
         "steps": columns["steps"],
+        # Kept apart from `steps`: a derived column must not read as a clash with
+        # itself when the Config screen checks its target against what exists.
+        "derived": columns["derived"],
         "all": columns["all"],
     }
 
@@ -337,6 +345,73 @@ def preview_tracks(body: PreviewTracksBody):
             track: int((tracks == track).sum()) for track in engine.TRACK_KEYS
         },
         "rules": reported,
+    }
+
+
+@router.post("/preview-derived")
+def preview_derived(body: PreviewDerivedBody):
+    """What the DRAFT derived columns would change, column by column.
+
+    Like the key preview, the whole chain reruns in memory — tracks, cleaning,
+    then the derived rules — so editing a cleaning step shows its effect here
+    too rather than needing a run first.
+    """
+    from app.pipeline.dedupe.stage_1_clean import clean_records_detailed
+
+    ruleset = _validated(_ruleset_or_current(body.ruleset))
+    records = _raw_records(body.run_id)
+    if len(records) > PREVIEW_MAX_RECORDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This run has {len(records):,} records. The derived preview runs the "
+                f"whole ruleset in memory and is capped at {PREVIEW_MAX_RECORDS:,}; "
+                "start the run to see the derived columns on a dataset this size."
+            ),
+        )
+
+    try:
+        cleaned, reports = clean_records_detailed(records, ruleset)
+    except engine.UnmappedLookupValuesError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"kind": "unmapped_lookup_values", "table": exc.table, "values": exc.values},
+        )
+
+    return {"columns": [_derived_column_report(report, cleaned) for report in reports]}
+
+
+def _derived_column_report(report: dict, records: pd.DataFrame) -> dict:
+    """One derived column as the Config screen shows it."""
+    rules = []
+    for rule in report["rules"]:
+        shown = ["record_id", "name"] + [
+            c for c in rule["columns"] if c not in ("record_id", "name")
+        ]
+        shown = [c for c in shown if c in records.columns]
+        rows = records.loc[rule["mask"], shown].head(PREVIEW_MAX_EXAMPLES).copy()
+        # "What it was" is the whole point of an example here, so the value the
+        # default would have given rides along with each one.
+        rows["from"] = report["before"].loc[rows.index]
+        examples = json.loads(rows.to_json(orient="records"))
+        rules.append({
+            "id": rule["id"],
+            "description": rule["description"],
+            "value": rule["value"],
+            "hits": rule["hits"],
+            "examples": examples,
+        })
+
+    return {
+        "id": report["id"],
+        "target": report["target"],
+        "description": report["description"],
+        "default_from": report["default_from"],
+        "tracks": report["tracks"],
+        "total": report["total"],
+        "changed": report["changed"],
+        "transitions": engine.transitions(report),
+        "rules": rules,
     }
 
 

@@ -44,10 +44,16 @@ def load_ruleset(config_dir: str | Path) -> dict:
 
 
 def clean_records(records: pd.DataFrame, ruleset: dict) -> pd.DataFrame:
-    """Assign tracks and apply each track's cleaning to *records*.
+    """Assign tracks, clean, and derive. See ``clean_records_detailed``."""
+    return clean_records_detailed(records, ruleset)[0]
 
-    Returns the raw columns plus ``track`` plus every cleaning target, in the
-    original row order.
+
+def clean_records_detailed(records: pd.DataFrame, ruleset: dict):
+    """``(frame, derived)`` — the cleaned records and each derived column's report.
+
+    Returns the raw columns, ``track``, every cleaning target, and then every
+    derived column with its ``<target>_rule``, in the original row order. The
+    derived columns run last, so their rules may read a cleaning target.
     """
     raw_columns = list(records.columns)
     frame = records.copy()
@@ -78,7 +84,15 @@ def clean_records(records: pd.DataFrame, ruleset: dict) -> pd.DataFrame:
             # the other track. Make every missing cleaning value one thing.
             values = cleaned[column].astype("object")
             cleaned[column] = values.where(values.notna(), None)
-    return cleaned[ordered]
+
+    # Derived columns run once over both tracks, after cleaning, so a rule may
+    # read a cleaning target and a column may be scoped to one track.
+    cleaned, derived = engine.derived_detailed(cleaned[ordered], ruleset)
+    for report in derived:
+        for column in engine.derived_targets({"target": report["target"]}):
+            if column not in ordered:
+                ordered.append(column)
+    return cleaned[ordered], derived
 
 
 def run_stage_1_clean(
@@ -107,8 +121,15 @@ def run_stage_1_clean(
     records = pd.read_parquet(run_dir / RECORDS_RAW_FILENAME)
 
     _step(f"Assigning tracks and cleaning {len(records):,} records...", progress_callback)
-    cleaned = clean_records(records, ruleset)
+    cleaned, derived = clean_records_detailed(records, ruleset)
     validate_records(cleaned)
+
+    for report in derived:
+        _step(
+            f"Derived {report['target']}: {report['changed']:,} of "
+            f"{report['total']:,} records changed.",
+            progress_callback,
+        )
 
     cleaned.to_parquet(run_dir / RECORDS_FILENAME, index=False)
 

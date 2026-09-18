@@ -110,11 +110,32 @@ Implements D8a, stage 1. A derived column standardises a category with ordered r
 - Rules are tried in order. The first rule whose conditions all hold sets `target` to its `value`. If none holds, `target` takes the value of the `default_from` column.
 - `tracks` limits the derived column to those tracks. Records in other tracks get the `default_from` value. Omitted means every track.
 - The stage also writes `<target>_rule`: the id of the rule that set the value, or null when the default applied. The entity stage uses it, because a value set by a rule beats a raw value (D8a, stage 2).
-- `target` must be a new column. It may not be a raw column or a cleaning target.
+- `target` must be a new column: lower case letters, digits and underscores, starting with a letter. It may not be a raw column, a cleaning target, another derived target, or end in `_rule`.
 - Derived columns run in document order. A later one may read an earlier target.
-- New condition operator, valid in track rules too: `starts_with` with `values` — true when the value starts with any of them, case-insensitive. `matches_digit_start` is not needed: use `matches` with `^[0-9]`.
+- Every column a rule reads — and `default_from` — must exist for **every** track the column applies to. One scoped to organisations may read `name_core`; one scoped to both tracks may not.
+- New condition operator, valid in track rules too: `starts_with` with `values` — true when the value starts with any of them, case-insensitive; null is false. `matches_digit_start` is not needed: use `matches` with `^[0-9]`.
+- A ruleset saved before derived columns existed has no `derived_columns`. It is read as an empty list, and nothing is re-seeded.
 
-Preview: `POST /api/config/preview-derived` body `{ruleset?, run_id}` returns, per derived column, `{id, target, total, changed, transitions: [{from, to, count}], rules: [{id, description, value, hits, examples: [{record_id, name, from, ...columns the conditions read}]}]}`, with a final rule entry `id: "default"`.
+`GET/POST /api/config/columns` lists that track's derived targets in `all`, after the cleaning targets, and describes them in a `derived` list of `{derived_id, targets}` — the column and its `<target>_rule`. They are deliberately **not** in `steps`, which stays the cleaning steps, so the editor's "this name is taken" check does not read a derived column as a clash with itself. Only the target itself goes in `all`; `<target>_rule` records which rule fired and is never something to block or compare on. A match key or a Splink rule may name a derived target, because stages 2 and 3 run after stage 1.
+
+`GET /api/runs/{id}/records` reports a derived column with `source: "cleaning"` and `derived: true`, so the records table keeps every rule-written column under its one toggle. Every other column carries `derived: false`.
+
+Preview: `POST /api/config/preview-derived` body `{ruleset?, run_id}` returns `{columns: [...]}`, one entry per derived column:
+
+```json
+{ "id": "d1", "target": "donor_status_std", "description": "...",
+  "default_from": "donor_status", "tracks": ["organisation"],
+  "total": 51839, "changed": 196,
+  "transitions": [ { "from": "Company", "to": "Friendly Society", "count": 118 } ],
+  "rules": [ { "id": "d1r1", "description": "...", "value": "Limited Liability Partnership",
+               "hits": 221,
+               "examples": [ { "record_id": "1", "name": "Acme LLP", "from": "Company",
+                               "company_number_clean": "OC314414" } ] } ] }
+```
+
+`transitions` are largest first and their counts sum to `changed`. `rules` ends with an entry whose id is `"default"`, covering every record no rule decided — including the records of a track the column does not apply to — so the hits sum to `total`. Each rule carries up to 10 examples: `record_id`, `name`, `from` (the value the default would have given) and the columns that rule's conditions read.
+
+The whole chain reruns in memory — tracks, cleaning, then the derived rules — so a cleaning edit shows its effect here. An invalid draft returns 422 in the same shape as `POST /api/config`, an unmapped lookup returns 422 with `{kind, table, values}`, and a run of more than 1,000,000 records returns 400, exactly as `preview-keys` does.
 
 ## Match keys
 
@@ -175,6 +196,7 @@ The donations labels have a known bias (`DESIGN.md`, D13): reviewers merged 99.6
 | `POST /api/config/preview-tracks` | body `{ruleset?, run_id}`. Returns `{total, tracks: {person, organisation}, rules: [...]}` |
 | `POST /api/config/lookups/{name}/rows` | body `{rows: [{raw, canonical}], note}`. Saves a new version with the rows added. Returns `{version, added}`; `added: 0` saves nothing |
 | `GET /api/config/diff/{v1}/{v2}` | one entry per ruleset section plus `linkage_settings` |
+| `POST /api/config/preview-derived` | body `{ruleset?, run_id}`. Returns `{columns: [...]}` — see "Derived columns" |
 | `POST /api/config/preview-keys` | body `{ruleset?, run_id}`. Returns `{keys, overall, eval, baseline}` |
 | `GET /api/pipeline/stages` | the stages that exist today: `[{key, label, description}]` |
 | `GET /api/runs/{id}/exact-groups` | one page of the groups stage 2 made |
@@ -219,7 +241,7 @@ The donations labels have a known bias (`DESIGN.md`, D13): reviewers merged 99.6
 
 `diff` reports one entry per section — `token_lists`, `lookups`, `track_rules`, `default_track`, `cleaning.person`, `cleaning.organisation`, `match_keys`, `vetoes`, `linkage_settings`. A section of items reports `{changed, added, removed, modified}`, each a list of ids (or names, for `token_lists` and `lookups`). `default_track` and `linkage_settings` are compared whole and report `{changed, v1, v2}`.
 
-`GET /api/runs/{id}/records` adds `columns: [{key, label, type, source}]`, in frame order. `source` is `profile` for a column the profile declares (with its label and type) and `cleaning` for one a rule wrote, whose label is its own name and whose type is `text`.
+`GET /api/runs/{id}/records` adds `columns: [{key, label, type, source, derived}]`, in frame order. `source` is `profile` for a column the profile declares (with its label and type) and `cleaning` for one a rule wrote, whose label is its own name and whose type is `text`. `derived` is true for a derived column and its `<target>_rule`, read from the run's own ruleset snapshot.
 
 A run that fails on an unmapped lookup stores `error_detail` as `{kind: "unmapped_lookup_values", table, values}`, which is what `POST /api/config/lookups/{name}/rows` is there to fix.
 

@@ -739,6 +739,7 @@ export default function ReviewScreen() {
           items={items}
           current={current}
           columns={columns}
+          displayColumns={profile.display_columns || []}
           eventColumns={eventColumns}
           labelOf={labelOf}
           onLabel={handleLabel}
@@ -1060,6 +1061,7 @@ function ReviewDiff({
   items,
   current,
   columns,
+  displayColumns,
   eventColumns,
   labelOf,
   onLabel,
@@ -1191,7 +1193,7 @@ function ReviewDiff({
       {/* The pair */}
       <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
         <DiffHero pair={pair} high={threshold} review={reviewLow} />
-        <UnitCompare pair={pair} columns={columns} />
+        <UnitCompare pair={pair} columns={columns} displayColumns={displayColumns} />
         {detailError ? (
           <p style={{ fontSize: 12.5, color: "var(--ti-red)" }}>{detailError}</p>
         ) : (
@@ -1217,13 +1219,110 @@ function ReviewDiff({
   );
 }
 
-// The same fields for both sides, aligned, with the differences marked.
-function UnitCompare({ pair, columns }) {
+/* Bookkeeping the pipeline needs and a reviewer does not. Unit size and the
+   entity IDs are already chips in the header, which is where they belong. */
+const SYSTEM_COLUMNS = new Set([
+  "unit_id",
+  "unit_size",
+  "record_id",
+  "track",
+  "review_state",
+  "held_group_id",
+  "existing_entity_id",
+  "existing_entity_ids",
+  "n_existing_ids",
+  "is_trust",
+]);
+
+/* The donation pattern is spelled out in one line above the evidence tables,
+   so only the two figures that carry a profile label stay here. */
+const PATTERN_COLUMNS = new Set(["n_distinct_values", "share_round_1000", "top_values"]);
+
+const CLEANED_OPEN_KEY = "review.cleanedColumnsOpen";
+
+function readOpen() {
+  try {
+    return window.localStorage.getItem(CLEANED_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+// One row of the comparison, or nothing when neither side has a value.
+function CompareRow({ col, left, right, mono }) {
+  const a = left[col.key];
+  const b = right[col.key];
+  if ((a == null || a === "") && (b == null || b === "")) return null;
+  const same = String(a ?? "") === String(b ?? "");
+  const numeric = NUMERIC_TYPES.has(col.type);
+  // A share arrives as a fraction; nobody reads 0.6 as "60% of them".
+  const type = col.key === "share_round_1000" ? "percent" : col.type;
+  const render = (v) =>
+    type === "percent" && Number.isFinite(Number(v)) ? (
+      `${Math.round(Number(v) * 100)}%`
+    ) : (
+      <Cell value={v} type={col.type} />
+    );
+
+  return (
+    <tr>
+      <td className="muted" style={{ whiteSpace: "normal" }}>
+        {mono ? <span className="mono">{col.key}</span> : col.label}
+      </td>
+      {[a, b].map((v, i) => (
+        <td
+          key={i}
+          className={numeric ? "mono tnum" : ""}
+          style={{
+            textAlign: numeric ? "right" : "left",
+            whiteSpace: "normal",
+            overflowWrap: "anywhere",
+            background: same ? undefined : "var(--ti-red-50)",
+          }}
+        >
+          {render(v)}
+        </td>
+      ))}
+    </tr>
+  );
+}
+
+// The same fields for both sides, aligned, with the differences marked. The
+// profile's own columns lead, in the profile's order; everything cleaning and
+// the derived columns wrote sit in a section that stays shut until asked for.
+function UnitCompare({ pair, columns, displayColumns }) {
   const left = pair?.left || {};
   const right = pair?.right || {};
-  const cols = (columns || []).filter((c) => c.key !== "unit_id");
+  const [cleanedOpen, setCleanedOpen] = useState(readOpen);
 
-  if (cols.length === 0) return null;
+  function toggleCleaned() {
+    setCleanedOpen((open) => {
+      try {
+        window.localStorage.setItem(CLEANED_OPEN_KEY, open ? "0" : "1");
+      } catch {
+        // A browser with storage blocked simply forgets the choice.
+      }
+      return !open;
+    });
+  }
+
+  const usable = (columns || []).filter(
+    (c) => !SYSTEM_COLUMNS.has(c.key) && !PATTERN_COLUMNS.has(c.key)
+  );
+  const order = new Map((displayColumns || []).map((c, i) => [c.key, i]));
+  const profileCols = usable
+    .filter((c) => c.source !== "cleaning")
+    .sort((a, b) => (order.get(a.key) ?? 999) - (order.get(b.key) ?? 999));
+  const cleanedCols = usable.filter((c) => c.source === "cleaning");
+
+  const hasRow = (c) => {
+    const a = left[c.key];
+    const b = right[c.key];
+    return !((a == null || a === "") && (b == null || b === ""));
+  };
+  const cleanedShown = cleanedCols.filter(hasRow);
+
+  if (profileCols.length === 0 && cleanedShown.length === 0) return null;
 
   return (
     <div className="card">
@@ -1244,40 +1343,31 @@ function UnitCompare({ pair, columns }) {
             </tr>
           </thead>
           <tbody>
-            {cols.map((c) => {
-              const a = left[c.key];
-              const b = right[c.key];
-              const bothEmpty = (a == null || a === "") && (b == null || b === "");
-              if (bothEmpty) return null;
-              const same = String(a ?? "") === String(b ?? "");
-              const numeric = NUMERIC_TYPES.has(c.type);
-              return (
-                <tr key={c.key}>
-                  <td className="muted" style={{ whiteSpace: "normal" }}>
-                    {c.label}
-                    {c.source === "cleaning" && (
-                      <div className="mono" style={{ fontSize: 11, color: "var(--muted-2)" }}>
-                        cleaned
-                      </div>
-                    )}
-                  </td>
-                  {[a, b].map((v, i) => (
-                    <td
-                      key={i}
-                      className={numeric ? "mono tnum" : ""}
-                      style={{
-                        textAlign: numeric ? "right" : "left",
-                        whiteSpace: "normal",
-                        overflowWrap: "anywhere",
-                        background: same ? undefined : "var(--ti-red-50)",
-                      }}
-                    >
-                      <Cell value={v} type={c.type} />
-                    </td>
-                  ))}
-                </tr>
-              );
-            })}
+            {profileCols.map((c) => (
+              <CompareRow key={c.key} col={c} left={left} right={right} />
+            ))}
+
+            {cleanedShown.length > 0 && (
+              <tr>
+                <td colSpan={3} style={{ background: "var(--surface-sub)", padding: 0 }}>
+                  <button
+                    className="btn sm ghost"
+                    style={{ width: "100%", justifyContent: "flex-start", height: 30 }}
+                    onClick={toggleCleaned}
+                  >
+                    {cleanedOpen ? <Icons.arrowD size={12} /> : <Icons.arrowR size={12} />}
+                    Cleaned and derived columns
+                    <span className="muted" style={{ fontSize: 11, marginLeft: 4 }}>
+                      &middot; {cleanedShown.length}
+                    </span>
+                  </button>
+                </td>
+              </tr>
+            )}
+            {cleanedOpen &&
+              cleanedShown.map((c) => (
+                <CompareRow key={c.key} col={c} left={left} right={right} mono />
+              ))}
           </tbody>
         </table>
       </div>

@@ -26,6 +26,13 @@ ON_GUARD_FAIL = ("review", "skip")
 
 TEXT_OPS = ("upper", "lower", "trim", "collapse_spaces", "accent_fold")
 
+# A derived column also writes "<target>_rule", so a target may not end this way
+# or the two would collide.
+RULE_COLUMN_SUFFIX = "_rule"
+
+# A target is a column name, so it is held to the shape the cleaning targets use.
+COLUMN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
 
 class UnmappedLookupValuesError(RuntimeError):
     """A lookup with ``fallback: "error"`` met values it cannot map.
@@ -74,6 +81,30 @@ def cleaning_steps(ruleset: dict, track: str) -> list[dict]:
         return []
     steps = cleaning.get(track)
     return [s for s in steps if isinstance(s, dict)] if isinstance(steps, list) else []
+
+
+def derived_columns(ruleset: dict) -> list[dict]:
+    """The ruleset's derived columns, in document order.
+
+    A ruleset saved before derived columns existed simply has none, so the
+    section is read as empty rather than forcing a re-seed.
+    """
+    value = ruleset.get("derived_columns")
+    return [d for d in value if isinstance(d, dict)] if isinstance(value, list) else []
+
+
+def derived_tracks(column: dict) -> list[str]:
+    """The tracks a derived column applies to. Omitted or empty means all."""
+    tracks = column.get("tracks")
+    if not isinstance(tracks, list) or not tracks:
+        return list(TRACK_KEYS)
+    return [t for t in tracks if isinstance(t, str)]
+
+
+def derived_targets(column: dict) -> list[str]:
+    """The columns one derived column writes: its target and its rule column."""
+    target = column.get("target")
+    return [target, f"{target}{RULE_COLUMN_SUFFIX}"] if target else []
 
 
 def match_keys(ruleset: dict) -> list[dict]:
@@ -557,6 +588,159 @@ def assign_tracks(df: pd.DataFrame, ruleset: dict) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
+# Derived columns (D8a, stage 1)
+# ---------------------------------------------------------------------------
+
+
+def _rule_mask(rule: dict, frame: pd.DataFrame, token_lists: dict) -> pd.Series:
+    """The records one ordered rule's conditions all hold for.
+
+    A condition naming a column the frame lacks makes the rule fire for nobody,
+    which is what a track rule already does.
+    """
+    matches = pd.Series(True, index=frame.index)
+    for condition in rule.get("when") or []:
+        column = condition.get("column")
+        if column not in frame.columns:
+            return pd.Series(False, index=frame.index)
+        matches &= conditions.evaluate(condition, frame[column], token_lists)
+    return matches
+
+
+def _same_values(left: pd.Series, right: pd.Series) -> pd.Series:
+    """Elementwise equality that counts two missing values as the same."""
+    both_null = left.isna() & right.isna()
+    return both_null | (left == right)
+
+
+def _derive(df: pd.DataFrame, ruleset: dict):
+    """The one derived-column loop. ``(frame, reports)``.
+
+    Reports carry each rule's mask and hit count, plus the before and after
+    values, so the preview and the pipeline read the same run of the rules.
+    """
+    frame = df.copy()
+    token_lists = _token_lists(ruleset)
+    reports: list[dict] = []
+
+    for column in derived_columns(ruleset):
+        target = column.get("target")
+        if not target:
+            continue
+
+        source = column.get("default_from")
+        if source in frame.columns:
+            base = frame[source].astype("object")
+            base = base.where(base.notna(), None)
+        else:
+            base = pd.Series([None] * len(frame), index=frame.index, dtype="object")
+
+        tracks = derived_tracks(column)
+        if "track" in frame.columns:
+            in_scope = frame["track"].isin(tracks)
+        else:
+            in_scope = pd.Series(True, index=frame.index)
+
+        values = base.copy()
+        rule_ids = pd.Series([None] * len(frame), index=frame.index, dtype="object")
+        undecided = in_scope.copy()
+        rules: list[dict] = []
+
+        for rule in column.get("rules") or []:
+            decided = _rule_mask(rule, frame, token_lists) & undecided
+            values = values.where(~decided, rule.get("value"))
+            rule_ids = rule_ids.where(~decided, rule.get("id"))
+            undecided &= ~decided
+            rules.append({
+                "id": rule.get("id"),
+                "description": rule.get("description", ""),
+                "value": rule.get("value"),
+                "columns": conditions.columns_read(rule),
+                "hits": int(decided.sum()),
+                "mask": decided,
+            })
+
+        # Out-of-scope records are part of the default: they keep the
+        # default_from value too, so the hits still add up to the record count.
+        untouched = rule_ids.isna()
+        rules.append({
+            "id": "default",
+            "description": f"Everything else keeps its {source} value",
+            "value": None,
+            "columns": [],
+            "hits": int(untouched.sum()),
+            "mask": untouched,
+        })
+
+        values = _blank_to_null(values)
+        frame[target] = values
+        frame[f"{target}{RULE_COLUMN_SUFFIX}"] = rule_ids
+
+        changed = ~_same_values(base, values)
+        reports.append({
+            "id": column.get("id"),
+            "target": target,
+            "description": column.get("description", ""),
+            "default_from": source,
+            "tracks": tracks,
+            "total": int(len(frame)),
+            "changed": int(changed.sum()),
+            "before": base,
+            "after": values,
+            "changed_mask": changed,
+            "rules": rules,
+        })
+
+    return frame, reports
+
+
+def apply_derived_columns(df: pd.DataFrame, ruleset: dict) -> pd.DataFrame:
+    """Run the derived columns over an already-cleaned frame.
+
+    Returns *df* plus each column's target and its ``<target>_rule``. Columns
+    run in document order, so a later one may read an earlier target.
+    """
+    return _derive(df, ruleset)[0]
+
+
+def derived_detailed(df: pd.DataFrame, ruleset: dict):
+    """``apply_derived_columns`` with the per-rule bookkeeping the preview needs."""
+    return _derive(df, ruleset)
+
+
+def transitions(report: dict, limit: int | None = None) -> list[dict]:
+    """``[{from, to, count}]`` for one derived column's report, largest first.
+
+    Counted with a groupby over the changed rows; nothing walks a record.
+    """
+    changed = report["changed_mask"]
+    if not changed.any():
+        return []
+    pairs = pd.DataFrame({
+        "from": report["before"][changed].to_numpy(),
+        "to": report["after"][changed].to_numpy(),
+    })
+    counted = (
+        pairs.groupby(["from", "to"], dropna=False, sort=False)
+        .size()
+        .rename("count")
+        .reset_index()
+        .sort_values(["count", "from", "to"], ascending=[False, True, True],
+                     kind="mergesort")
+    )
+    if limit is not None:
+        counted = counted.head(limit)
+    return [
+        {
+            "from": _cell(row["from"]),
+            "to": _cell(row["to"]),
+            "count": int(row["count"]),
+        }
+        for _, row in counted.iterrows()
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Columns
 # ---------------------------------------------------------------------------
 
@@ -564,8 +748,13 @@ def assign_tracks(df: pd.DataFrame, ruleset: dict) -> pd.Series:
 def available_columns(ruleset: dict, track: str, raw_columns) -> dict:
     """What a step in *track* may read, and what each step writes.
 
-    ``all`` is everything a later step (or a match key) may name: the raw
-    columns plus every target, in the order they come into existence.
+    ``all`` is everything a later step, a match key or a Splink rule may name:
+    the raw columns, then every cleaning target, then every derived target that
+    applies to this track — the order they come into existence.
+
+    ``steps`` stays the cleaning steps alone. The Config screen builds its
+    "columns that already exist" list from it, and a derived column must not
+    count as a clash with itself.
     """
     raw = list(raw_columns)
     steps = []
@@ -576,7 +765,28 @@ def available_columns(ruleset: dict, track: str, raw_columns) -> dict:
         for column in written:
             if column not in targets and column not in raw:
                 targets.append(column)
-    return {"raw": raw, "steps": steps, "targets": targets, "all": raw + targets}
+
+    derived = []
+    derived_names: list[str] = []
+    for column in derived_columns(ruleset):
+        if track not in derived_tracks(column):
+            continue
+        written = derived_targets(column)
+        derived.append({"derived_id": column.get("id"), "targets": written})
+        # The rule column records which rule decided the value. It is not
+        # something to block or compare on, so it stays out of `all`.
+        name = column.get("target")
+        if name and name not in derived_names and name not in targets and name not in raw:
+            derived_names.append(name)
+
+    return {
+        "raw": raw,
+        "steps": steps,
+        "derived": derived,
+        "targets": targets,
+        "derived_targets": derived_names,
+        "all": raw + targets + derived_names,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -627,16 +837,18 @@ def _check_lookups(ruleset: dict, errors: list[dict]) -> None:
                        "Each row needs a raw and a canonical value")
 
 
-def _check_condition(condition, path: str, ruleset: dict, raw_columns, errors) -> None:
+def _check_condition(condition, path: str, ruleset: dict, check_column, errors) -> None:
+    """One condition. *check_column* says whether the column it reads exists,
+    which differs between a track rule (raw columns only, because tracks are
+    decided before cleaning) and a derived-column rule (anything by then)."""
     if not isinstance(condition, dict):
         _error(errors, path, "A condition must be an object")
         return
     column = condition.get("column")
     if not column:
         _error(errors, f"{path}.column", "A condition needs a column")
-    elif column not in raw_columns:
-        _error(errors, f"{path}.column",
-               f"'{column}' is not a column of the input records")
+    else:
+        check_column(column, f"{path}.column")
 
     op = condition.get("op")
     if op not in conditions.OPERATORS:
@@ -692,7 +904,15 @@ def _check_track_rules(ruleset: dict, raw_columns, errors: list[dict]) -> None:
             continue
         for position, condition in enumerate(when):
             _check_condition(condition, f"{path}.when[{position}]",
-                             ruleset, raw_columns, errors)
+                             ruleset, _raw_column_check(raw_columns, errors), errors)
+
+
+def _raw_column_check(raw_columns, errors):
+    """Track rules run before cleaning, so they may only read raw columns."""
+    def check(column: str, path: str) -> None:
+        if column not in raw_columns:
+            _error(errors, path, f"'{column}' is not a column of the input records")
+    return check
 
 
 def _check_step(step, path: str, ruleset: dict, raw_columns, known, errors) -> list[str]:
@@ -801,6 +1021,138 @@ def _check_cleaning(ruleset: dict, raw_columns, errors: list[dict]) -> dict[str,
                     known.append(column)
         per_track[track] = known
     return per_track
+
+
+def _check_derived_columns(ruleset: dict, raw_columns, per_track: dict,
+                           errors: list[dict]) -> dict[str, list[str]]:
+    """Validate the derived columns and return each track's columns with them added.
+
+    Derived columns run after cleaning and in document order, so what a rule may
+    read grows as the list is walked — and differs per track, because a column
+    scoped to organisations never exists for a person.
+    """
+    known = {track: list(columns) for track, columns in per_track.items()}
+    section = ruleset.get("derived_columns", [])
+    if not isinstance(section, list):
+        _error(errors, "derived_columns", "derived_columns must be a list")
+        return known
+
+    cleaning_targets = {c for columns in per_track.values() for c in columns}
+    seen_ids: set[str] = set()
+    seen_targets: set[str] = set()
+
+    for index, column in enumerate(section):
+        path = f"derived_columns[{index}]"
+        if not isinstance(column, dict):
+            _error(errors, path, "A derived column must be an object")
+            continue
+
+        column_id = column.get("id")
+        if not column_id:
+            _error(errors, f"{path}.id", "A derived column needs an id")
+        elif column_id in seen_ids:
+            _error(errors, f"{path}.id", f"Duplicate derived column id '{column_id}'")
+        else:
+            seen_ids.add(column_id)
+
+        tracks = column.get("tracks")
+        if tracks is not None and not isinstance(tracks, list):
+            _error(errors, f"{path}.tracks", "tracks must be a list of track keys")
+            tracks = None
+        applies = list(TRACK_KEYS)
+        if isinstance(tracks, list) and tracks:
+            unknown = [t for t in tracks if t not in TRACK_KEYS]
+            if unknown:
+                _error(errors, f"{path}.tracks",
+                       f"Unknown track '{unknown[0]}' — expected {', '.join(TRACK_KEYS)}")
+            applies = [t for t in tracks if t in TRACK_KEYS]
+
+        target = _check_derived_target(column, path, raw_columns, cleaning_targets,
+                                       seen_targets, errors)
+
+        source = column.get("default_from")
+        if not source:
+            _error(errors, f"{path}.default_from", "A derived column needs a default_from column")
+        else:
+            missing = [t for t in applies if source not in known.get(t, [])]
+            if missing:
+                _error(errors, f"{path}.default_from",
+                       f"'{source}' is not a column of the {' or '.join(missing)} track")
+
+        _check_derived_rules(column, path, ruleset, known, applies, errors)
+
+        if target:
+            seen_targets.add(target)
+            for track in applies:
+                if target not in known.setdefault(track, []):
+                    known[track].append(target)
+
+    return known
+
+
+def _check_derived_target(column, path, raw_columns, cleaning_targets, seen_targets, errors):
+    """A derived target must be a new column of its own. Returns it, or None."""
+    target = column.get("target")
+    if not target:
+        _error(errors, f"{path}.target", "A derived column needs a target")
+        return None
+    if not COLUMN_NAME_RE.match(str(target)):
+        _error(errors, f"{path}.target",
+               "target must be lower case letters, digits and underscores, starting with a letter")
+        return None
+    if target.endswith(RULE_COLUMN_SUFFIX):
+        _error(errors, f"{path}.target",
+               f"target may not end with '{RULE_COLUMN_SUFFIX}' — "
+               "that name is taken by the column recording which rule decided the value")
+        return None
+    if target in raw_columns:
+        _error(errors, f"{path}.target", f"'{target}' is a raw column and may not be overwritten")
+        return None
+    if target in cleaning_targets:
+        _error(errors, f"{path}.target", f"'{target}' is already written by a cleaning step")
+        return None
+    if target in seen_targets:
+        _error(errors, f"{path}.target", f"'{target}' is already written by another derived column")
+        return None
+    return target
+
+
+def _check_derived_rules(column, path, ruleset, known, applies, errors) -> None:
+    rules = column.get("rules", [])
+    if not isinstance(rules, list):
+        _error(errors, f"{path}.rules", "rules must be a list")
+        return
+
+    def check(name: str, at: str) -> None:
+        missing = [t for t in applies if name not in known.get(t, [])]
+        if missing:
+            _error(errors, at, f"'{name}' is not a column of the {' or '.join(missing)} track")
+
+    seen: set[str] = set()
+    for index, rule in enumerate(rules):
+        rule_path = f"{path}.rules[{index}]"
+        if not isinstance(rule, dict):
+            _error(errors, rule_path, "A rule must be an object")
+            continue
+
+        rule_id = rule.get("id")
+        if not rule_id:
+            _error(errors, f"{rule_path}.id", "A rule needs an id")
+        elif rule_id in seen:
+            _error(errors, f"{rule_path}.id", f"Duplicate rule id '{rule_id}'")
+        else:
+            seen.add(rule_id)
+
+        value = rule.get("value")
+        if not isinstance(value, str) or not value.strip():
+            _error(errors, f"{rule_path}.value", "A rule needs a value to set")
+
+        when = rule.get("when")
+        if not isinstance(when, list) or not when:
+            _error(errors, f"{rule_path}.when", "A rule needs at least one condition")
+            continue
+        for position, condition in enumerate(when):
+            _check_condition(condition, f"{rule_path}.when[{position}]", ruleset, check, errors)
 
 
 def _check_match_keys(ruleset: dict, per_track: dict, errors: list[dict]) -> None:
@@ -928,7 +1280,10 @@ def validate_ruleset(ruleset, raw_columns) -> list[dict]:
                f"default_track must be one of {', '.join(TRACK_KEYS)}")
 
     per_track = _check_cleaning(ruleset, raw, errors)
-    _check_match_keys(ruleset, per_track, errors)
+    # A match key runs on the frame stage 1 wrote, so it may name a derived
+    # column as well as a cleaning target.
+    with_derived = _check_derived_columns(ruleset, raw, per_track, errors)
+    _check_match_keys(ruleset, with_derived, errors)
 
     if not isinstance(ruleset.get("vetoes", []), list):
         _error(errors, "vetoes", "vetoes must be a list")

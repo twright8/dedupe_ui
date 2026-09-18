@@ -335,11 +335,12 @@ def test_records_describe_their_columns(client, db_path, data_dir):
 
     assert columns["name"] == {
         "key": "name", "label": "Donor", "type": "text", "source": "profile",
+        "derived": False,
     }
     assert columns["total_value"]["type"] == "money"
     assert columns["surname_metaphone"] == {
         "key": "surname_metaphone", "label": "surname_metaphone",
-        "type": "text", "source": "cleaning",
+        "type": "text", "source": "cleaning", "derived": False,
     }
     assert [c["key"] for c in body["columns"]] == list(body["items"][0])
 

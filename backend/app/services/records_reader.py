@@ -5,6 +5,7 @@ DuckDB queries the parquet file directly instead of loading it into pandas, so
 the same code will cope with the 16 million PSC records later.
 """
 
+import json
 import math
 from datetime import date, datetime
 from decimal import Decimal
@@ -59,12 +60,36 @@ def _column_names(con, path: Path) -> list[str]:
     return [d[0] for d in cursor.description]
 
 
-def describe_columns(columns: list[str]) -> list[dict]:
+def derived_target_columns(run_dir: str) -> set[str]:
+    """The columns the run's derived rules wrote, from its own ruleset snapshot.
+
+    Read from the run rather than from the current config, because the run is
+    what the parquet beside it was made with.
+    """
+    path = Path(run_dir) / "config" / "ruleset.json"
+    try:
+        ruleset = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    targets: set[str] = set()
+    for column in ruleset.get("derived_columns") or []:
+        target = column.get("target") if isinstance(column, dict) else None
+        if target:
+            targets.add(target)
+            targets.add(f"{target}_rule")
+    return targets
+
+
+def describe_columns(columns: list[str], derived: set[str] = frozenset()) -> list[dict]:
     """Label and type every column of a run's records, in frame order.
 
     A column the profile declares is described by the profile. Everything else
-    was written by a cleaning rule, whose target name is the only label there
-    is — the user chose it, so it is the honest one to show.
+    was written by a rule, whose target name is the only label there is — the
+    user chose it, so it is the honest one to show.
+
+    A derived column is flagged with ``derived`` and still reports ``source:
+    "cleaning"``: it is one of the columns the rules added, which is what the
+    records table's toggle groups together.
     """
     profile_columns = {c.key: c for c in get_profile().display_columns}
     described = []
@@ -73,11 +98,12 @@ def describe_columns(columns: list[str]) -> list[dict]:
         if declared is not None:
             described.append({
                 "key": key, "label": declared.label,
-                "type": declared.type, "source": "profile",
+                "type": declared.type, "source": "profile", "derived": False,
             })
         else:
             described.append({
                 "key": key, "label": key, "type": "text", "source": "cleaning",
+                "derived": key in derived,
             })
     return described
 
@@ -189,5 +215,5 @@ def get_records(
         "limit": limit,
         "items": items,
         "counts": counts,
-        "columns": describe_columns(columns),
+        "columns": describe_columns(columns, derived_target_columns(run_dir)),
     }

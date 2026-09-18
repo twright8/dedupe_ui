@@ -28,6 +28,7 @@ OPERATORS: dict[str, str | None] = {
     "starts_with_token": "lists",
     "ends_with_token": "lists",
     "contains_token": "lists",
+    "starts_with": "values",
     "matches": "pattern",
 }
 
@@ -111,6 +112,13 @@ def _upper_mask(text: pd.Series, wanted) -> pd.Series:
     return text.map(hits).fillna(False).astype(bool)
 
 
+def _prefix_mask(text: pd.Series, prefixes: tuple[str, ...]) -> pd.Series:
+    present = text[text.notna()]
+    distinct = present.drop_duplicates().tolist()
+    hits = {value: value.strip().upper().startswith(prefixes) for value in distinct}
+    return text.map(hits).fillna(False).astype(bool)
+
+
 def _tokens_for(condition: dict, token_lists: dict) -> list[str]:
     tokens: list[str] = []
     for name in condition.get("lists") or []:
@@ -142,6 +150,19 @@ def evaluate(condition: dict, series: pd.Series, token_lists: dict) -> pd.Series
         mask = _upper_mask(text, condition.get("values") or [])
         return ~mask if op == "not_in" else mask
 
+    if op == "starts_with":
+        # The company-number prefixes (OC, SC, NI...) are the point of this one:
+        # a whole-word token operator would never see them, because the prefix is
+        # not a word of its own.
+        prefixes = tuple(
+            str(value).strip().upper()
+            for value in (condition.get("values") or [])
+            if str(value).strip()
+        )
+        if not prefixes:
+            return pd.Series(False, index=series.index)
+        return _prefix_mask(text, prefixes)
+
     if op == "matches":
         try:
             pattern = re.compile(condition.get("pattern") or "", re.IGNORECASE)
@@ -156,7 +177,7 @@ def evaluate(condition: dict, series: pd.Series, token_lists: dict) -> pd.Series
 
 
 def columns_read(rule: dict) -> list[str]:
-    """The raw columns one track rule's conditions look at, in order, no repeats."""
+    """The columns one rule's conditions look at, in order, no repeats."""
     seen: list[str] = []
     for condition in rule.get("when") or []:
         column = condition.get("column")

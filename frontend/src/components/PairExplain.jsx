@@ -44,11 +44,20 @@ export function PairExplain({ explanation, matchWeight, matchProbability }) {
             const positive = !none && w >= 0;
             return (
               <div className="ft" key={r.column || i} style={{ alignItems: "center" }}>
+                {/* A null level has no Splink label worth reading — "x is NULL"
+                    tells a reviewer nothing — so the comparison's own
+                    description leads and the state is said in plain words. */}
                 <div className="lab" style={{ whiteSpace: "normal" }}>
-                  {r.label || r.column}
+                  {none ? r.description || r.column : r.label || r.description || r.column}
                   <div className="mono muted" style={{ fontSize: 11 }}>
-                    {r.column}
-                    {r.gamma != null && ` · level ${r.gamma}`}
+                    {none ? (
+                      <span style={{ fontFamily: "var(--font-sans)" }}>nothing to compare</span>
+                    ) : (
+                      <>
+                        {r.column}
+                        {r.gamma != null && ` · level ${r.gamma}`}
+                      </>
+                    )}
                   </div>
                 </div>
                 <div className="bar" title={none ? "contributed nothing" : `${w} bits`}>

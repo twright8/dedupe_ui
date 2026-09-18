@@ -769,6 +769,62 @@
       }
     ]
   },
+  "derived_columns": [
+    {
+      "id": "d1",
+      "target": "donor_status_std",
+      "description": "The donor status corrected from the company number. The Electoral Commission's status is often wrong at source: companies are filed as unincorporated associations and LLPs as companies. Only the five statuses that get confused with each other are overridable, so an incorporated political party stays a party.",
+      "default_from": "donor_status",
+      "tracks": ["organisation"],
+      "rules": [
+        {
+          "id": "d1r1",
+          "description": "A company number starting OC, SO or NC belongs to a limited liability partnership",
+          "when": [
+            {"column": "company_number_clean", "op": "starts_with", "values": ["OC", "SO", "NC"]},
+            {"column": "donor_status", "op": "in", "values": ["Company", "Limited Liability Partnership", "Unincorporated Association", "Other", "Trust"]}
+          ],
+          "value": "Limited Liability Partnership"
+        },
+        {
+          "id": "d1r2",
+          "description": "A company number starting IP or SP belongs to a registered society, which the Commission calls a friendly society",
+          "when": [
+            {"column": "company_number_clean", "op": "starts_with", "values": ["IP", "SP"]},
+            {"column": "donor_status", "op": "in", "values": ["Company", "Limited Liability Partnership", "Unincorporated Association", "Other", "Trust"]}
+          ],
+          "value": "Friendly Society"
+        },
+        {
+          "id": "d1r3",
+          "description": "A company number starting SC or NI is a Scottish or Northern Irish company",
+          "when": [
+            {"column": "company_number_clean", "op": "starts_with", "values": ["SC", "NI"]},
+            {"column": "donor_status", "op": "in", "values": ["Company", "Limited Liability Partnership", "Unincorporated Association", "Other", "Trust"]}
+          ],
+          "value": "Company"
+        },
+        {
+          "id": "d1r4",
+          "description": "A company number that is all digits is an England and Wales company",
+          "when": [
+            {"column": "company_number_clean", "op": "matches", "pattern": "^[0-9]"},
+            {"column": "donor_status", "op": "in", "values": ["Company", "Limited Liability Partnership", "Unincorporated Association", "Other", "Trust"]}
+          ],
+          "value": "Company"
+        },
+        {
+          "id": "d1r5",
+          "description": "A donor with a company number of any other kind is not a trust",
+          "when": [
+            {"column": "donor_status", "op": "equals", "value": "Trust"},
+            {"column": "company_number_clean", "op": "not_null"}
+          ],
+          "value": "Company"
+        }
+      ]
+    }
+  ],
   "match_keys": [
     {
       "id": "k1",

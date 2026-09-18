@@ -23,6 +23,7 @@ DIFF_SECTIONS = (
     ("default_track", "value"),
     ("cleaning.person", "id"),
     ("cleaning.organisation", "id"),
+    ("derived_columns", "id"),
     ("match_keys", "id"),
     ("vetoes", "id"),
 )

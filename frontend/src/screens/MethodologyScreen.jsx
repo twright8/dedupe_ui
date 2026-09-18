@@ -1,7 +1,7 @@
 /* ============================================================
-   Screen: How it works — a plain-English methodology + a click-by-click
-   walk-through. Editorial "field guide" style; RED = you / your answers
-   throughout (the human always wins).
+   Screen: How it works — the method in plain English, stage by
+   stage. Editorial "field guide" style. RED marks the reader's own
+   answers, because a human label always wins.
    ============================================================ */
 
 import { Link } from "react-router-dom";
@@ -55,253 +55,485 @@ function JobCard({ tone, n, title, children }) {
 
 // ---- the page --------------------------------------------------------------
 
+// The last two stages are being built. The chip is the only marker, so it is
+// easy to remove when they land.
+function Soon() {
+  return <span className="mth-tech">arriving next</span>;
+}
+
 export default function MethodologyScreen() {
   const profile = useProfile();
+  const tracks = profile.tracks || [];
+  const trackA = tracks[0]?.label || "People";
+  const trackB = tracks[1]?.label || "Organisations";
+  const donations = profile.key === "donations";
+
   return (
     <div className="content mth">
       <MthStyles />
 
-      {/* Carried over from the ROE–OCOD tool; rewritten in a later slice. */}
-      <Callout accent="var(--amber)" label="Out of date">
-        This page still describes the ROE–OCOD linkage tool, which matches names across two
-        datasets. {profile.title} works within one dataset instead. The text will be rewritten
-        once the matching stages are built.
-      </Callout>
-
       {/* Hero */}
       <header className="mth-hero">
         <div className="mth-eyebrow">Field guide · no maths required</div>
-        <h1 className="mth-title">
-          How the matching works
-        </h1>
+        <h1 className="mth-title">How the matching works</h1>
         <p className="mth-lede">
-          This tool attaches the right company to each overseas-owned UK property by
-          <strong> matching names</strong>. Some of that is automatic; some needs you. Here is the
-          whole method in plain English — what the computer does, where <span className="mth-you">your
-          answers</span> come in, and exactly what you click, from your first upload to a fully
-          trained model on next month's data.
+          {profile.title} finds the records that are the same person or the same organisation. It
+          gives every group of those records one ID. Whenever it is not sure, it asks you. The tool
+          assists you. It does not decide alone.
         </p>
       </header>
 
-      {/* 1 · The job */}
+      {/* 1 · guess and answer */}
       <section className="mth-sec">
-        <div className="mth-sec-head"><span className="mth-sec-n">01</span><h2>The job, in one picture</h2></div>
-        <div className="mth-two">
-          <div className="mth-card-list mth-ocod">
-            <div className="mth-list-tag">OCOD</div>
-            <div className="mth-list-h">~91,000 UK properties</div>
-            <p>Each owned by an overseas company. We have the <strong>owner's name as written</strong>
-              {" "}(messy, no ID number).</p>
-          </div>
-          <div className="mth-arrow" aria-hidden>
-            <span>match the names</span>
-            <svg width="60" height="20" viewBox="0 0 60 20"><path d="M2 10 H52 M44 3 L54 10 L44 17" fill="none" stroke="var(--ti-red)" strokeWidth="2"/></svg>
-          </div>
-          <div className="mth-card-list mth-roe">
-            <div className="mth-list-tag">ROE</div>
-            <div className="mth-list-h">~30,000 companies</div>
-            <p>The official register of those overseas companies — a <strong>clean name and an ID
-              number</strong> (the “OE number”) we want to attach.</p>
-          </div>
+        <div className="mth-sec-head">
+          <span className="mth-sec-n">01</span>
+          <h2>Two kinds of thing</h2>
         </div>
-        <p className="mth-aside">
-          Names rarely match exactly (typos, “Limited” vs “Ltd”, accents, word order), so matching is a
-          mix of a confident computer guess and a human decision on the close calls.
+        <p className="mth-p">
+          Every screen in this tool shows one of two kinds of thing. Telling them apart is the
+          whole method. One is a score the computer worked out. The other is an answer you gave.
         </p>
-      </section>
-
-      {/* 2 · The big idea */}
-      <section className="mth-sec">
-        <div className="mth-sec-head"><span className="mth-sec-n">02</span><h2>The one idea that runs through everything</h2></div>
-        <p className="mth-p">There are only two kinds of thing in this tool, and keeping them apart is the
-          whole game:</p>
         <div className="mth-planes">
           <div className="mth-plane">
-            <div className="mth-plane-h">The computer's guess</div>
-            <p>A score from <span className="mono">0</span> to <span className="mono">1</span>. Fast,
-              consistent, and <strong>always provisional</strong> — it can be re-done at any time.</p>
+            <div className="mth-plane-h">The computer's score</div>
+            <p>
+              A number from <span className="mono">0</span> to <span className="mono">1</span>. It
+              is quick and consistent. It can be worked out again at any time, so it is always
+              provisional.
+            </p>
           </div>
           <div className="mth-plane mth-plane-you">
             <div className="mth-plane-h">Your answer</div>
-            <p>A plain <strong>yes / no</strong> on one specific pair. It is a <strong>fact</strong>:
-              it always beats the computer, it is saved for good, and it carries over to future runs.</p>
+            <p>
+              A yes or a no on one pair of records. It is saved for good. It beats every score and
+              every rule, and it carries over to later runs.
+            </p>
           </div>
         </div>
         <Callout label="Why it matters">
-          Everywhere in the tool you should be able to tell which one you're looking at — a provisional
-          guess, or a saved human fact. <span className="mth-you">Your answers are coloured red</span>
-          {" "}throughout this guide for exactly that reason: the human wins.
+          <span className="mth-you">Your answers are coloured red</span> throughout this guide. If
+          a rule and your answer disagree, your answer stands.
         </Callout>
       </section>
 
-      {/* 3 · The pipeline */}
+      {/* 2 · the stages */}
       <section className="mth-sec">
-        <div className="mth-sec-head"><span className="mth-sec-n">03</span><h2>The method, step by step</h2></div>
-        <p className="mth-p">A run moves through these steps in order, each handing its work to the next.
-          The <span className="mono" style={{ fontSize: 13 }}>grey chips</span> are the real name of each
-          piece in the code; the <span className="mth-you">red markers</span> show where your answers plug in.</p>
+        <div className="mth-sec-head">
+          <span className="mth-sec-n">02</span>
+          <h2>The method, step by step</h2>
+        </div>
+        <p className="mth-p">
+          A run moves through these stages in order. Each stage hands its work to the next. The
+          grey chip on each stage names the tab where you change it. The red marker shows where
+          your answers come in.
+        </p>
 
         <div className="mth-pipe">
-          <Stage n="0" tone="var(--muted)" kicker="Tidy up" title="Clean the names"
-            tech="config rules — cleaning steps + lookups">
-            Turn messy names into a standard form so harmless spelling differences don't block a match:
-            “LIMITED” → “LTD”, drop accents and punctuation, fix spacing, line up country names.
-            “Badby Properties (Middlesbrough) S.à r.l.” becomes “BADBY PROPERTY MIDDLESBROUGH SARL”.
+          <Stage n="0" tone="var(--muted)" kicker="Load" title="Read the file">
+            <p>
+              In goes one file. The tool reads every row and gives each row a record ID. Out comes
+              one record per row, with the columns this profile knows about. You change nothing
+              here. To read the records, open the <Click>Records</Click> tab on the run.
+            </p>
           </Stage>
 
-          <Stage n="1" tone="var(--blue)" kicker="Free wins" title="Match the obvious ones"
-            tech="deterministic exact join — clean name + country">
-            Any property whose tidied name <em>and</em> country are identical to a company is matched
-            right there — no judgement needed. On real data that's about <strong>three-quarters</strong>
-            {" "}of matches, set aside immediately so the hard work only happens on the genuinely tricky
-            leftovers.
+          <Stage
+            n="1"
+            tone="var(--blue)"
+            kicker="Tracks"
+            title={`Sort each record into ${trackA} or ${trackB}`}
+            tech="Config → Tracks"
+          >
+            <p>
+              In go the raw records. Ordered rules decide which track a record belongs to. The
+              first rule whose conditions all hold wins. A record no rule catches takes the default
+              track. Out comes one track per record.
+            </p>
+            <p>
+              {trackA} and {trackB} are matched separately. The tool never suggests that a record
+              on one track is the same thing as a record on the other. To see the split, use the
+              track filter on the <Click>Records</Click> tab.
+            </p>
           </Stage>
 
-          <Stage n="2" tone="var(--amber)" kicker="The simple matcher" title="Score the tricky pairs"
-            tech="Splink — Fellegi–Sunter probabilistic linkage, self-taught (EM), DuckDB">
-            For the leftovers, the <strong>simple matcher</strong> compares each possible pair several
-            ways — how close the names are letter-by-letter, words they share, numbers they share, the
-            name with “Ltd” stripped off — and blends those clues into one score from 0 to 1.
-            <span className="mth-self"> It teaches itself from the data — it does <strong>not</strong> need
-            your answers.</span> Its weakness: the scores come out in a few lumps, so a precise cutoff is
-            hard to place.
+          <Stage
+            n="2"
+            tone="var(--blue)"
+            kicker="Cleaning"
+            title="Tidy the values into new columns"
+            tech="Config → Cleaning rules"
+          >
+            <p>
+              In go the raw columns. Ordered steps write new columns beside them. A step can put
+              text into capitals, drop punctuation, remove titles such as MR, map a nickname to a
+              full name, or call a named function such as the one that tidies a postcode. A raw
+              column is never overwritten.
+            </p>
+            {donations ? (
+              <p>
+                For example, &ldquo;Mr Hugh E Osmond&rdquo; becomes{" "}
+                <span className="mono">HUGH E OSMOND</span> with the title{" "}
+                <span className="mono">MR</span> kept in its own column. The company number{" "}
+                <span className="mono">4250076</span> becomes <span className="mono">04250076</span>
+                , so it lines up with the eight-digit form.
+              </p>
+            ) : (
+              <p>
+                For example, a name typed in mixed case with punctuation becomes one plain
+                upper-case name, and a short code is padded to its full length so the two forms
+                line up.
+              </p>
+            )}
+            <p>
+              Out come the cleaned columns. To read them, open the <Click>Records</Click> tab and
+              turn on <Click>Cleaned and derived columns</Click>.
+            </p>
           </Stage>
 
-          <Stage n="2.5" tone="var(--violet)" kicker="The trained model · optional" title="Re-score using your answers"
-            tech="GBT — gradient-boosted trees (LightGBM) + Platt (logistic) calibration"
-            labelsHere="your yes / no answers train this">
-            Once you've confirmed enough matches, a <strong>second model</strong> learns from your
-            <span className="mth-you"> yes / no answers</span>. It takes the simple matcher's score
-            <em> plus</em> the name clues as inputs and produces a <strong>smoother, more trustworthy
-            score</strong> you can read as a real probability (0.8 really means ~80% likely). It weighs
-            <strong> distinctive words</strong> more than boilerplate, and flags look-alikes that differ
-            only by a <strong>unit</strong> (27A vs 27B). Its biggest win is the bottom end — it
-            <strong> confidently clears the obvious non-matches</strong>, so the pile left for you is mostly
-            the genuinely hard calls. <strong>This is where your answers really do the work.</strong> It's
-            switched off until you build it, and a run quietly falls back to the simple matcher unless you turn it on.
+          <Stage
+            n="3"
+            tone="var(--blue)"
+            kicker="Derived columns"
+            title="Standardise a category that is often wrong"
+            tech="Config → Derived columns"
+          >
+            <p>
+              In go the raw and the cleaned columns. Ordered rules set a standard value in a new
+              column. The first rule whose conditions all hold sets the value. A record no rule
+              catches takes the value of the column you named as the default.
+            </p>
+            {donations ? (
+              <p>
+                Donor status is the example this profile ships with. If a company number starts
+                with OC, SO or NC, the record is a limited liability partnership, whatever the
+                sheet said.
+              </p>
+            ) : (
+              <p>
+                A category that the source often records wrongly is the case this is for. A rule
+                reads a cleaned column and sets the value the category should have.
+              </p>
+            )}
+            <p>
+              Out comes the new column, together with a note of which rule set each value. To read
+              it, open the <Click>Records</Click> tab and turn on{" "}
+              <Click>Cleaned and derived columns</Click>.
+            </p>
           </Stage>
 
-          <Stage n="3" tone="var(--green)" kicker="Sort" title="Split into piles by cutoff"
-            tech="threshold bucketing on the chosen score (Splink or GBT)">
-            Two cutoffs split the scored pairs into <strong>auto-accept</strong> (above the high line),
-            <strong> needs your review</strong> (in the middle), and <strong>ignore</strong> (below the low
-            line). A separate <strong>“too close to call”</strong> pile flags a property where two companies
-            tie. The cutoffs are a choice you can move, not the truth.
+          <Stage
+            n="4"
+            tone="var(--green)"
+            kicker="Exact keys"
+            title="Merge the records that plainly agree"
+            tech="Config → Match keys"
+          >
+            <p>
+              In go the cleaned and derived columns. A match key names one or more columns. Records
+              that hold the same value in every one of those columns form a group. Keys run in
+              order within a track, and groups that share a record are joined into one.
+            </p>
+            <p>
+              Guards stop a group that looks wrong. A guard can ignore a value that appears on a
+              blocked list, refuse a group over a size limit, refuse a group carrying more
+              different names than you allow, or require the records to agree on a second column
+              as well. If a guard stops a group, the group is held and a person decides it later.
+              Nothing is merged.
+            </p>
+            <p>
+              Out come the merged groups and the held groups. To read them, open the{" "}
+              <Click>Exact groups</Click> tab on the run.
+            </p>
           </Stage>
 
-          <Stage n="★" tone="var(--ti-red)" kicker="You decide" title="Your answers override everything — last"
-            tech="label applier — runs on every run, last"
-            labelsHere="your answers override the result here">
-            Right at the end, <span className="mth-you">your saved yes/no answers are laid on top</span>:
-            a <strong>yes</strong> forces a match into the result, a <strong>no</strong> takes one out —
-            whatever the computer thought. This runs <strong>every time</strong>, so your decisions are
-            never lost to a re-run or a moved cutoff.
+          <Stage
+            n="5"
+            tone="var(--amber)"
+            kicker="Scoring"
+            title="Score the pairs that are not obvious"
+            tech="Config → Thresholds & Splink"
+          >
+            <p>
+              In go the results of stage 4. Each merged group counts as one unit. Every other
+              record is a unit on its own. Units are scored within a track, never across two.
+            </p>
+            <p>
+              Comparing every unit with every other unit would take far too long. Blocking rules
+              decide which pairs get compared at all. A blocking rule says something like
+              &ldquo;only compare two records when they share a surname&rdquo;. A tight rule is
+              quick and can miss a match. A loose rule finds more and costs more time.
+            </p>
+            <p>
+              Each pair that gets through blocking is compared column by column. The comparisons
+              are combined into one score between 0 and 1, which reads as the chance that the two
+              units are the same thing. The score is worked out from the shape of the data itself.
+              Your answers do not train it.
+            </p>
+            <p>
+              The tab that holds these settings is called Thresholds &amp; Splink. Splink is the
+              name of the open-source engine that does the scoring.
+            </p>
+            <p>
+              Two lines then sort every scored pair into three buckets. If the score is 0.92 or
+              more, the pair is accepted without review. If the score is between 0.50 and 0.92, the
+              pair goes to you. If the score is below 0.50, the pair is rejected. Both lines are
+              yours to move. Out come the scored pairs, which you read in the{" "}
+              <Click>Review queue</Click>.
+            </p>
+          </Stage>
+
+          <Stage
+            n="6"
+            tone="var(--ti-red)"
+            kicker="Review"
+            title="You answer the pairs the tool is unsure about"
+            labelsHere="your answers are saved here"
+          >
+            <p>
+              In go the scored pairs. You mark a pair as a match or as not a match. Your answer
+              always wins. It overrides the score, and it overrides every rule.
+            </p>
+            <p>
+              Answers are never overwritten. If you answer the same pair again, the new answer
+              takes effect and the old one stays on record with the name of the person who gave it.
+              You can add a note and a source link to any answer, which is where evidence from
+              outside the data belongs.
+            </p>
+            <p>
+              Labels imported from earlier manual work are treated carefully. If both sides of a
+              pair already carry the same earlier ID, the pair is accepted. If the two sides carry
+              different earlier IDs, the pair keeps the bucket its score gave it and is flagged so
+              you can find it. That flag is a signal for sorting. It never decides a pair.
+            </p>
+            <p>
+              Out come your saved answers, which you can read in the <Click>Label library</Click>.
+            </p>
+          </Stage>
+
+          <Stage
+            n="7"
+            tone="var(--violet)"
+            kicker="Clusters"
+            title="Join the accepted pairs into groups"
+            tech="Config → Thresholds & Splink"
+          >
+            <div className="mth-techrow">
+              <Soon />
+            </div>
+            <p>
+              In go the accepted pairs. Two units joined by an accepted pair sit in the same
+              cluster. A unit with no accepted pair is a cluster on its own.
+            </p>
+            <p>
+              A gate then checks every cluster of two or more units. A cluster is held back if you
+              have said two of its units are not the same, if one pair inside it scores below 0.20
+              and the cluster may be a chain of weak links, if it holds more than 200 units, or if
+              its records carry more than one earlier ID. A held cluster is rebuilt from your
+              answers and the imported labels only, and it goes to a queue for a person to decide.
+            </p>
+            <p>
+              Out come the clusters. Each one carries a status that says whether it passed those
+              checks or was held back for a person to look at.
+            </p>
+          </Stage>
+
+          <Stage
+            n="8"
+            tone="var(--violet)"
+            kicker="Entity IDs"
+            title="Give each group one ID, then publish"
+          >
+            <div className="mth-techrow">
+              <Soon />
+            </div>
+            <p>
+              In go the clusters the gate passed. Each one becomes one entity and takes an ID. If
+              its records already belong to one entity, that ID is kept. If they belong to several,
+              one of those IDs survives and the others are retired. If they belong to none, a new
+              ID is made.
+            </p>
+            <p>
+              A run only proposes. Nothing is written to the durable register until you publish the
+              run. Publishing is a separate step, and it records what changed.
+            </p>
+            <p>
+              Out comes the export. It is the original sheet, row for row and column for column,
+              with the entity ID and a note of how each ID was decided added at the end. A second
+              sheet lists every retired ID and the ID that replaced it.
+            </p>
           </Stage>
         </div>
-
-        <Callout accent="var(--ink)" label="The actual stack, in one line">
-          Python · <strong>Splink</strong> (DuckDB backend) for the simple matcher ·
-          {" "}<strong>LightGBM</strong> gradient-boosted trees + Platt (logistic) calibration for the trained
-          model · SQLite label store · FastAPI API · React UI. Your answers live in the label store and
-          feed the <strong>LightGBM</strong> model (step 2.5) and the final override (step ★).
-        </Callout>
       </section>
 
-      {/* 4 · where labels come in */}
+      {/* 3 · agreement numbers */}
       <section className="mth-sec">
-        <div className="mth-sec-head"><span className="mth-sec-n">04</span><h2>Where your answers come in</h2></div>
-        <p className="mth-p">One saved answer (a “label”) is just your <span className="mth-you">yes/no on one
-          pair</span> — “this property owner <em>is</em> / <em>isn't</em> this company”. The same answer
-          quietly does <strong>three different jobs</strong>:</p>
+        <div className="mth-sec-head">
+          <span className="mth-sec-n">03</span>
+          <h2>How to read the agreement numbers</h2>
+        </div>
+        <p className="mth-p">
+          The review screen and the run summary report two figures. Both compare this run with the
+          grouping the team did by hand before this tool existed.
+        </p>
+        <p className="mth-p">
+          <strong>Pair precision</strong> tells you how often the run is right when it joins two
+          records. It counts only pairs the earlier manual work had judged.
+        </p>
+        <p className="mth-p">
+          <strong>Pair recall</strong> tells you how much of the earlier manual work the run finds.
+          It counts the pairs the earlier work joined, then reports the share the run joined too.
+        </p>
+        <p className="mth-p">
+          The same two figures are worked out three ways. Each is also reported for{" "}
+          {trackA.toLowerCase()} and {trackB.toLowerCase()} separately, so a figure that looks good
+          overall can still be weak on one track.
+        </p>
         <div className="mth-jobs">
-          <JobCard tone="var(--ti-red)" n="1" title="Fixes the output">
-            Your yes forces the match into the downloaded file; your no removes it — no matter what the
-            computer decided.
+          <JobCard tone="var(--ink)" n="1" title="Everything the run would publish">
+            The exact groups plus every accepted pair. This is what the export would contain.
           </JobCard>
-          <JobCard tone="var(--violet)" n="2" title="Teaches the trained model">
-            Your yeses <em>and</em> nos are what the trained model learns from. The <strong>nos matter
-            most</strong> — they teach it what a wrong match looks like.
+          <JobCard tone="var(--ti-red)" n="2" title="The scorer on its own">
+            The same figures with one group of pairs left out. Those pairs were accepted because
+            both sides already carried the same earlier ID.
           </JobCard>
-          <JobCard tone="var(--blue)" n="3" title="Tests it honestly">
-            A chunk of your answers is held back as a “test set”, so the model can be graded on answers it
-            never learned from. Without it, a perfect-looking score can't be trusted.
+          <JobCard tone="var(--blue)" n="3" title="The match keys on their own">
+            Stage 4 alone, with no scoring. It shows how far the plain rules get you.
           </JobCard>
         </div>
-        <Callout accent="var(--amber)" label="Common confusion, cleared up">
-          The <strong>simple matcher</strong> (step 2) mostly <strong>doesn't</strong> use your answers —
-          it learns from the data's own patterns. It's the <strong>trained model</strong> (step 2.5) that
-          learns from your yes/no. So your answers' real home is the trained model, plus overriding the
-          final output.
+        <Callout label="Which one to use when you change a rule">
+          Use <strong>the scorer on its own</strong>. A pair accepted because both sides already
+          carry the same earlier ID cannot show that the scorer found anything, so leaving those
+          pairs in makes every change look better than it is.
+        </Callout>
+        <Callout accent="var(--amber)" label="What these numbers cannot tell you">
+          The earlier labels were made almost entirely on the name. Reviewers merged 99.6% of
+          pairs of individuals with identical names, even when the two gave to different parties.
+          So the earlier labels cannot show when two people with the same name are different
+          people. A high recall against them is not proof that the tool keeps such people apart.
+          Only new answers that say two records are <strong>not</strong> the same can show that,
+          and those come from you.
         </Callout>
       </section>
 
-      {/* 5 · the walkthrough */}
+      {/* 4 · limits */}
       <section className="mth-sec">
-        <div className="mth-sec-head"><span className="mth-sec-n">05</span><h2>The full walk-through — what you click</h2></div>
-
-        <h3 className="mth-phase">A · Your first run</h3>
-        <ol className="mth-steps">
-          <li><b>Upload &amp; start.</b> <Click>New run</Click> → drop in the two files (the OCOD release
-            and the Companies House snapshot) → drag the <b>auto-accept cutoff</b> to how confident you
-            want to be → <Click>Start run</Click>.</li>
-          <li><b>Watch it land.</b> You arrive on the run page. The badge at the top reads
-            <Click>Decided by: simple matcher</Click> — that's expected for a first run.</li>
-          <li><b>Just want the matches?</b> <Click>Download matches only</Click> gives you the matched rows
-            with no blanks. If you trust the auto-accepts, you're done.</li>
-          <li><b>Do better — review the middle pile.</b> <Click>Open review queue</Click>. Go through the
-            pairs and hit <Click>Mark TRUE</Click> / <Click>Mark FALSE</Click>. To go fast: drag a band on
-            the chart, <Click>Mark all TRUE</Click>, then flip the few wrong ones before you save.</li>
-        </ol>
-
-        <h3 className="mth-phase">B · Build the trained model</h3>
-        <ol className="mth-steps" start="5">
-          <li><b>Set aside a test set.</b> On the run page open the <Click>Diagnostics</Click> tab →
-            model panel → <Click>Set aside a test set</Click> (so the accuracy is honest).</li>
-          <li><b>Train, then apply.</b> <Click>Train from this run</Click> → glance at the accuracy (ignore
-            a perfect <span className="mono">1.000</span> with a warning) → <Click>Apply GBT &amp;
-            re-bucket</Click>. If it's <b>blocked</b> (“would empty your review”), the model isn't ready —
-            go back and confirm more pairs, especially <b>noes</b>.</li>
-          <li><b>Now it's running the trained model.</b> The badge flips to <Click>Decided by: trained
-            model</Click>, the chart says “GBT score”, and your review pile is sharper.</li>
-        </ol>
-
-        <h3 className="mth-phase">C · Next month — new data, old answers</h3>
-        <ol className="mth-steps" start="8">
-          <li><b>Upload the new month.</b> <Click>New run</Click> → drop in the <b>new</b> files →
-            <Click>Start run</Click>.</li>
-          <li><b>Your old answers re-apply by themselves.</b> They're saved against the
-            <em> company's identity</em>, not the run — so when the same property-owner shows up again,
-            your past yes/no is applied automatically. The run page tells you how many applied and how many
-            <Click>didn't match this run's data</Click>.</li>
-          <li><b>Confirm only what's genuinely new,</b> then re-train. You now have old + new answers, and
-            the model gets a little better every month.</li>
-        </ol>
-
-        <Callout label="Why your answers survive new data">
-          An answer is filed under <span className="mono">owner name + country + company number</span>,
-          not under a run. That's why last month's decisions come back automatically this month — you only
-          ever review what's actually new.
-        </Callout>
+        <div className="mth-sec-head">
+          <span className="mth-sec-n">04</span>
+          <h2>What the tool will not do</h2>
+        </div>
+        <div className="mth-planes">
+          <div className="mth-plane">
+            <div className="mth-plane-h">It never matches across tracks</div>
+            <p>
+              A record on the {trackA.toLowerCase()} track is never proposed as the same thing as a
+              record on the {trackB.toLowerCase()} track. If you believe two such records are the
+              same, the track rules are what to change.
+            </p>
+          </div>
+          <div className="mth-plane">
+            <div className="mth-plane-h">It never overrules your answer</div>
+            <p>
+              No rule and no score can undo an answer you saved. A later answer from a person
+              replaces an earlier one. Nothing else does.
+            </p>
+          </div>
+          <div className="mth-plane">
+            <div className="mth-plane-h">It never rewrites a published ID quietly</div>
+            <p>
+              If two published entities are joined, one ID survives and the other is retired. The
+              retired ID becomes an alias of the survivor, so an old ID still leads you to the
+              right record.
+            </p>
+          </div>
+          <div className="mth-plane">
+            <div className="mth-plane-h">It does not read the news</div>
+            <p>
+              The tool only sees the data you load. If a news story or a public register is your
+              evidence, save it as a source link on your answer. That way the evidence stays with
+              the decision.
+            </p>
+          </div>
+        </div>
       </section>
 
-      {/* 6 · sister tool */}
+      {/* 5 · glossary */}
       <section className="mth-sec">
-        <div className="mth-sec-head"><span className="mth-sec-n">06</span><h2>The same recipe, elsewhere</h2></div>
-        <p className="mth-p">A sister tool, <strong>PSC reconcile</strong>, matches <em>people</em> (company
-          controllers) instead of companies. It runs the <strong>same stack</strong> — the same
-          {" "}<span className="mono" style={{ fontSize: 13 }}>Splink</span> simple matcher, the same
-          {" "}<span className="mono" style={{ fontSize: 13 }}>LightGBM</span> trained model and calibration,
-          the same label store and review screens. Two things differ, both by design: the <strong>clues</strong>
-          {" "}(PSC adds dates of birth, nationality and shared-company links; this tool matches on the
-          {" "}<strong>company name</strong> alone), and PSC keeps an extra “Splink-trained-from-labels” step
-          that this tool drops. The shared engine is meant to improve in lock-step; the clue sets are
-          per-project plug-ins.</p>
+        <div className="mth-sec-head">
+          <span className="mth-sec-n">05</span>
+          <h2>Words this tool uses</h2>
+        </div>
+        <dl className="diff-meta" style={{ fontSize: 14, gap: "10px 18px", maxWidth: "64ch" }}>
+          <dt>record</dt>
+          <dd>One row of the file you loaded.</dd>
+
+          <dt>unit</dt>
+          <dd>
+            What the scorer compares. A unit is either one merged group of records or one record on
+            its own.
+          </dd>
+
+          <dt>track</dt>
+          <dd>
+            {trackA} or {trackB}. Records are only ever matched with records on the same track.
+          </dd>
+
+          <dt>exact key</dt>
+          <dd>
+            A named set of columns. Records holding the same value in every one of those columns
+            are merged.
+          </dd>
+
+          <dt>guard</dt>
+          <dd>
+            A limit on an exact key. If a group breaks the limit, the group is not merged and a
+            person decides it.
+          </dd>
+
+          <dt>held group</dt>
+          <dd>A group a guard stopped. Its records stay separate until someone decides.</dd>
+
+          <dt>blocking rule</dt>
+          <dd>
+            A rule that says which pairs are worth comparing at all. It saves time and it can hide
+            a match if it is too tight.
+          </dd>
+
+          <dt>score</dt>
+          <dd>
+            A number from 0 to 1 for one pair. It reads as the chance that the two units are the
+            same thing.
+          </dd>
+
+          <dt>bucket</dt>
+          <dd>
+            Where a scored pair lands. A pair is accepted, sent to you for review, or rejected.
+          </dd>
+
+          <dt>label</dt>
+          <dd>
+            Your saved yes or no on one pair. It can carry a note and a source link, and it beats
+            every score.
+          </dd>
+
+          <dt>cluster</dt>
+          <dd>A set of units joined by accepted pairs. A cluster is a proposal, not a decision.</dd>
+
+          <dt>entity</dt>
+          <dd>
+            One real person or one real organisation, with one ID that stays the same from run to
+            run.
+          </dd>
+        </dl>
       </section>
 
       <footer className="mth-foot">
         <span>Ready to try it?</span>
-        <Link className="btn primary" to="/runs/new">Start a new run →</Link>
-        <Link className="btn" to="/labels">See your saved answers</Link>
+        <Link className="btn primary" to="/runs/new">
+          Start a new run →
+        </Link>
+        <Link className="btn" to="/labels">
+          See your saved answers
+        </Link>
       </footer>
     </div>
   );

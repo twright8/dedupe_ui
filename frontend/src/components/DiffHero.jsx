@@ -57,10 +57,25 @@ function UnitHead({ unit, side }) {
           ×{size} records
         </span>
       )}
+      {/* Two or more old IDs inside one unit means an exact key merged records
+          the earlier manual work had kept apart. Worth saying out loud. */}
+      {ids.length > 1 && (
+        <span
+          className="tag amber"
+          title={
+            "An exact key merged records that the earlier manual work kept apart, so this one " +
+            "unit carries more than one earlier entity ID. Splitting a group arrives with the " +
+            "cluster screen."
+          }
+        >
+          <span className="dot" />
+          {ids.length} earlier IDs inside this group
+        </span>
+      )}
       {ids.map((id) => (
         <span
           key={id}
-          className={"tag" + (ids.length > 1 ? " amber" : "")}
+          className="tag"
           style={{ fontFamily: "var(--font-mono)", textTransform: "none" }}
           title="Entity ID this side already carries"
         >
