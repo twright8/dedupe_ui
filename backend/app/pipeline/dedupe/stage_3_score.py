@@ -23,6 +23,7 @@ Outputs, all in the run folder:
   ``splink_model_<track>.json``, ``diagnostics/``
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -73,18 +74,22 @@ class BlockingBudgetError(RuntimeError):
     value does.
     """
 
-    def __init__(self, track: str, budget: int, total: int, rules: list[dict]):
+    def __init__(self, track: str, budget: int, total: int, rules: list[dict],
+                 phase: str = "prediction"):
         self.track = track
         self.budget = int(budget)
         self.total = int(total)
         self.rules = rules
+        self.phase = phase
         worst = max(rules, key=lambda r: r["pairs"]) if rules else None
         worst_text = (
             f" The biggest is '{worst['id']}' with {worst['pairs']:,}."
             if worst else ""
         )
+        where = ("Blocking on" if phase == "prediction"
+                 else "Training the model on")
         super().__init__(
-            f"Blocking on the {track} track would make {total:,} pairs, over the "
+            f"{where} the {track} track would make {total:,} pairs, over the "
             f"budget of {budget:,}.{worst_text} Tighten the rule or raise max_pairs."
         )
 
@@ -95,6 +100,7 @@ class BlockingBudgetError(RuntimeError):
             "budget": self.budget,
             "total": self.total,
             "rules": self.rules,
+            "phase": self.phase,
         }
 
 
@@ -103,6 +109,25 @@ def _step(label, progress_callback=None):
     print(msg, flush=True)
     if progress_callback:
         progress_callback("log", {"message": label})
+
+
+@contextlib.contextmanager
+def _phase(label: str, progress_callback=None):
+    """Log a timestamped line entering *label* and another on the way out.
+
+    Stage 3 used to report only what it had finished, so a step that never
+    finished was invisible: the PSC re-score sat in one DuckDB query for over
+    half an hour and the log's last line was about the step before it. Every
+    phase now announces itself before it starts, which is what makes a hang
+    point at the thing that hung. The closing line carries the elapsed seconds,
+    so the same log also says where the time went.
+    """
+    _step(f"{label}...", progress_callback)
+    t0 = time.time()
+    try:
+        yield
+    finally:
+        _step(f"  {label} took {time.time() - t0:.1f}s", progress_callback)
 
 
 def memory_limit() -> str:
@@ -119,6 +144,31 @@ def _db_api(temp_dir: Path | None = None):
         temp_dir.mkdir(parents=True, exist_ok=True)
         api._con.execute(f"SET temp_directory='{temp_dir}'")
     return api
+
+
+def clear_duckdb_tmp(temp_dir: Path) -> int:
+    """Delete spill files left behind by an earlier run. Returns bytes freed.
+
+    DuckDB writes its overflow into ``temp_directory`` and removes it on a clean
+    shutdown — but not when the process is killed. A PSC re-score that was
+    stopped by a timeout left 53 GB of ``duckdb_temp_storage_*.tmp`` behind and
+    filled the disk, which then blocked every later run. This runs before the
+    stage opens its own connection, when nothing can be holding those files.
+
+    Only DuckDB's own spill files are touched, by name, and never the run's
+    outputs.
+    """
+    freed = 0
+    if not temp_dir.is_dir():
+        return freed
+    for path in temp_dir.glob("duckdb_temp_storage_*.tmp"):
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            freed += size
+        except OSError:
+            logger.debug("Could not remove stale spill file %s", path, exc_info=True)
+    return freed
 
 
 # ---------------------------------------------------------------------------
@@ -178,15 +228,49 @@ def blocking_budget_report(
 
         total = sum(r["pairs"] for r in counted)
         over = total > budget
+
+        # The EM training rules are priced too, and against the same budget.
+        # They are not part of `total`: EM runs one rule at a time, after
+        # prediction blocking, so the workloads are sequential rather than
+        # summed. Pricing them is not optional. An em_blocking_rule is a
+        # blocking rule like any other, and a coarse one is far more dangerous
+        # than a coarse prediction rule because nothing downstream trims it —
+        # PSC's person rule "same birth year AND same birth month" put
+        # 170,613,604 pairs through EM on a 449,397-unit sample whose entire
+        # prediction workload was 2.4M, spilled 53 GB of DuckDB temp files and
+        # ran until a 40-minute timeout killed it. The budget check reported
+        # "2.4M of 20M, under budget" and let it through, because it only ever
+        # looked at the prediction rules.
+        em_counted = []
+        for index, sql in enumerate(linkage.em_rules(config), start=1):
+            pairs = count_blocking_pairs(rows, sql, db_api) if len(rows) > 1 else 0
+            em_counted.append({
+                "id": f"em{index}",
+                "description": "EM training rule",
+                "sql": sql,
+                "pairs": pairs,
+            })
+            _step(f"  {track}/em{index}: {pairs:,} training pairs — {sql}",
+                  progress_callback)
+
+        worst_em = max(em_counted, key=lambda r: r["pairs"], default=None)
+        em_over = bool(worst_em and worst_em["pairs"] > budget)
+
         report["tracks"][track] = {
             "units": int(len(rows)),
             "budget": budget,
             "total": total,
             "over_budget": over,
             "rules": counted,
+            "em_rules": em_counted,
+            "em_over_budget": em_over,
         }
         if over and failure is None:
             failure = BlockingBudgetError(track, budget, total, counted)
+        if em_over and failure is None:
+            failure = BlockingBudgetError(
+                track, budget, worst_em["pairs"], em_counted, phase="training"
+            )
 
     if failure is not None:
         report["error"] = failure.detail()
@@ -899,18 +983,23 @@ def run_stage_3_score(
     events_path = run_dir / EVENTS_FILENAME
     events = pd.read_parquet(events_path) if events_path.is_file() else None
 
-    _step(f"Building units from {len(records):,} records...", progress_callback)
-    units, members = units_module.build_units(records, groups, events)
-    units.to_parquet(run_dir / units_module.UNITS_FILENAME, index=False)
-    members.to_parquet(run_dir / units_module.UNIT_MEMBERS_FILENAME, index=False)
-    write_scored_units(run_dir, units)
+    with _phase(f"Building units from {len(records):,} records", progress_callback):
+        units, members = units_module.build_units(records, groups, events)
+        units.to_parquet(run_dir / units_module.UNITS_FILENAME, index=False)
+        members.to_parquet(run_dir / units_module.UNIT_MEMBERS_FILENAME, index=False)
+        write_scored_units(run_dir, units)
     _step(f"  {len(units):,} units", progress_callback)
 
-    _step(f"Checking the blocking budget (DuckDB capped at {memory_limit()})...",
-          progress_callback)
-    budget_api = _db_api(run_dir / "duckdb_tmp")
-    report, failure = blocking_budget_report(units, settings, budget_api,
-                                             progress_callback)
+    freed = clear_duckdb_tmp(run_dir / "duckdb_tmp")
+    if freed:
+        _step(f"  Cleared {freed / 2**30:.1f} GB of spill left by an earlier run",
+              progress_callback)
+
+    with _phase(f"Checking the blocking budget (DuckDB capped at {memory_limit()})",
+                progress_callback):
+        budget_api = _db_api(run_dir / "duckdb_tmp")
+        report, failure = blocking_budget_report(units, settings, budget_api,
+                                                 progress_callback)
     (run_dir / BLOCKING_REPORT_FILENAME).write_text(
         json.dumps(report, indent=2), encoding="utf-8"
     )
@@ -931,19 +1020,26 @@ def run_stage_3_score(
                   progress_callback)
             continue
 
-        _step(f"Scoring {track} ({len(rows):,} units)...", progress_callback)
-        linker, pairs = train_track(rows, config, settings, ruleset, track,
-                                    run_dir, progress_callback)
+        with _phase(f"Scoring {track} ({len(rows):,} units)", progress_callback):
+            linker, pairs = train_track(rows, config, settings, ruleset, track,
+                                        run_dir, progress_callback)
         model_path = run_dir / MODEL_FILENAME.format(track=track)
         linker.misc.save_model_to_json(str(model_path), overwrite=True)
         untrained.extend(inspect_trained_model(model_path, track, progress_callback))
         pairs["track"] = track
-        pairs = apply_overlays(pairs, units, review, high)
+        with _phase(f"Applying the {track} overlays to {len(pairs):,} pairs",
+                    progress_callback):
+            pairs = apply_overlays(pairs, units, review, high)
         scored.append(pairs)
 
         if render_diagnostics:
-            render_track_diagnostics(linker, pairs, track, run_dir / "diagnostics",
-                                     review, high, progress_callback)
+            # Splink's score histogram is drawn from every pair, so this grows
+            # with the pair count rather than the unit count and is a plausible
+            # suspect whenever a big run stalls after the model is trained.
+            with _phase(f"Rendering {track} diagnostics", progress_callback):
+                render_track_diagnostics(linker, pairs, track,
+                                         run_dir / "diagnostics",
+                                         review, high, progress_callback)
 
     pairs = (
         pd.concat(scored, ignore_index=True) if scored
@@ -963,26 +1059,28 @@ def run_stage_3_score(
               progress_callback)
 
     # Stage 3b: the track's own model, when one is active (docs/MODEL.md).
-    pairs, model_state = apply_active_models(
-        run_dir, pairs, units, members, events, review, high, progress_callback
-    )
-    pairs.to_parquet(run_dir / PAIRS_FILENAME, index=False)
+    with _phase("Applying the active track models", progress_callback):
+        pairs, model_state = apply_active_models(
+            run_dir, pairs, units, members, events, review, high, progress_callback
+        )
+    with _phase(f"Writing {len(pairs):,} pairs", progress_callback):
+        pairs.to_parquet(run_dir / PAIRS_FILENAME, index=False)
 
     write_contradictions(run_dir, outcome["contradictions"])
     if outcome["contradictions"]:
         _step(f"  WARNING: {len(outcome['contradictions'])} FALSE label(s) "
               "contradicted by an exact match key", progress_callback)
 
-    _step("Evaluating the accepted pairs against the existing labels...",
-          progress_callback)
-    evaluation = score_eval.evaluate(
-        records, groups, units, members, pairs,
-        thresholds={"candidate": candidate, "review": review, "high": high},
-        applied=outcome["applied"],
-        model_lines=stage_3b_model.deciding_lines(
-            stage_3b_model.models_from_state(run_dir)),
-    )
-    _write_evaluation(run_dir, evaluation)
+    with _phase("Evaluating the accepted pairs against the existing labels",
+                progress_callback):
+        evaluation = score_eval.evaluate(
+            records, groups, units, members, pairs,
+            thresholds={"candidate": candidate, "review": review, "high": high},
+            applied=outcome["applied"],
+            model_lines=stage_3b_model.deciding_lines(
+                stage_3b_model.models_from_state(run_dir)),
+        )
+        _write_evaluation(run_dir, evaluation)
 
     counts = counts_from(units, pairs, evaluation, outcome, run_dir=run_dir,
                          untrained=untrained)

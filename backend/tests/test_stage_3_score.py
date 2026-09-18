@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -187,6 +188,91 @@ def test_a_rule_over_budget_fails_with_a_structured_error_naming_it():
     assert detail["rules"][0]["pairs"] == 15
     assert report["tracks"]["person"]["over_budget"] is True
     assert "b1" in str(failure)
+
+
+def _em_budget_settings(max_pairs: int, em_rules: list[str]) -> dict:
+    """Settings whose prediction blocking is free, so only EM can blow the budget.
+
+    This is the shape the defect had: the prediction rules were comfortably
+    inside the budget and the training rule was the expensive one.
+    """
+    settings = _budget_settings(max_pairs)
+    settings["tracks"]["person"]["blocking_rules"] = [
+        {"id": "b1", "description": "nothing matches itself",
+         "sql": "l.unit_id = r.unit_id"}
+    ]
+    settings["tracks"]["person"]["em_blocking_rules"] = em_rules
+    return settings
+
+
+def test_the_budget_report_prices_the_em_training_rules_too():
+    # An em_blocking_rule blocks like any other rule, and nothing downstream
+    # trims what it produces, so it has to be counted before Splink runs.
+    report, failure = blocking_budget_report(
+        _budget_units(), _em_budget_settings(100, ["l.surname = r.surname"]), _db_api()
+    )
+    assert failure is None
+    person = report["tracks"]["person"]
+    assert person["em_rules"][0]["id"] == "em1"
+    assert person["em_rules"][0]["pairs"] == 15
+    assert person["em_over_budget"] is False
+    # EM runs after prediction, one rule at a time, so its pairs are a separate
+    # workload rather than an addition to the prediction total.
+    assert person["total"] == 0
+
+
+def test_an_em_rule_over_budget_fails_the_run_before_splink_starts():
+    # The regression this exists for: PSC person trained on "same birth year and
+    # month", which made 170M pairs from 449k units while the prediction rules
+    # made 2.4M. The old check only looked at the prediction rules, reported
+    # "under budget", and the run hung until it was killed.
+    report, failure = blocking_budget_report(
+        _budget_units(), _em_budget_settings(5, ["l.surname = r.surname"]), _db_api()
+    )
+    assert isinstance(failure, BlockingBudgetError)
+    detail = failure.detail()
+    assert detail["phase"] == "training"
+    assert detail["total"] == 15
+    assert detail["rules"][0]["id"] == "em1"
+    assert report["tracks"]["person"]["em_over_budget"] is True
+    assert "Training the model on" in str(failure)
+
+
+def test_the_shipped_psc_person_em_rules_are_affordable_and_leave_the_names_free():
+    from app.rules import linkage
+
+    settings = json.loads(
+        (Path("app/profiles/defaults/psc/linkage_settings.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    rules = linkage.em_rules(linkage.track_settings(settings, "person"))
+    # The date-of-birth training rule must carry a third, selective column.
+    # Year plus month alone is 1,058 blocks over the whole of PSC.
+    dob_rule = [r for r in rules if "dob_year_clean" in r][0]
+    assert "postcode_district" in dob_rule
+    # ...and it must still leave both name comparisons free to be estimated,
+    # which is the only reason the rule exists.
+    assert "surname" not in dob_rule
+    assert "forename" not in dob_rule
+    assert linkage.linkage_warnings(settings) == []
+
+
+def test_stale_duckdb_spill_is_cleared_and_the_run_outputs_are_not(tmp_path):
+    from app.pipeline.dedupe.stage_3_score import clear_duckdb_tmp
+
+    tmp_dir = tmp_path / "duckdb_tmp"
+    tmp_dir.mkdir()
+    (tmp_dir / "duckdb_temp_storage_DEFAULT-0.tmp").write_bytes(b"x" * 2048)
+    (tmp_dir / "duckdb_temp_storage_S32K-1.tmp").write_bytes(b"x" * 1024)
+    keep = tmp_dir / "notes.json"
+    keep.write_text("{}", encoding="utf-8")
+
+    assert clear_duckdb_tmp(tmp_dir) == 3072
+    assert not list(tmp_dir.glob("duckdb_temp_storage_*.tmp"))
+    assert keep.is_file()
+    # A missing directory is the normal first-run case, not an error.
+    assert clear_duckdb_tmp(tmp_path / "nothing_here") == 0
 
 
 def test_the_runner_turns_a_budget_failure_into_run_error_detail():

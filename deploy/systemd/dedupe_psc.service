@@ -68,7 +68,7 @@ PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
-ReadWritePaths=/var/lib/dedupe_ui/psc
+ReadWritePaths=/var/lib/dedupe_ui/psc /var/lib/dedupe_ui/lock
 
 [Install]
 WantedBy=multi-user.target

@@ -4,6 +4,7 @@
 import asyncio
 import collections
 import contextlib
+import functools
 import json
 import logging
 import threading
@@ -18,6 +19,7 @@ from app.pipeline import gbt_model
 from app.services.audit_logger import log_event
 from app.services.config_manager import get_version
 from app.services.label_applier import apply_labels
+from app.services import run_lock
 
 logger = logging.getLogger(__name__)
 
@@ -620,105 +622,38 @@ def _run_pipeline(
         # Emit to SSE subscribers
         _emit_event(run_id, event)
 
+    def _on_wait(holder: dict | None) -> None:
+        """Another instance is running. Say so on the stream and in the DB (D17)."""
+        who = (holder or {}).get("label") or ""
+        message = run_lock.QUEUED_MESSAGE + (f" ({who})" if who else "")
+        write_db(
+            db_path,
+            "UPDATE runs SET status = ?, current_stage = ? WHERE id = ?",
+            ("queued", None, run_id),
+        )
+        progress_callback("queued", {"message": message, "holder": holder or {}})
+
     try:
-        with _capture_pipeline_output(Path(run_dir)):
-            from app.pipeline.dedupe.stage_0_load import run_stage_0_load
-            from app.pipeline.dedupe.stage_1_clean import run_stage_1_clean
-            from app.pipeline.dedupe.stage_2_exact import run_stage_2_exact
-            from app.pipeline.dedupe.stage_3_score import run_stage_3_score
-            from app.pipeline.dedupe.stage_4_cluster import run_stage_4_cluster
-            from app.pipeline.dedupe.stage_5_entities import run_stage_5_entities
-
-            # Count active labels before running so we know what was available.
-            # Nothing consumes them yet — matching arrives in a later slice — but
-            # the figure belongs with the run it was measured against.
-            label_rows = query_db(
+        # One heavy run at a time across both instances, not just this process.
+        # Waiting happens here, on the worker thread start_run created, never on
+        # the request thread that asked for the run.
+        with run_lock.run_lock(data_dir, label=f"run {run_id}", on_wait=_on_wait):
+            write_db(
                 db_path,
-                "SELECT COUNT(*) AS n FROM labels WHERE active = 1",
+                "UPDATE runs SET status = ? WHERE id = ?",
+                ("running", run_id),
             )
-            labels_in_library = label_rows[0]["n"] if label_rows else 0
-
-            counts = run_stage_0_load(
+            _run_stages(
+                db_path=db_path,
+                run_id=run_id,
                 run_dir=run_dir,
+                config_dir=config_dir,
                 input_path=input_path,
-                progress_callback=progress_callback,
-                options=LoadOptions(quick_mode=quick_mode),
-            )
-            # Per-track counts are only known after the ruleset has been applied,
-            # so they replace whatever stage 0 reported.
-            counts.update(run_stage_1_clean(
-                run_dir=run_dir,
-                config_dir=config_dir,
-                progress_callback=progress_callback,
-            ))
-            from app.services.pair_labels import decisions_by_scope, labels_frame
-
-            labels = labels_frame(db_path)
-            counts.update(run_stage_2_exact(
-                run_dir=run_dir,
-                config_dir=config_dir,
-                labels=labels,
-                decisions=decisions_by_scope(db_path),
-                progress_callback=progress_callback,
-            ))
-            # A label is a statement about two records, so it outlives the run
-            # that made it: stage 3 maps each one onto whichever units hold
-            # those two records now.
-            counts.update(run_stage_3_score(
-                run_dir=run_dir,
-                config_dir=config_dir,
                 threshold_high=threshold_high,
                 threshold_review=threshold_review,
                 render_diagnostics=render_diagnostics,
-                labels=labels,
+                quick_mode=quick_mode,
                 progress_callback=progress_callback,
-            ))
-            counts.update(run_stage_4_cluster(
-                run_dir=run_dir,
-                config_dir=config_dir,
-                labels=labels,
-                decisions=decisions_by_scope(db_path),
-                progress_callback=progress_callback,
-            ))
-            counts.update(run_stage_5_entities(
-                run_dir=run_dir,
-                db_path=db_path,
-                progress_callback=progress_callback,
-            ))
-            counts["labels_in_library"] = labels_in_library
-
-            now = datetime.now(timezone.utc).isoformat()
-            started_rows = query_db(
-                db_path,
-                "SELECT started_at FROM runs WHERE id = ?",
-                (run_id,),
-            )
-            duration = None
-            if started_rows and started_rows[0]["started_at"]:
-                try:
-                    started = datetime.fromisoformat(started_rows[0]["started_at"])
-                    duration = (datetime.now(timezone.utc) - started).total_seconds()
-                except Exception:
-                    pass
-
-            write_db(
-                db_path,
-                """UPDATE runs
-                   SET status = ?, finished_at = ?, duration_secs = ?, counts_json = ?,
-                       threshold_high = ?, threshold_review = ?, current_stage = NULL
-                   WHERE id = ?""",
-                ("complete", now, duration, json.dumps(counts), threshold_high,
-                 threshold_review, run_id),
-            )
-
-            progress_callback("complete", {"counts": counts})
-
-            log_event(
-                db_path,
-                user="system",
-                kind="run",
-                description=f"Pipeline run {run_id} completed",
-                metadata={"run_id": run_id, "counts": counts},
             )
 
     except Exception as e:
@@ -743,6 +678,146 @@ def _run_pipeline(
         _on_run_finished(db_path, data_dir)
 
 
+def _run_stages(
+    db_path: str,
+    run_id: str,
+    run_dir: str,
+    config_dir: str,
+    input_path: str,
+    threshold_high: float,
+    threshold_review: float,
+    render_diagnostics: bool,
+    quick_mode: bool,
+    progress_callback,
+) -> None:
+    """The stages themselves, with the cross-process run lock already held."""
+    with _capture_pipeline_output(Path(run_dir)):
+        from app.pipeline.dedupe.stage_0_load import run_stage_0_load
+        from app.pipeline.dedupe.stage_1_clean import run_stage_1_clean
+        from app.pipeline.dedupe.stage_2_exact import run_stage_2_exact
+        from app.pipeline.dedupe.stage_3_score import run_stage_3_score
+        from app.pipeline.dedupe.stage_4_cluster import run_stage_4_cluster
+        from app.pipeline.dedupe.stage_5_entities import run_stage_5_entities
+
+        # Count active labels before running so we know what was available.
+        # Nothing consumes them yet — matching arrives in a later slice — but
+        # the figure belongs with the run it was measured against.
+        label_rows = query_db(
+            db_path,
+            "SELECT COUNT(*) AS n FROM labels WHERE active = 1",
+        )
+        labels_in_library = label_rows[0]["n"] if label_rows else 0
+
+        counts = run_stage_0_load(
+            run_dir=run_dir,
+            input_path=input_path,
+            progress_callback=progress_callback,
+            options=LoadOptions(quick_mode=quick_mode),
+        )
+        # Per-track counts are only known after the ruleset has been applied,
+        # so they replace whatever stage 0 reported.
+        counts.update(run_stage_1_clean(
+            run_dir=run_dir,
+            config_dir=config_dir,
+            progress_callback=progress_callback,
+        ))
+        from app.services.pair_labels import decisions_by_scope, labels_frame
+
+        labels = labels_frame(db_path)
+        counts.update(run_stage_2_exact(
+            run_dir=run_dir,
+            config_dir=config_dir,
+            labels=labels,
+            decisions=decisions_by_scope(db_path),
+            progress_callback=progress_callback,
+        ))
+        # A label is a statement about two records, so it outlives the run
+        # that made it: stage 3 maps each one onto whichever units hold
+        # those two records now.
+        counts.update(run_stage_3_score(
+            run_dir=run_dir,
+            config_dir=config_dir,
+            threshold_high=threshold_high,
+            threshold_review=threshold_review,
+            render_diagnostics=render_diagnostics,
+            labels=labels,
+            progress_callback=progress_callback,
+        ))
+        counts.update(run_stage_4_cluster(
+            run_dir=run_dir,
+            config_dir=config_dir,
+            labels=labels,
+            decisions=decisions_by_scope(db_path),
+            progress_callback=progress_callback,
+        ))
+        counts.update(run_stage_5_entities(
+            run_dir=run_dir,
+            db_path=db_path,
+            progress_callback=progress_callback,
+        ))
+        counts["labels_in_library"] = labels_in_library
+
+        now = datetime.now(timezone.utc).isoformat()
+        started_rows = query_db(
+            db_path,
+            "SELECT started_at FROM runs WHERE id = ?",
+            (run_id,),
+        )
+        duration = None
+        if started_rows and started_rows[0]["started_at"]:
+            try:
+                started = datetime.fromisoformat(started_rows[0]["started_at"])
+                duration = (datetime.now(timezone.utc) - started).total_seconds()
+            except Exception:
+                pass
+
+        write_db(
+            db_path,
+            """UPDATE runs
+               SET status = ?, finished_at = ?, duration_secs = ?, counts_json = ?,
+                   threshold_high = ?, threshold_review = ?, current_stage = NULL
+               WHERE id = ?""",
+            ("complete", now, duration, json.dumps(counts), threshold_high,
+             threshold_review, run_id),
+        )
+
+        progress_callback("complete", {"counts": counts})
+
+        log_event(
+            db_path,
+            user="system",
+            kind="run",
+            description=f"Pipeline run {run_id} completed",
+            metadata={"run_id": run_id, "counts": counts},
+        )
+
+
+
+def _needs_run_lock(fn):
+    """Guard heavy work that an endpoint does inline on its request thread.
+
+    Recluster, re-bucket and apply-model are as heavy as a stage, so D17's "one
+    at a time" covers them too. They do not get to *wait*, though: they run on
+    the request thread, and holding that open behind the other instance's
+    ten-minute run would just move the stall to the browser. They ask once and
+    raise :class:`~app.services.run_lock.RunBusy` if the tool is busy.
+
+    Every wrapped function takes ``run_dir`` second, and a run directory is
+    ``<data_dir>/runs/<run_id>``, so the data directory is two levels up.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        run_dir = kwargs.get("run_dir") if "run_dir" in kwargs else (
+            args[1] if len(args) > 1 else None
+        )
+        data_dir = Path(run_dir).parent.parent if run_dir else None
+        with run_lock.run_lock(data_dir, label=fn.__name__, blocking=False):
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
+@_needs_run_lock
 def rebucket_run(
     db_path: str,
     run_dir: str,
@@ -932,6 +1007,7 @@ def cancel_run(db_path: str, run_id: str) -> None:
     _emit_event(run_id, {"event": "cancelled", "timestamp": time.time()})
 
 
+@_needs_run_lock
 def recluster_run(db_path: str, run_dir: str, run_id: str) -> dict:
     """Redo the grouping and the entities after decisions, without rescoring.
 

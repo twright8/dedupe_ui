@@ -262,8 +262,11 @@ def test_api_validate_does_not_save(client, ruleset):
 
 
 def test_api_validate_accepts_the_shipped_default(client):
+    # The endpoint answers with warnings beside errors: a setting can be legal
+    # and still not do what the user meant — a comparison no training rule lets
+    # vary, say. The shipped default should raise neither.
     r = client.post("/api/config/validate", json={"ruleset": default_ruleset()})
-    assert r.json() == {"errors": []}
+    assert r.json() == {"errors": [], "warnings": []}
 
 
 # ---- functions ----

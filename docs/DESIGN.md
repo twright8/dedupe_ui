@@ -144,7 +144,7 @@ Each slice ends with something Tom can check in the browser.
 | 4 | Clusters and gate, registry, group decisions, publish, export | done, `66f9dfd` |
 | 5 | GBT per track, cold start, explanations, model panel, "most useful to label" | done |
 | 6 | Organisation track for donations | folded into slices 2 to 5: both tracks were built together |
-| 7 | Staging on the server, then the cutover with the chooser page | kit written and tested locally (`deploy/`, `docs/DEPLOY.md`), commit `3282dc4`. Nothing applied. Tom runs every command that changes the server |
+| 7 | Staging on the server, then the cutover with the chooser page | DONE on 2026-09-18. All three tools are on port 8000 behind Caddy: `/` chooser, `/runs` roe_ui (now on 127.0.0.1:8001), `/donations/` (8101), `/psc/` (8102). Smoke test 16 of 16 on the live address. Backup and rollback: `/home/ubuntu/backups/20260918-195350`. roe_ui already had a fixed `SECRET_KEY`, so the new tools reuse its password and key and nobody was logged out |
 | 8 | PSC profile: bulk loader, both tracks, scale guards | 8a done on a 500,000-record sample (`3282dc4`). 8b (full scale) in progress: see `PSC_HANDOVER.md` |
 | 9 | PSC organisation track | built with slice 8a. Needs the full-scale run and tuning |
 
@@ -156,6 +156,16 @@ Known follow-ups: donations person scores pile up at 0.70 to 0.80 because Splink
 
 ## Open items
 
+- **The laptop disk is full: under 1 GB free on `/`.** Mostly 53 GB of DuckDB
+  spill files orphaned by the stage-3 run a timeout killed. Nothing at PSC scale
+  can run until they are deleted — `PSC_HANDOVER.md` section 7 has the path and
+  the command. Stage 3 now clears stale spill on the way in, so it should not
+  recur.
+- D17's "one run at a time across both instances" is now built: an `fcntl.flock`
+  in `app/services/run_lock.py`. **The deploy kit must set `RUN_LOCK_DIR` to one
+  directory both instances share**; it defaults to the parent of `DATA_DIR`,
+  which is only right when they are deployed as siblings under one root. D17's
+  hard memory cap and low CPU priority are still not built.
 - The full PSC snapshot is still downloading. `dedupe_final/` holds part 1 of 32.
 - Features, thresholds, and blocking rules for both profiles will be tuned after the platform works.
 

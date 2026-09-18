@@ -10,6 +10,7 @@ from app.auth import SessionMiddleware, router as auth_router
 from app.base_path import BasePathMiddleware, render_index
 from app.db import init_db
 from app.profiles import get_profile
+from app.services import run_lock
 from app.routers.audit import router as audit_router
 from app.routers.config import router as config_router
 from app.routers.entities import router as entities_router
@@ -96,6 +97,23 @@ async def lifespan(app):
     yield
 
 app = FastAPI(title=get_profile().title, lifespan=lifespan)
+
+
+@app.exception_handler(run_lock.RunBusy)
+async def _run_busy_handler(request, exc: run_lock.RunBusy):
+    """The other instance holds the run lock (D17).
+
+    409, not 500: nothing is broken and the caller should simply try again once
+    the other tool has finished.
+    """
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=409,
+        content={"detail": str(exc), "holder": exc.holder},
+    )
+
+
 app.add_middleware(SessionMiddleware)
 # Added last, so it runs first: the prefix must be off the path before the
 # session middleware decides whether /api/health is public.
