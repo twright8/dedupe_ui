@@ -5,6 +5,8 @@ so most of what is checked here is what happens to it when the run underneath
 changes.
 """
 
+import csv
+import io
 import json
 import os
 import sys
@@ -796,3 +798,149 @@ def test_no_response_carries_a_nan(client, db_path, data_dir):
     assert pair["gammas"]["surname"] == 1.0
     assert pair["events"]["right"][0]["date"] is None
     assert pair["events"]["right"][0]["recipient"] == "Party C"
+
+
+# ---------------------------------------------------------------------------
+# The server-paged library: sort, date filters, grouping
+# ---------------------------------------------------------------------------
+
+
+def _library(client, db_path, data_dir):
+    """Two ordinary labels and one merge decision over three pairs."""
+    _seed_run(db_path, data_dir)
+    client.post(f"/api/runs/{RUN_ID}/labels", json={"labels": [
+        {"pair_id": "1|3", "is_match": "TRUE", "notes": "same donor"},
+    ]})
+    client.post(f"/api/runs/{RUN_ID}/labels", json={"labels": [
+        {"pair_id": "4|5", "is_match": "FALSE"},
+    ]})
+    decision = pair_labels.save_decision(
+        db_path, scope="C-1", kind="merge",
+        parts=[["1", "2", "3", "4"]], reviewer="Ann",
+        names={"1": "Ann Smith", "2": "Anne Smith", "3": "Bob Jones"},
+        track="person", notes="one donor", run_id=RUN_ID,
+    )
+    return decision
+
+
+@pytest.mark.parametrize("sort,first", [
+    ("reviewer", "Tom"),
+    ("is_match", "TRUE"),
+])
+def test_the_library_sorts_on_an_allow_listed_column(client, db_path, data_dir,
+                                                     sort, first):
+    _library(client, db_path, data_dir)
+    body = client.get("/api/labels", params={"sort": sort, "order": "desc"}).json()
+    assert body["items"][0][{"reviewer": "reviewer", "is_match": "is_match"}[sort]] == first
+    # Ascending is the other end of the same list.
+    other = client.get("/api/labels", params={"sort": sort, "order": "asc"}).json()
+    assert other["items"][0] != body["items"][0]
+
+
+def test_a_sort_or_order_the_caller_may_not_use_is_a_400(client, db_path, data_dir):
+    _library(client, db_path, data_dir)
+    assert client.get("/api/labels", params={"sort": "id; drop"}).status_code == 400
+    assert client.get("/api/labels", params={"order": "sideways"}).status_code == 400
+    assert client.get("/api/labels", params={"group_by": "reviewer"}).status_code == 400
+    assert client.get("/api/labels/export.csv",
+                      params={"sort": "nope"}).status_code == 400
+
+
+def test_the_date_filters_are_inclusive_at_both_ends(client, db_path, data_dir):
+    _library(client, db_path, data_dir)
+    write_db(db_path, "UPDATE pair_labels SET created_at = ? WHERE record_id_a = ?",
+             ("2026-09-01T09:00:00+00:00", "4"))
+    write_db(db_path, "UPDATE pair_labels SET created_at = ? WHERE record_id_a = ?",
+             ("2026-09-03T23:30:00+00:00", "1"))
+
+    day = client.get("/api/labels", params={"created_from": "2026-09-01",
+                                            "created_to": "2026-09-01"}).json()
+    assert day["total"] == 1
+    assert day["items"][0]["record_id_a"] == "4"
+
+    # A bare `to` date covers the whole of that day, late timestamps included.
+    span = client.get("/api/labels", params={"created_from": "2026-09-01",
+                                             "created_to": "2026-09-03"}).json()
+    assert span["total"] == 4
+    assert client.get("/api/labels",
+                      params={"created_from": "2026-09-04"}).json()["total"] == 0
+
+
+def test_the_export_honours_exactly_the_filters_the_list_does(client, db_path, data_dir):
+    _library(client, db_path, data_dir)
+
+    listed = client.get("/api/labels", params={"is_match": "FALSE"}).json()
+    exported = client.get("/api/labels/export.csv", params={"is_match": "FALSE"})
+    assert exported.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(exported.text)))
+    assert len(rows) == listed["total"]
+    assert {row["is_match"] for row in rows} == {"FALSE"}
+
+    # With no filters it is still the whole active library.
+    everything = client.get("/api/labels/export.csv")
+    assert len(list(csv.DictReader(io.StringIO(everything.text)))) == \
+        client.get("/api/labels").json()["total"]
+
+
+def test_the_export_streams_rather_than_building_the_whole_file(client, db_path,
+                                                               data_dir):
+    _library(client, db_path, data_dir)
+    with client.stream("GET", "/api/labels/export.csv") as response:
+        assert response.status_code == 200
+        chunks = list(response.iter_lines())
+    assert chunks[0].startswith("record_id_a,record_id_b")
+    assert len([c for c in chunks if c.strip()]) >= 2
+
+
+def test_grouping_by_decision_folds_a_star_into_one_row(client, db_path, data_dir):
+    decision = _library(client, db_path, data_dir)
+
+    flat = client.get("/api/labels").json()
+    grouped = client.get("/api/labels", params={"group_by": "decision"}).json()
+    assert flat["grouped"] is False
+    assert grouped["grouped"] is True
+    # The decision's star supersedes the single label on the pair it covers, so
+    # the library holds three decision labels and one untouched single.
+    assert flat["total"] == 4
+    assert grouped["total"] == 2
+
+    row = next(i for i in grouped["items"] if i["decision_id"] == decision["decision_id"])
+    assert row["kind"] == "merge"
+    assert row["decision_scope"] == "C-1"
+    assert (row["n_labels"], row["n_true"], row["n_false"]) == (3, 3, 0)
+    assert row["reviewer"] == "Ann"
+    assert row["notes"] == "one donor"
+    assert 0 < len(row["names"]) <= 4
+    # A single label still stands alone, with no decision to belong to.
+    single = next(i for i in grouped["items"] if i["decision_id"] is None)
+    assert single["n_labels"] == 1 and single["kind"] is None
+
+    # The members are still listable by their decision id.
+    members = client.get("/api/labels",
+                         params={"decision_id": decision["decision_id"]}).json()
+    assert members["total"] == 3
+    assert {m["decision_id"] for m in members["items"]} == {decision["decision_id"]}
+
+
+def test_paging_is_stable_when_a_decision_straddles_a_boundary(client, db_path,
+                                                              data_dir):
+    _library(client, db_path, data_dir)
+    for params in ({}, {"group_by": "decision"}):
+        whole = client.get("/api/labels", params={**params, "limit": 100}).json()
+        seen = []
+        for offset in range(0, whole["total"], 2):
+            page = client.get("/api/labels",
+                              params={**params, "offset": offset, "limit": 2}).json()
+            seen.extend(page["items"])
+        key = "decision_id" if params else "id"
+        # Every row exactly once, in the same order as the unpaged list.
+        assert [row.get(key) for row in seen] == [row.get(key) for row in whole["items"]]
+        assert len(seen) == whole["total"]
+
+
+def test_the_grouped_counts_still_describe_the_whole_library(client, db_path, data_dir):
+    _library(client, db_path, data_dir)
+    grouped = client.get("/api/labels", params={"group_by": "decision"}).json()
+    # counts are labels, not groups, so they match the flat view.
+    assert grouped["counts"] == client.get("/api/labels").json()["counts"]
+    assert grouped["counts"]["active"] == 4

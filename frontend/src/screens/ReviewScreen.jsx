@@ -26,6 +26,7 @@ import { Cell, NUMERIC_TYPES, SYSTEM_COLUMNS, PATTERN_COLUMNS } from "../compone
 import MethodologyNotes from "../components/MethodologyNotes";
 import { useKeyboardNav } from "../hooks/useKeyboardNav";
 import { useProfile } from "../profile";
+import { existingLabelName, hasExistingLabels } from "../profileText";
 
 const PER_PAGE = 50;
 const BULK_LIMIT = 500; // the API's own cap, and the batch size for saving
@@ -109,6 +110,9 @@ export default function ReviewScreen() {
 
   const tracks = profile.tracks || [];
   const eventColumns = profile.event_columns || [];
+  // A profile with nothing to compare against hides every chip, column and
+  // figure about an earlier grouping.
+  const earlier = existingLabelName(profile);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -415,6 +419,7 @@ export default function ReviewScreen() {
   }
 
   const pendingReview = counts.pairsReview ?? counts.review ?? 0;
+  const showEarlier = hasExistingLabels(profile, counts);
 
   return (
     <div className="content" style={{ maxWidth: "none", paddingRight: 28 }}>
@@ -468,6 +473,8 @@ export default function ReviewScreen() {
         onBrush={onBrush}
         scoreEval={scoreEval}
         model={modelForTrack}
+        earlier={earlier}
+        showEarlier={showEarlier}
       />
 
       {/* PRIMARY · label these pairs */}
@@ -682,7 +689,7 @@ export default function ReviewScreen() {
           >
             Any decision
           </button>
-          {DECIDED_BY.map((d) => (
+          {DECIDED_BY.filter((d) => d.id !== "import" || showEarlier).map((d) => (
             <button
               key={d.id}
               className={decidedBy === d.id ? "on" : ""}
@@ -697,6 +704,7 @@ export default function ReviewScreen() {
           ))}
         </div>
 
+        {showEarlier && (
         <button
           className="btn sm"
           style={
@@ -712,6 +720,7 @@ export default function ReviewScreen() {
             &middot; {fmtNumber(counts.import_disagrees)}
           </span>
         </button>
+        )}
 
         <div className="seg" title="Filter by whether you have answered">
           {[
@@ -1275,7 +1284,7 @@ function ReviewDiff({
               matchProbability={pair.match_probability}
             />
             {(showAll || !hasFocus) && (
-              <PairEvidence pair={pair} eventColumns={eventColumns} />
+              <PairEvidence pair={pair} eventColumns={eventColumns} profile={profile} />
             )}
           </>
         )}

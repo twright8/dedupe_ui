@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TI UK data tools</title>
+<meta name="description" content="Pick one of the three Transparency International UK name-matching tools.">
+<meta name="color-scheme" content="light dark">
+
+<!-- The only outside request this page makes. These are the same two fonts
+     roe_ui loads, so the chooser and the tools look like one thing. If the
+     fonts fail to load the page still works: the fallback stack takes over. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<!-- The favicon is inlined so the page never asks the server for a second
+     file. Caddy routes only the exact path "/" here. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='2' fill='%23E30613'/%3E%3Ctext x='16' y='22' font-family='system-ui,sans-serif' font-size='16' font-weight='700' fill='white' text-anchor='middle'%3ETI%3C/text%3E%3C/svg%3E">
+
+<style>
+/* ============================================================
+   Tokens lifted from roe_ui: frontend/src/styles/index.css
+   Light values are :root. Dark values follow the reader's own
+   system setting, through prefers-color-scheme.
+   ============================================================ */
+:root {
+  --font-sans: "Geist", "Söhne", "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+
+  --ti-red:      #E30613;
+  --ti-red-700:  #B70410;
+
+  /* Red used for text, rather than for a filled block. It is darkened here
+     and lightened in dark mode, so the "Open" label stays readable against
+     the card behind it. Plain #E30613 on a dark card is too dim to pass. */
+  --accent-text: #B70410;
+
+  --bg:          #F4F3EE;
+  --surface:     #FFFFFF;
+  --surface-sub: #FAF9F5;
+  --line:        #E4E1D7;
+  --line-strong: #C9C5B6;
+  --ink:         #15171A;
+  --ink-2:       #2A2D33;
+  --muted:       #6B6E75;
+
+  --r-md: 6px;
+  --r-lg: 10px;
+
+  --shadow-sm: 0 1px 0 rgba(20,22,26,.04), 0 1px 2px rgba(20,22,26,.04);
+  --shadow-md: 0 4px 10px rgba(20,22,26,.05), 0 1px 2px rgba(20,22,26,.04);
+
+  --focus: #1D4F91;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:          #0E1014;
+    --surface:     #14171C;
+    --surface-sub: #181B21;
+    --line:        #262A31;
+    --line-strong: #353A42;
+    --ink:         #ECEDEF;
+    --ink-2:       #C8CACE;
+    --muted:       #9498A1;
+
+    --accent-text: #F04752;
+
+    --shadow-sm: 0 1px 0 rgba(0,0,0,.30), 0 1px 2px rgba(0,0,0,.30);
+    --shadow-md: 0 4px 10px rgba(0,0,0,.35), 0 1px 2px rgba(0,0,0,.30);
+
+    --focus: #8FB6EE;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: var(--ti-red); color: #fff; }
+
+.wrap {
+  width: 100%;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+/* --- skip link, for keyboard and screen-reader users --- */
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 10;
+  padding: 10px 14px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+}
+.skip:focus { left: 16px; top: 16px; }
+
+/* --- header --- */
+header {
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.head-in {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 18px;
+  padding-bottom: 18px;
+}
+.brand-mark {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  background: var(--ti-red);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  border-radius: 2px;
+}
+.brand-text { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
+.org {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--muted);
+}
+.tool { font-size: 15px; font-weight: 600; letter-spacing: -0.005em; }
+
+/* --- main --- */
+main { flex: 1 0 auto; padding: 40px 0 48px; }
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 30px;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.lede {
+  margin: 0 0 32px;
+  max-width: 62ch;
+  font-size: 16px;
+  color: var(--muted);
+}
+
+/* --- the three cards --- */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color .12s ease, box-shadow .12s ease, transform .12s ease;
+}
+.card:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+.card:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+.card:active { transform: translateY(0); }
+
+.card .eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.card p {
+  margin: 0 0 20px;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+.card .go {
+  margin-top: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-text);
+}
+.card:hover .go .arrow { transform: translateX(3px); }
+.go .arrow { transition: transform .12s ease; }
+
+/* --- footer --- */
+footer {
+  flex: none;
+  border-top: 1px solid var(--line);
+  background: var(--surface-sub);
+  padding: 20px 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* --- small screens --- */
+@media (max-width: 520px) {
+  main { padding: 28px 0 32px; }
+  h1 { font-size: 25px; }
+  .lede { font-size: 15px; margin-bottom: 24px; }
+  .card { padding: 18px; }
+}
+
+/* --- people who ask for less movement get none --- */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+  .card:hover { transform: none; }
+}
+</style>
+</head>
+
+<body>
+<a class="skip" href="#tools">Skip to the tools</a>
+
+<header>
+  <div class="wrap head-in">
+    <div class="brand-mark" aria-hidden="true">TI</div>
+    <div class="brand-text">
+      <span class="org">Transparency International UK</span>
+      <span class="tool">Data tools</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <h1>TI UK data tools</h1>
+  <p class="lede">Three tools for matching names in company and political finance data. Pick the one you need.</p>
+
+  <ul class="grid" id="tools">
+    <li>
+      <a class="card" href="/runs">
+        <span class="eyebrow">ROE / OCOD</span>
+        <h2>ROE&#8211;OCOD linkage</h2>
+        <p>Links owners in the Register of Overseas Entities to the titles they hold in the Land Registry overseas ownership data.</p>
+        <span class="go">Open<span class="arrow" aria-hidden="true">&#8594;</span></span>
+      </a>
+    </li>
+    <li>
+      <a class="card" href="/donations/">
+        <span class="eyebrow">Donations</span>
+        <h2>Donations reconciliation</h2>
+        <p>Finds the records in the Electoral Commission donations data that belong to the same donor, and gives each donor one identifier.</p>
+        <span class="go">Open<span class="arrow" aria-hidden="true">&#8594;</span></span>
+      </a>
+    </li>
+    <li>
+      <a class="card" href="/psc/">
+        <span class="eyebrow">PSC</span>
+        <h2>PSC reconciliation</h2>
+        <p>Finds the people with significant control at Companies House who are the same person or business, and gives each one identifier.</p>
+        <span class="go">Open<span class="arrow" aria-hidden="true">&#8594;</span></span>
+      </a>
+    </li>
+  </ul>
+</main>
+
+<footer>
+  <div class="wrap">One login covers all three tools.</div>
+</footer>
+</body>
+</html>

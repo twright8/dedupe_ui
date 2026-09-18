@@ -71,7 +71,7 @@ def test_stage_0_rejects_a_frame_without_the_shared_columns(tmp_path, input_csv,
     class BrokenProfile:
         key = "broken"
 
-        def load_records(self, path):
+        def load_records(self, path, options=None):
             return pd.DataFrame({"record_id": ["1"]}), {}
 
     monkeypatch.setattr(stage, "get_profile", lambda: BrokenProfile())

@@ -23,7 +23,7 @@ const BASES = [
   {
     key: "import",
     label: "Imported label",
-    help: "The records already carried the same ID from the earlier manual work.",
+    help: "The records already carried the same ID from an earlier grouping.",
   },
   { key: "score", label: "Score", help: "The scorer accepted a pair and joined them." },
   { key: "human", label: "Human", help: "A reviewer said these records are the same." },

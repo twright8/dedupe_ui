@@ -648,7 +648,7 @@ def export(run_id: str, format: str = Query("xlsx"), scope: str = Query("proposa
     started = time.time()
     try:
         path = profile.export(run_dir, scope, format, {
-            "raw": _raw_input(run),
+            "raw": lambda: _raw_input(run),
             "entities": entities,
             "aliases": registry_store.alias_rows(_db_path()),
             "run_id": run_id,
@@ -668,10 +668,14 @@ def export(run_id: str, format: str = Query("xlsx"), scope: str = Query("proposa
     return FileResponse(path=str(path), filename=path.name)
 
 
-def _raw_input(run: dict) -> pd.DataFrame:
-    """The original input file, as the loader read it."""
-    from app.profiles.donations import read_input
+def _raw_input(run: dict) -> pd.DataFrame | None:
+    """The original input file, as the profile reads it.
 
+    The profile decides — an export that gives the user's own file back needs
+    it, one writing from the run's parquet does not, and re-parsing a 13 GB
+    snapshot to add two columns would be absurd.
+    """
+    profile = get_profile()
     name = run.get("input_filename")
     if not name:
         raise HTTPException(status_code=400, detail="This run has no input file recorded")
@@ -681,7 +685,7 @@ def _raw_input(run: dict) -> pd.DataFrame:
             status_code=404,
             detail=f"The input file '{name}' is no longer in the uploads folder",
         )
-    return read_input(path)
+    return profile.read_input_frame(path)
 
 
 def _default_export(run_dir: Path, entities: pd.DataFrame, fmt: str) -> Path:

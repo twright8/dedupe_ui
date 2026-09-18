@@ -1,0 +1,67 @@
+# /etc/systemd/system/dedupe_donations.service
+#
+# The donations reconciliation instance of dedupe_ui.
+# It listens on 127.0.0.1:8101. Only Caddy talks to it. It is not reachable
+# from the internet directly.
+#
+# Install with:
+#   sudo install -m 0644 -o root -g root \
+#     /opt/dedupe_ui/deploy/systemd/dedupe_donations.service \
+#     /etc/systemd/system/dedupe_donations.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now dedupe_donations
+
+[Unit]
+Description=Dedupe UI - donations reconciliation
+Documentation=file:/opt/dedupe_ui/docs/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dedupe_app
+Group=dedupe_app
+WorkingDirectory=/opt/dedupe_ui/backend
+EnvironmentFile=/etc/dedupe_donations.env
+ExecStart=/opt/dedupe_ui/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8101
+Restart=on-failure
+RestartSec=3
+
+# ---------------------------------------------------------------------------
+# Resource guards (design decision D17)
+#
+# The server also runs roe_ui, Harrier and Elasticsearch. A heavy dedupe run
+# must never starve them. Three separate brakes:
+#   Nice / CPUWeight / IOSchedulingClass - this process yields CPU and disk
+#     to everything else when the machine is busy.
+#   SPLINK_MEMORY_LIMIT (set in /etc/dedupe_donations.env) - DuckDB spills to
+#     disk instead of growing past its own budget. This is the soft brake.
+#   MemoryMax - the hard backstop. If the process still grows past this,
+#     systemd kills it. The run fails. Nothing else on the box is harmed.
+# MemoryMax is set above SPLINK_MEMORY_LIMIT on purpose, so DuckDB's own
+# spilling gets a chance to work before systemd steps in.
+# ---------------------------------------------------------------------------
+Nice=10
+CPUWeight=20
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+MemoryAccounting=yes
+MemoryMax=6G
+TasksMax=512
+
+# ---------------------------------------------------------------------------
+# Hardening
+# ProtectSystem=full makes /usr, /boot and /etc read-only for this process.
+# ReadWritePaths then re-opens exactly the one directory it must write to.
+# ---------------------------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/dedupe_ui/donations
+
+[Install]
+WantedBy=multi-user.target

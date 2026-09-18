@@ -295,13 +295,15 @@ def test_unknown_profile_raises_a_clear_error(monkeypatch):
         get_profile()
 
 
-def test_psc_loader_says_it_is_not_built_yet(tmp_path):
+def test_the_psc_profile_is_its_own_thing(tmp_path):
+    """The two profiles share the base and nothing else."""
     from app.profiles.psc import PscProfile
 
     profile = PscProfile()
     assert profile.title == "PSC reconciliation"
-    with pytest.raises(NotImplementedError, match="not built yet"):
-        profile.load_records(tmp_path / "snapshot.zip")
+    assert profile.input.extensions[0] == ".zip"
+    assert profile.key != DonationsProfile().key
+    assert set(profile.raw_columns) != set(DonationsProfile().raw_columns)
 
 
 # ---------------------------------------------------------------------------

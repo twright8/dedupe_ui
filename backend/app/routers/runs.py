@@ -305,6 +305,7 @@ def create_run(body: CreateRunRequest, user_name: str = Depends(current_user)):
         threshold_high=t_high,
         threshold_review=t_review,
         render_diagnostics=body.render_diagnostics,
+        quick_mode=body.quick_mode,
     )
 
     # Return the run row
@@ -350,6 +351,9 @@ def _normalize_counts(raw):
         "unitsTotal": raw.get("units_total", 0),
         "unitsPerson": raw.get("units_person", 0),
         "unitsOrganisation": raw.get("units_organisation", 0),
+        # Comparison levels EM could not learn: they contribute nothing to the
+        # score, and the run is otherwise silent about it.
+        "untrainedComparisons": raw.get("untrained_comparisons", 0),
         "pairsScored": raw.get("pairs_scored", 0),
         "pairsAccept": raw.get("pairs_accept", 0),
         "pairsReview": raw.get("pairs_review", 0),

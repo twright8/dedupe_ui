@@ -622,11 +622,31 @@ decision is gone — the score plus the import overlay.
 
 ### `GET /api/labels`
 
-The library. Query: `track`, `is_match` (`TRUE`/`FALSE`), `provenance`,
-`reviewer`, `held_out` (`0`/`1`), `q` (case-insensitive substring of either
-name, either record id, the notes or the reviewer), `active` (`1` by default,
-`0` for the superseded history), `offset`, `limit` (default 50, maximum 500).
-Newest first.
+The library, server-paged.
+
+| Name | Values | Default |
+|---|---|---|
+| `track` | `person`, `organisation` | every track |
+| `is_match` | `TRUE`, `FALSE` | both |
+| `provenance` | `manual`, `bulk_range`, `llm`, `import`, `cluster_merge`, `cluster_split` | every one |
+| `reviewer` | exact name | every reviewer |
+| `held_out` | `0`, `1` | both |
+| `decision_id` | one group decision's labels | every label |
+| `created_from`, `created_to` | ISO date or timestamp, **inclusive** | no limit |
+| `q` | substring of either name, either record id, the notes or the reviewer | none |
+| `active` | `1` live, `0` the superseded history | `1` |
+| `sort` | `created_at`, `name`, `reviewer`, `is_match`, `provenance` | `created_at` |
+| `order` | `asc`, `desc` | `desc` |
+| `group_by` | `decision` | off |
+| `offset`, `limit` | `limit` 1 to 500 | 0, 50 |
+
+`sort` is checked against that list and refused otherwise — **400** — because
+the value reaches the query. The row id breaks every tie, so paging never
+repeats or skips a row however many labels share a timestamp.
+
+A bare `created_from` date means from its first moment and a bare `created_to`
+date to its last, so `created_from=2026-09-01&created_to=2026-09-01` is that one
+day. A full timestamp is compared as given.
 
 ```json
 {
@@ -645,18 +665,71 @@ Newest first.
   ],
   "counts": { "active": 10, "true": 5, "false": 5, "held_out": 0,
               "person": 9, "organisation": 1,
-              "manual": 10, "bulk_range": 0, "llm": 0, "import": 0 }
+              "manual": 10, "bulk_range": 0, "llm": 0, "import": 0 },
+  "grouped": false
 }
 ```
 
-`counts` describe the whole library and ignore the filters.
+`counts` describe the whole library and ignore the filters. `grouped` says which
+shape the items are in.
+
+### `GET /api/labels?group_by=decision`
+
+One cluster decision can write a thousand labels, and a reviewer wants to see
+the decision rather than the star it produced. In this mode the labels sharing a
+`decision_id` come back as one item, and a label with no decision stays as it
+was. `total`, `offset` and `limit` are counted in **rows of this list**, so
+paging is over decisions, not labels.
+
+```json
+{
+  "total": 2,
+  "offset": 0,
+  "limit": 50,
+  "grouped": true,
+  "items": [
+    { "decision_id": "d_5f2c1f0a", "decision_scope": "C-102719", "kind": "merge",
+      "provenance": "cluster_merge", "n_labels": 25, "n_true": 25, "n_false": 0,
+      "names": ["John James", "John E James", "John Edward James", "J James"],
+      "reviewer": "Tom", "created_at": "2026-09-18T13:50:26.524783+00:00",
+      "notes": "One donor, three spellings",
+      "evidence_url": "https://www.example.org/report" },
+    { "decision_id": null, "decision_scope": null, "kind": null,
+      "provenance": "manual", "n_labels": 1, "n_true": 0, "n_false": 1,
+      "names": ["James E Sharp", "Mr James E H Sharp"],
+      "reviewer": "Tom", "created_at": "2026-09-18T13:50:26.549701+00:00",
+      "notes": null, "evidence_url": null }
+  ],
+  "counts": { "...": "the same label counts as the flat list" }
+}
+```
+
+- `kind` is `merge` or `split` for a group decision, and `null` for an ordinary
+  label. An **attribute** decision writes no labels at all, so it does not
+  appear in this library; the cluster's own `decision` field carries it
+  (`docs/ENTITIES_API.md`).
+- `names` is up to four distinct member names, in the order the labels were
+  written.
+- `counts` are still labels, not decisions, so the two modes report the same
+  totals for the library as a whole.
+- To open one, ask the flat list for it: `GET /api/labels?decision_id=d_5f2c1f0a`
+  returns its 25 member labels.
 
 ### `GET /api/labels/export.csv`
 
-Every active label, as `text/csv` with
+The labels the list would show, as `text/csv` with
 `Content-Disposition: attachment; filename=pair_labels.csv`. Columns:
 `record_id_a, record_id_b, track, is_match, provenance, held_out, reviewer,
-notes, evidence_url, name_a, name_b, run_id, config_version, created_at`.
+notes, evidence_url, name_a, name_b, run_id, config_version, created_at,
+decision_id, decision_scope`.
+
+It takes **exactly the same filters and sort** as the list, so a download is
+what was on screen rather than everything. With none it is the whole active
+library, as before. `group_by` does not apply: the file is always one row per
+label.
+
+The rows are streamed, so a library of any size costs one row of memory. An
+invalid `sort` is a **400** before the first byte, never a half-written file.
 
 ### `POST /api/labels/import`
 

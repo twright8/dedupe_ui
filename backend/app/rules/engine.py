@@ -11,6 +11,7 @@ mapped back (``functions.map_distinct``). Nothing walks the frame row by row.
 """
 
 import re
+from datetime import date
 
 import pandas as pd
 
@@ -265,6 +266,29 @@ def _op_nullify(values, step, ruleset):
     )
 
 
+def _op_nullify_outside_range(values, step, ruleset):
+    """Null a number outside ``min``..``max``. A value that is not a number
+    at all is null too.
+
+    ``max_years_ago`` sets the upper bound from today rather than a literal, so
+    a rule such as "a birth year later than 16 years ago is not a birth year"
+    still means the same thing next year.
+    """
+    low = step.get("min")
+    high = step.get("max")
+    years_ago = step.get("max_years_ago")
+    if high is None and years_ago is not None:
+        high = date.today().year - int(years_ago)
+
+    numbers = pd.to_numeric(_text(values), errors="coerce")
+    keep = numbers.notna()
+    if low is not None:
+        keep &= numbers >= float(low)
+    if high is not None:
+        keep &= numbers <= float(high)
+    return values.where(keep, None)
+
+
 def _op_lookup(values, step, ruleset):
     name = step.get("table")
     table = _lookups(ruleset).get(name)
@@ -332,6 +356,7 @@ OPS = {
     "regex_replace": _op_regex_replace,
     "strip_tokens": _op_strip_tokens,
     "nullify": _op_nullify,
+    "nullify_outside_range": _op_nullify_outside_range,
     "lookup": _op_lookup,
     "function": _op_function,
 }
@@ -363,9 +388,41 @@ def _blank_to_null(series: pd.Series) -> pd.Series:
     return out.where(~blank, None)
 
 
+# `concat` is the one op that reads several columns, so it cannot go through
+# the one-source distinct mapping the others use.
+MULTI_SOURCE_OPS = ("concat",)
+
+
+def _run_concat(step: dict, frame: pd.DataFrame) -> pd.Series:
+    """Join several columns into one key column, over the distinct combinations.
+
+    A match key's corroborator sometimes needs two columns treated as one —
+    an address line only means an address beside its town. The join runs on the
+    distinct tuples, so it costs the vocabulary and not the frame.
+    """
+    sources = [c for c in (step.get("sources") or []) if c]
+    missing = [c for c in sources if c not in frame.columns]
+    if not sources:
+        raise RulesetError("concat needs a sources list")
+    if missing:
+        raise RulesetError(f"Unknown source column '{missing[0]}'")
+
+    separator = str(step.get("separator", "|"))
+    parts = frame[sources].astype("object")
+    known = parts.notna().all(axis=1) if step.get("require_all", True) \
+        else parts.notna().any(axis=1)
+    joined = parts.apply(
+        lambda row: separator.join("" if v is None else str(v).strip() for v in row),
+        axis=1,
+    ) if len(frame) else pd.Series([], dtype="object")
+    return joined.where(known, None)
+
+
 def _run_step(step: dict, ruleset: dict, frame: pd.DataFrame) -> dict[str, pd.Series]:
     """Run one step against *frame* and return the columns it writes."""
     op = step.get("op")
+    if op in MULTI_SOURCE_OPS:
+        return {step.get("target"): _blank_to_null(_run_concat(step, frame))}
     handler = OPS.get(op)
     if handler is None:
         raise RulesetError(f"Unknown op '{op}'")
@@ -929,16 +986,26 @@ def _check_step(step, path: str, ruleset: dict, raw_columns, known, errors) -> l
         return []
 
     op = step.get("op")
-    if op not in OPS:
+    if op not in OPS and op not in MULTI_SOURCE_OPS:
         _error(errors, f"{path}.op", f"Unknown op '{op}'")
         return []
 
-    source = step.get("source")
-    if not source:
-        _error(errors, f"{path}.source", "A step needs a source column")
-    elif source not in known:
-        _error(errors, f"{path}.source",
-               f"'{source}' is neither a raw column nor written by an earlier step")
+    if op == "concat":
+        sources = step.get("sources")
+        if not isinstance(sources, list) or not sources:
+            _error(errors, f"{path}.sources", "concat needs a list of source columns")
+        else:
+            for name in sources:
+                if name not in known:
+                    _error(errors, f"{path}.sources",
+                           f"'{name}' is neither a raw column nor written by an earlier step")
+    else:
+        source = step.get("source")
+        if not source:
+            _error(errors, f"{path}.source", "A step needs a source column")
+        elif source not in known:
+            _error(errors, f"{path}.source",
+                   f"'{source}' is neither a raw column nor written by an earlier step")
 
     spec = None
     if op == "function":
@@ -966,6 +1033,8 @@ def _check_step(step, path: str, ruleset: dict, raw_columns, known, errors) -> l
         _check_lists(step, path, ruleset, errors)
     elif op == "nullify":
         _check_lists(step, path, ruleset, errors)
+    elif op == "nullify_outside_range":
+        _check_range(step, path, errors)
     elif op == "regex_replace":
         try:
             re.compile(step.get("pattern") or "")
@@ -980,6 +1049,16 @@ def _check_step(step, path: str, ruleset: dict, raw_columns, known, errors) -> l
             _error(errors, f"{path}.scope", f"scope must be one of {', '.join(SCOPES)}")
 
     return written
+
+
+def _check_range(step: dict, path: str, errors: list[dict]) -> None:
+    """A range needs at least one bound, and every bound has to be a number."""
+    bounds = {k: step.get(k) for k in ("min", "max", "max_years_ago")}
+    for name, value in bounds.items():
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            _error(errors, f"{path}.{name}", f"{name} must be a number")
+    if all(value is None for value in bounds.values()):
+        _error(errors, path, "This op needs a min, a max or a max_years_ago")
 
 
 def _check_lists(step: dict, path: str, ruleset: dict, errors: list[dict]) -> None:

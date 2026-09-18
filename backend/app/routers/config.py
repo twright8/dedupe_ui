@@ -219,8 +219,16 @@ def save_config(body: SaveConfigBody, user_name: str = Depends(current_user)):
 
 @router.post("/validate")
 def validate_config(body: ValidateBody):
-    """Check a draft without saving it."""
-    return {"errors": _all_errors(body.ruleset, body.linkage_settings)}
+    """Check a draft without saving it.
+
+    ``warnings`` is things that are legal and still will not do what the user
+    meant — a comparison no training rule lets vary, for instance. They never
+    block a save; they are there so a silent mistake stops being silent.
+    """
+    return {
+        "errors": _all_errors(body.ruleset, body.linkage_settings),
+        "warnings": linkage.linkage_warnings(body.linkage_settings, body.ruleset),
+    }
 
 
 # ---- What the editor needs to offer ----

@@ -1,0 +1,74 @@
+# /etc/systemd/system/dedupe_psc.service
+#
+# The PSC reconciliation instance of dedupe_ui.
+# It listens on 127.0.0.1:8102. Only Caddy talks to it. It is not reachable
+# from the internet directly.
+#
+# PSC is the big dataset, so its budgets are larger than the donations ones.
+#
+# Install with:
+#   sudo install -m 0644 -o root -g root \
+#     /opt/dedupe_ui/deploy/systemd/dedupe_psc.service \
+#     /etc/systemd/system/dedupe_psc.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now dedupe_psc
+
+[Unit]
+Description=Dedupe UI - PSC reconciliation
+Documentation=file:/opt/dedupe_ui/docs/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dedupe_app
+Group=dedupe_app
+WorkingDirectory=/opt/dedupe_ui/backend
+EnvironmentFile=/etc/dedupe_psc.env
+ExecStart=/opt/dedupe_ui/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8102
+Restart=on-failure
+RestartSec=3
+
+# ---------------------------------------------------------------------------
+# Resource guards (design decision D17)
+#
+# The server also runs roe_ui, Harrier and Elasticsearch. Elasticsearch alone
+# holds 8 GB of the 23 GB on this machine. A heavy PSC run must never starve
+# the other tools. Three separate brakes:
+#   Nice / CPUWeight / IOSchedulingClass - this process yields CPU and disk
+#     to everything else when the machine is busy.
+#   SPLINK_MEMORY_LIMIT (set in /etc/dedupe_psc.env) - DuckDB spills to disk
+#     instead of growing past its own budget. This is the soft brake.
+#   MemoryMax - the hard backstop. If the process still grows past this,
+#     systemd kills it. The run fails. Nothing else on the box is harmed.
+# MemoryMax is set above SPLINK_MEMORY_LIMIT on purpose, so DuckDB's own
+# spilling gets a chance to work before systemd steps in.
+#
+# A killed run shows in the UI as a failed run. journalctl shows the words
+# "A process of this unit has been killed by the OOM killer". See DEPLOY.md,
+# Part 5, "What a killed PSC run looks like".
+# ---------------------------------------------------------------------------
+Nice=10
+CPUWeight=20
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+MemoryAccounting=yes
+MemoryMax=9G
+TasksMax=512
+
+# ---------------------------------------------------------------------------
+# Hardening
+# ProtectSystem=full makes /usr, /boot and /etc read-only for this process.
+# ReadWritePaths then re-opens exactly the one directory it must write to.
+# ---------------------------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/dedupe_ui/psc
+
+[Install]
+WantedBy=multi-user.target

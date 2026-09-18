@@ -633,7 +633,7 @@ function KeyPreview({ ruleset }) {
                   label="Pair precision"
                   value={evaluation.pair_precision}
                   baseline={baseEval.pair_precision}
-                  help="Of the labelled pairs these keys join, how many the earlier manual work also joined."
+                  help="Of the labelled pairs these keys join, how many an earlier grouping also joined."
                 />
                 <ScorePair
                   label="Pair recall"

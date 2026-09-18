@@ -1,0 +1,108 @@
+# /etc/caddy/Caddyfile - STAGING
+#
+# This is a whole file. Applying it is a file replace, not an edit.
+#
+# WHAT IT ADDS
+# One new site on 127.0.0.1:8090. That address is local to the server. It is
+# not open in the cloud firewall, so nobody on the internet can reach it.
+# You reach it from your laptop through an SSH tunnel:
+#
+#   ssh -L 8090:127.0.0.1:8090 roe-prod
+#
+# then open http://127.0.0.1:8090/ in your browser.
+#
+# WHAT IT DOES NOT CHANGE
+# roe_ui still owns port 8000 and still serves users exactly as it does today.
+# Harrier still owns 127.0.0.1:8400 behind the three blocks below.
+#
+# The routing in the new site is the FINAL routing. Staging is a rehearsal.
+#
+# BEFORE YOU APPLY IT
+# Check that the three Harrier blocks below still match the live file:
+#
+#   diff /etc/caddy/Caddyfile /opt/dedupe_ui/deploy/caddy/Caddyfile.original
+#
+# The only differences should be comments and blank lines. If a real routing
+# line differs, stop and fix this file first.
+
+{
+	default_sni 141.147.81.233
+}
+
+# --- Harrier. Do not change these three blocks. ---
+
+https://141.147.81.233:8080 {
+	tls {
+		issuer acme {
+			profile shortlived
+		}
+	}
+	reverse_proxy 127.0.0.1:8400
+}
+
+https://harrier.141-147-81-233.sslip.io:8080 {
+	reverse_proxy 127.0.0.1:8400
+}
+
+http://harrier.141-147-81-233.sslip.io {
+	redir https://harrier.141-147-81-233.sslip.io:8080{uri} permanent
+}
+
+# ---------------------------------------------------------------------------
+# Staging rehearsal of the final routing, on a local-only port.
+#
+# handle blocks are mutually exclusive: a request enters exactly one of them.
+# Caddy sorts them by how specific the path is, so the exact "/" match is
+# tried before the catch-all at the bottom.
+#
+# handle is used, never handle_path. handle_path would cut the prefix off the
+# path before forwarding. The dedupe app removes its own prefix, so if Caddy
+# removed it too the app would see the wrong path and answer 404.
+#
+# flush_interval -1 turns off response buffering. The run progress bar is a
+# server-sent event stream. With buffering on, the bar would sit still and
+# then jump at the end.
+# ---------------------------------------------------------------------------
+
+http://127.0.0.1:8090 {
+	# The chooser page, and only the path "/".
+	@chooser path /
+	handle @chooser {
+		root * /var/www/chooser
+		file_server
+	}
+
+	# A private folder for anything the chooser page needs besides its HTML.
+	# It is a separate prefix so it can never collide with roe_ui's /assets/.
+	handle /_chooser/* {
+		root * /var/www/chooser
+		file_server
+	}
+
+	# Donations reconciliation.
+	@donations path /donations /donations/*
+	handle @donations {
+		reverse_proxy 127.0.0.1:8101 {
+			flush_interval -1
+		}
+	}
+
+	# PSC reconciliation.
+	@psc path /psc /psc/*
+	handle @psc {
+		reverse_proxy 127.0.0.1:8102 {
+			flush_interval -1
+		}
+	}
+
+	# Everything else goes to roe_ui, so old bookmarks such as /runs/123 and
+	# roe_ui's own /assets/... files keep working.
+	#
+	# During staging roe_ui is still on its normal port 8000 and has not been
+	# touched. It listens on 0.0.0.0:8000, so 127.0.0.1:8000 reaches it.
+	handle {
+		reverse_proxy 127.0.0.1:8000 {
+			flush_interval -1
+		}
+	}
+}

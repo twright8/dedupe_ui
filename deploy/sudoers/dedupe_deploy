@@ -1,0 +1,70 @@
+# /etc/sudoers.d/dedupe_deploy
+#
+# Lets the ubuntu user restart and inspect exactly the two dedupe services,
+# without typing a password. The deploy hook needs this.
+#
+# It grants nothing else. It does not allow restarting roe_ui, caddy,
+# elasticsearch or anything else. It does not allow "systemctl daemon-reload"
+# or editing any file.
+#
+# INSTALL IT LIKE THIS. Check the file BEFORE you put it in place. A broken
+# file in /etc/sudoers.d can lock you out of sudo on the whole machine.
+#
+#   1. Copy it to a scratch path first:
+#        cp /opt/dedupe_ui/deploy/sudoers/dedupe_deploy /home/ubuntu/dedupe_deploy
+#
+#   2. Check it. This must print "parsed OK":
+#        sudo visudo -c -f /home/ubuntu/dedupe_deploy
+#
+#   3. Only if step 2 said "parsed OK", install it:
+#        sudo install -m 0440 -o root -g root \
+#          /home/ubuntu/dedupe_deploy /etc/sudoers.d/dedupe_deploy
+#
+#   4. Check the installed copy too:
+#        sudo visudo -c -f /etc/sudoers.d/dedupe_deploy
+#
+#   5. Prove it works, from a normal shell as ubuntu:
+#        sudo -n /bin/systemctl is-active dedupe_donations
+#      It should answer without asking for a password.
+#
+# The file must be mode 0440 and owned by root. sudo ignores it otherwise.
+
+# Both /bin/systemctl and /usr/bin/systemctl are listed. On Ubuntu 22.04 /bin
+# is a symlink to /usr/bin, but sudo matches the path you actually type, so
+# both spellings are needed.
+
+Cmnd_Alias DEDUPE_UNITS = \
+	/bin/systemctl restart dedupe_donations, \
+	/bin/systemctl restart dedupe_donations.service, \
+	/bin/systemctl restart dedupe_psc, \
+	/bin/systemctl restart dedupe_psc.service, \
+	/bin/systemctl status dedupe_donations, \
+	/bin/systemctl status dedupe_donations.service, \
+	/bin/systemctl status dedupe_psc, \
+	/bin/systemctl status dedupe_psc.service, \
+	/bin/systemctl is-active dedupe_donations, \
+	/bin/systemctl is-active dedupe_donations.service, \
+	/bin/systemctl is-active dedupe_psc, \
+	/bin/systemctl is-active dedupe_psc.service, \
+	/bin/systemctl is-active --quiet dedupe_donations, \
+	/bin/systemctl is-active --quiet dedupe_donations.service, \
+	/bin/systemctl is-active --quiet dedupe_psc, \
+	/bin/systemctl is-active --quiet dedupe_psc.service, \
+	/usr/bin/systemctl restart dedupe_donations, \
+	/usr/bin/systemctl restart dedupe_donations.service, \
+	/usr/bin/systemctl restart dedupe_psc, \
+	/usr/bin/systemctl restart dedupe_psc.service, \
+	/usr/bin/systemctl status dedupe_donations, \
+	/usr/bin/systemctl status dedupe_donations.service, \
+	/usr/bin/systemctl status dedupe_psc, \
+	/usr/bin/systemctl status dedupe_psc.service, \
+	/usr/bin/systemctl is-active dedupe_donations, \
+	/usr/bin/systemctl is-active dedupe_donations.service, \
+	/usr/bin/systemctl is-active dedupe_psc, \
+	/usr/bin/systemctl is-active dedupe_psc.service, \
+	/usr/bin/systemctl is-active --quiet dedupe_donations, \
+	/usr/bin/systemctl is-active --quiet dedupe_donations.service, \
+	/usr/bin/systemctl is-active --quiet dedupe_psc, \
+	/usr/bin/systemctl is-active --quiet dedupe_psc.service
+
+ubuntu ALL=(root) NOPASSWD: DEDUPE_UNITS

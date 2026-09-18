@@ -741,26 +741,39 @@ def model_explanation(run_dir: str, left_id: str, right_id: str,
     import pandas as pd
 
     try:
-        pairs = pd.read_parquet(pairs_path(run_dir))
-        row = pairs[(pairs["unit_id_l"].astype(str) == str(left_id))
-                    & (pairs["unit_id_r"].astype(str) == str(right_id))]
-        if not len(row):
-            return None
+        # One pair and its evidence, fetched by key in DuckDB. Reading the whole
+        # pairs and events files to explain a single pair was affordable at
+        # 52,000 donations and is not at 16 million PSC records.
+        con = duckdb.connect()
+        try:
+            row = con.execute(
+                "SELECT * FROM read_parquet(?) WHERE CAST(unit_id_l AS VARCHAR) = ? "
+                "AND CAST(unit_id_r AS VARCHAR) = ?",
+                [str(pairs_path(run_dir)), str(left_id), str(right_id)],
+            ).df()
+            if not len(row):
+                return None
+
+            events = None
+            events_path = Path(run_dir) / EVENTS_FILENAME
+            members_path = Path(run_dir) / UNIT_MEMBERS_FILENAME
+            if events_path.is_file() and members_path.is_file():
+                events = con.execute(
+                    """SELECT e.*, m.unit_id FROM read_parquet(?) e
+                       JOIN (SELECT record_id, unit_id FROM read_parquet(?)
+                             WHERE CAST(unit_id AS VARCHAR) IN (?, ?)) m
+                         ON CAST(e.record_id AS VARCHAR) = CAST(m.record_id AS VARCHAR)""",
+                    [str(events_path), str(members_path), str(left_id), str(right_id)],
+                ).df()
+                if not len(events):
+                    events = None
+        finally:
+            con.close()
+
+        # The units frame stays whole: the organisation feature builder fits its
+        # TF-IDF weights over every unit, and a feature's value must not depend
+        # on how much was asked for. That read is the one still to fix for PSC.
         units = pd.read_parquet(units_path(run_dir))
-        events = None
-        events_path = Path(run_dir) / EVENTS_FILENAME
-        members_path = Path(run_dir) / UNIT_MEMBERS_FILENAME
-        if events_path.is_file() and members_path.is_file():
-            members = pd.read_parquet(members_path)
-            members["unit_id"] = members["unit_id"].astype(str)
-            wanted = members[members["unit_id"].isin([str(left_id), str(right_id)])]
-            if len(wanted):
-                events = pd.read_parquet(events_path)
-                events["record_id"] = events["record_id"].astype(str)
-                wanted = wanted.copy()
-                wanted["record_id"] = wanted["record_id"].astype(str)
-                events = events.merge(wanted[["record_id", "unit_id"]],
-                                      on="record_id", how="inner")
         return explain_lib.explain(row.reset_index(drop=True), units, track,
                                    model.version, events=events,
                                    profile=get_profile(),

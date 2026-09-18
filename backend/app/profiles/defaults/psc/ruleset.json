@@ -1,0 +1,1625 @@
+{
+  "schema": 1,
+  "token_lists": {
+    "fake_nulls": {
+      "description": "Spellings of 'no value' that arrive as text. Observed in real filings; a value equal to one of these is missing, not a value.",
+      "tokens": [
+        "UNKNOWN",
+        "N/A",
+        "NA",
+        "NONE",
+        "NULL",
+        "NIL",
+        "TBC",
+        "TBD",
+        "TO BE CONFIRMED",
+        "PRIVATE",
+        "WITHHELD",
+        "REDACTED",
+        ".",
+        "-",
+        "--",
+        "---",
+        "?",
+        "??",
+        "???",
+        "X",
+        "XX",
+        "XXX",
+        "NOT KNOWN",
+        "NOT APPLICABLE",
+        "NO POSTCODE",
+        "NO ADDRESS",
+        "COMPANIES HOUSE DEFAULT ADDRESS"
+      ]
+    },
+    "person_titles": {
+      "description": "Titles that come before a name. A name part that is only a title is a filer putting MRS in the surname box.",
+      "tokens": [
+        "MR",
+        "MRS",
+        "MS",
+        "MISS",
+        "MX",
+        "MASTER",
+        "DR",
+        "PROF",
+        "REV",
+        "REVEREND",
+        "REVD",
+        "DOCTOR",
+        "PROFESSOR",
+        "SIR",
+        "DAME",
+        "LORD",
+        "LADY",
+        "HON",
+        "RT HON",
+        "ING",
+        "ENG",
+        "INZ",
+        "MAJ",
+        "MAJOR",
+        "COL",
+        "COLONEL",
+        "CAPT",
+        "CAPTAIN",
+        "LT",
+        "LIEUTENANT",
+        "GENERAL",
+        "GEN",
+        "ADMIRAL",
+        "ADM"
+      ]
+    },
+    "legal_forms": {
+      "description": "Legal forms split off the end of an organisation name to give name_core. Longest first: the order is load-bearing.",
+      "tokens": [
+        "LIMITED LIABILITY PARTNERSHIP",
+        "LIMITED LIABILITY COMPANY",
+        "PRIVATE COMPANY LIMITED BY SHARES",
+        "COMPANY LIMITED BY SHARES",
+        "PRIVATE LIMITED COMPANY",
+        "PUBLIC LIMITED COMPANY",
+        "LIMITED PARTNERSHIP",
+        "LIMITED COMPANY",
+        "LIMITED LIABILITY",
+        "LTD COMPANY",
+        "PRIVATE LIMITED",
+        "LIMITED BY SHARES",
+        "LIMITED",
+        "LTD",
+        "PLC",
+        "LLP",
+        "LLC",
+        "INC",
+        "INCORPORATED",
+        "CORPORATION",
+        "CORP",
+        "COMPANY",
+        "CO",
+        "GMBH",
+        "SARL",
+        "SRL",
+        "SA",
+        "AG",
+        "BV",
+        "NV",
+        "PTY",
+        "AB",
+        "AS",
+        "OYJ",
+        "OY",
+        "UAB",
+        "GROUP",
+        "HOLDINGS"
+      ]
+    },
+    "leading_articles": {
+      "description": "Articles dropped from the start of a name.",
+      "tokens": [
+        "THE"
+      ]
+    },
+    "placeholder_numbers": {
+      "description": "Registration numbers typed in when the real one is unknown. They repeat across unrelated companies, so a key must ignore them.",
+      "tokens": [
+        "00000000",
+        "00000001",
+        "00000002",
+        "00000003",
+        "12345678",
+        "00123456",
+        "99999999",
+        "11111111",
+        "88888888",
+        "01234567",
+        "0",
+        "1",
+        "123456"
+      ]
+    },
+    "junk_postcodes": {
+      "description": "Postcodes used by more than a thousandth of the records: formation agents' offices, not where anybody lives. Derived from the sample at deduping's >5,000-per-7.5M proportion and MUST be rebuilt on the full snapshot before a full run.",
+      "tokens": [
+        "N1 7GU",
+        "WC2H 9JQ",
+        "EC1V 2NX",
+        "WC1N 3AX",
+        "EC1A 9EJ",
+        "EC2A 4NE",
+        "CF14 8LH",
+        "WA1 1RG",
+        "W1W 5PF",
+        "W1W 7LT",
+        "SW1Y 5EA",
+        "B60 3DX",
+        "N12 0DR",
+        "WC2A 2JR",
+        "SW15 2BF",
+        "IP28 7DE",
+        "BS9 3BY",
+        "EC1V 9BD"
+      ]
+    }
+  },
+  "lookups": {
+    "nicknames": {
+      "description": "Diminutives that point at one canonical forename. Ported from deduping; CHRIS and ALEX are deliberately absent because they are gender-ambiguous.",
+      "fallback": "passthrough",
+      "rows": [
+        {
+          "raw": "TOM",
+          "canonical": "THOMAS"
+        },
+        {
+          "raw": "TOMMY",
+          "canonical": "THOMAS"
+        },
+        {
+          "raw": "BILL",
+          "canonical": "WILLIAM"
+        },
+        {
+          "raw": "BILLY",
+          "canonical": "WILLIAM"
+        },
+        {
+          "raw": "WILLY",
+          "canonical": "WILLIAM"
+        },
+        {
+          "raw": "BOB",
+          "canonical": "ROBERT"
+        },
+        {
+          "raw": "BOBBY",
+          "canonical": "ROBERT"
+        },
+        {
+          "raw": "ROBBY",
+          "canonical": "ROBERT"
+        },
+        {
+          "raw": "DICK",
+          "canonical": "RICHARD"
+        },
+        {
+          "raw": "RICKY",
+          "canonical": "RICHARD"
+        },
+        {
+          "raw": "MIKE",
+          "canonical": "MICHAEL"
+        },
+        {
+          "raw": "MICK",
+          "canonical": "MICHAEL"
+        },
+        {
+          "raw": "MICKEY",
+          "canonical": "MICHAEL"
+        },
+        {
+          "raw": "TONY",
+          "canonical": "ANTHONY"
+        },
+        {
+          "raw": "DAVE",
+          "canonical": "DAVID"
+        },
+        {
+          "raw": "DAVEY",
+          "canonical": "DAVID"
+        },
+        {
+          "raw": "JIM",
+          "canonical": "JAMES"
+        },
+        {
+          "raw": "JIMMY",
+          "canonical": "JAMES"
+        },
+        {
+          "raw": "JONNY",
+          "canonical": "JONATHAN"
+        },
+        {
+          "raw": "BEN",
+          "canonical": "BENJAMIN"
+        },
+        {
+          "raw": "BENNY",
+          "canonical": "BENJAMIN"
+        },
+        {
+          "raw": "DAN",
+          "canonical": "DANIEL"
+        },
+        {
+          "raw": "DANNY",
+          "canonical": "DANIEL"
+        },
+        {
+          "raw": "MATT",
+          "canonical": "MATTHEW"
+        },
+        {
+          "raw": "ED",
+          "canonical": "EDWARD"
+        },
+        {
+          "raw": "EDDIE",
+          "canonical": "EDWARD"
+        },
+        {
+          "raw": "EDDY",
+          "canonical": "EDWARD"
+        },
+        {
+          "raw": "STEVE",
+          "canonical": "STEPHEN"
+        },
+        {
+          "raw": "STEVIE",
+          "canonical": "STEPHEN"
+        },
+        {
+          "raw": "PETE",
+          "canonical": "PETER"
+        },
+        {
+          "raw": "FRED",
+          "canonical": "FREDERICK"
+        },
+        {
+          "raw": "FREDDIE",
+          "canonical": "FREDERICK"
+        },
+        {
+          "raw": "FREDDY",
+          "canonical": "FREDERICK"
+        },
+        {
+          "raw": "JOSH",
+          "canonical": "JOSHUA"
+        },
+        {
+          "raw": "ANDY",
+          "canonical": "ANDREW"
+        },
+        {
+          "raw": "CHARLIE",
+          "canonical": "CHARLES"
+        },
+        {
+          "raw": "CHARLEY",
+          "canonical": "CHARLES"
+        },
+        {
+          "raw": "RAY",
+          "canonical": "RAYMOND"
+        },
+        {
+          "raw": "TERRY",
+          "canonical": "TERENCE"
+        },
+        {
+          "raw": "LARRY",
+          "canonical": "LAWRENCE"
+        },
+        {
+          "raw": "STAN",
+          "canonical": "STANLEY"
+        },
+        {
+          "raw": "WALT",
+          "canonical": "WALTER"
+        },
+        {
+          "raw": "LIZ",
+          "canonical": "ELIZABETH"
+        },
+        {
+          "raw": "LIZZIE",
+          "canonical": "ELIZABETH"
+        },
+        {
+          "raw": "BETH",
+          "canonical": "ELIZABETH"
+        },
+        {
+          "raw": "BETTY",
+          "canonical": "ELIZABETH"
+        },
+        {
+          "raw": "SUE",
+          "canonical": "SUSAN"
+        },
+        {
+          "raw": "SUSIE",
+          "canonical": "SUSAN"
+        },
+        {
+          "raw": "SUZIE",
+          "canonical": "SUSAN"
+        },
+        {
+          "raw": "MAGGIE",
+          "canonical": "MARGARET"
+        },
+        {
+          "raw": "PEGGY",
+          "canonical": "MARGARET"
+        },
+        {
+          "raw": "MEG",
+          "canonical": "MARGARET"
+        },
+        {
+          "raw": "BECKY",
+          "canonical": "REBECCA"
+        },
+        {
+          "raw": "JEN",
+          "canonical": "JENNIFER"
+        },
+        {
+          "raw": "JENNY",
+          "canonical": "JENNIFER"
+        },
+        {
+          "raw": "JENNIE",
+          "canonical": "JENNIFER"
+        },
+        {
+          "raw": "VICKY",
+          "canonical": "VICTORIA"
+        },
+        {
+          "raw": "VICKI",
+          "canonical": "VICTORIA"
+        },
+        {
+          "raw": "JESS",
+          "canonical": "JESSICA"
+        },
+        {
+          "raw": "JESSIE",
+          "canonical": "JESSICA"
+        },
+        {
+          "raw": "DEB",
+          "canonical": "DEBORAH"
+        },
+        {
+          "raw": "DEBBIE",
+          "canonical": "DEBORAH"
+        },
+        {
+          "raw": "ABBY",
+          "canonical": "ABIGAIL"
+        },
+        {
+          "raw": "ABBIE",
+          "canonical": "ABIGAIL"
+        },
+        {
+          "raw": "ANTONY",
+          "canonical": "ANTHONY"
+        },
+        {
+          "raw": "PHILLIP",
+          "canonical": "PHILIP"
+        },
+        {
+          "raw": "STEVEN",
+          "canonical": "STEPHEN"
+        },
+        {
+          "raw": "KATHERINE",
+          "canonical": "CATHERINE"
+        },
+        {
+          "raw": "KATHRYN",
+          "canonical": "CATHERINE"
+        },
+        {
+          "raw": "LAURENCE",
+          "canonical": "LAWRENCE"
+        },
+        {
+          "raw": "MOHAMMAD",
+          "canonical": "MUHAMMAD"
+        },
+        {
+          "raw": "MOHAMMED",
+          "canonical": "MUHAMMAD"
+        },
+        {
+          "raw": "MOHAMED",
+          "canonical": "MUHAMMAD"
+        },
+        {
+          "raw": "MUHAMMED",
+          "canonical": "MUHAMMAD"
+        },
+        {
+          "raw": "MOUHAMED",
+          "canonical": "MUHAMMAD"
+        },
+        {
+          "raw": "AHMAD",
+          "canonical": "AHMED"
+        },
+        {
+          "raw": "ALEXEY",
+          "canonical": "ALEXEI"
+        },
+        {
+          "raw": "DMITRY",
+          "canonical": "DMITRI"
+        },
+        {
+          "raw": "ANDREI",
+          "canonical": "ANDREY"
+        },
+        {
+          "raw": "ANDREJ",
+          "canonical": "ANDREY"
+        },
+        {
+          "raw": "EVGENI",
+          "canonical": "EVGENY"
+        },
+        {
+          "raw": "YEVGENY",
+          "canonical": "EVGENY"
+        },
+        {
+          "raw": "YEVGENI",
+          "canonical": "EVGENY"
+        },
+        {
+          "raw": "ANDELKO",
+          "canonical": "ANDJELKO"
+        }
+      ]
+    },
+    "nationalities": {
+      "description": "Nationality, home nations collapsed to BRITISH.",
+      "fallback": "passthrough",
+      "rows": [
+        {
+          "raw": "BRITISH",
+          "canonical": "BRITISH"
+        },
+        {
+          "raw": "ENGLISH",
+          "canonical": "BRITISH"
+        },
+        {
+          "raw": "SCOTTISH",
+          "canonical": "BRITISH"
+        },
+        {
+          "raw": "WELSH",
+          "canonical": "BRITISH"
+        },
+        {
+          "raw": "NORTHERN IRISH",
+          "canonical": "BRITISH"
+        },
+        {
+          "raw": "UNITED KINGDOM",
+          "canonical": "BRITISH"
+        },
+        {
+          "raw": "UK",
+          "canonical": "BRITISH"
+        },
+        {
+          "raw": "GB",
+          "canonical": "BRITISH"
+        },
+        {
+          "raw": "GREAT BRITAIN",
+          "canonical": "BRITISH"
+        },
+        {
+          "raw": "BRITISH CITIZEN",
+          "canonical": "BRITISH"
+        },
+        {
+          "raw": "UK CITIZEN",
+          "canonical": "BRITISH"
+        },
+        {
+          "raw": "IRISH",
+          "canonical": "IRISH"
+        },
+        {
+          "raw": "REPUBLIC OF IRELAND",
+          "canonical": "IRISH"
+        },
+        {
+          "raw": "IRELAND",
+          "canonical": "IRISH"
+        },
+        {
+          "raw": "AMERICAN",
+          "canonical": "AMERICAN"
+        },
+        {
+          "raw": "UNITED STATES",
+          "canonical": "AMERICAN"
+        },
+        {
+          "raw": "USA",
+          "canonical": "AMERICAN"
+        },
+        {
+          "raw": "US",
+          "canonical": "AMERICAN"
+        },
+        {
+          "raw": "US CITIZEN",
+          "canonical": "AMERICAN"
+        }
+      ]
+    },
+    "residences": {
+      "description": "Country of residence, home nations collapsed to UK.",
+      "fallback": "passthrough",
+      "rows": [
+        {
+          "raw": "ENGLAND",
+          "canonical": "UK"
+        },
+        {
+          "raw": "SCOTLAND",
+          "canonical": "UK"
+        },
+        {
+          "raw": "WALES",
+          "canonical": "UK"
+        },
+        {
+          "raw": "NORTHERN IRELAND",
+          "canonical": "UK"
+        },
+        {
+          "raw": "UNITED KINGDOM",
+          "canonical": "UK"
+        },
+        {
+          "raw": "GREAT BRITAIN",
+          "canonical": "UK"
+        },
+        {
+          "raw": "UK",
+          "canonical": "UK"
+        },
+        {
+          "raw": "GB",
+          "canonical": "UK"
+        },
+        {
+          "raw": "ENGLAND AND WALES",
+          "canonical": "UK"
+        }
+      ]
+    },
+    "countries": {
+      "description": "Country of registration as a short code. deduping's corporate map, which is deliberately not the same as its person-side country map.",
+      "fallback": "passthrough",
+      "rows": [
+        {
+          "raw": "UK",
+          "canonical": "UK"
+        },
+        {
+          "raw": "GB",
+          "canonical": "UK"
+        },
+        {
+          "raw": "UNITED KINGDOM",
+          "canonical": "UK"
+        },
+        {
+          "raw": "GREAT BRITAIN",
+          "canonical": "UK"
+        },
+        {
+          "raw": "ENGLAND",
+          "canonical": "UK"
+        },
+        {
+          "raw": "SCOTLAND",
+          "canonical": "UK"
+        },
+        {
+          "raw": "WALES",
+          "canonical": "UK"
+        },
+        {
+          "raw": "NORTHERN IRELAND",
+          "canonical": "UK"
+        },
+        {
+          "raw": "ENGLAND AND WALES",
+          "canonical": "UK"
+        },
+        {
+          "raw": "BRITAIN",
+          "canonical": "UK"
+        },
+        {
+          "raw": "US",
+          "canonical": "US"
+        },
+        {
+          "raw": "USA",
+          "canonical": "US"
+        },
+        {
+          "raw": "UNITED STATES",
+          "canonical": "US"
+        },
+        {
+          "raw": "UNITED STATES OF AMERICA",
+          "canonical": "US"
+        },
+        {
+          "raw": "AMERICA",
+          "canonical": "US"
+        },
+        {
+          "raw": "DELAWARE",
+          "canonical": "US"
+        },
+        {
+          "raw": "DELAWARE USA",
+          "canonical": "US"
+        },
+        {
+          "raw": "NEVADA",
+          "canonical": "US"
+        },
+        {
+          "raw": "NEW YORK",
+          "canonical": "US"
+        },
+        {
+          "raw": "CALIFORNIA",
+          "canonical": "US"
+        },
+        {
+          "raw": "FLORIDA",
+          "canonical": "US"
+        },
+        {
+          "raw": "TEXAS",
+          "canonical": "US"
+        },
+        {
+          "raw": "MASSACHUSETTS",
+          "canonical": "US"
+        },
+        {
+          "raw": "WYOMING",
+          "canonical": "US"
+        },
+        {
+          "raw": "ILLINOIS",
+          "canonical": "US"
+        },
+        {
+          "raw": "BVI",
+          "canonical": "BVI"
+        },
+        {
+          "raw": "BRITISH VIRGIN ISLANDS",
+          "canonical": "BVI"
+        },
+        {
+          "raw": "BRITISH VIRGIN ISLES",
+          "canonical": "BVI"
+        },
+        {
+          "raw": "BRITISH VIRGIN ISLAND",
+          "canonical": "BVI"
+        },
+        {
+          "raw": "JERSEY",
+          "canonical": "JERSEY"
+        },
+        {
+          "raw": "GUERNSEY",
+          "canonical": "GUERNSEY"
+        },
+        {
+          "raw": "BAILIWICK OF GUERNSEY",
+          "canonical": "GUERNSEY"
+        },
+        {
+          "raw": "ISLE OF MAN",
+          "canonical": "IOM"
+        },
+        {
+          "raw": "IOM",
+          "canonical": "IOM"
+        },
+        {
+          "raw": "CAYMAN ISLANDS",
+          "canonical": "CAYMAN"
+        },
+        {
+          "raw": "CAYMAN ISLAND",
+          "canonical": "CAYMAN"
+        },
+        {
+          "raw": "HONG KONG",
+          "canonical": "HK"
+        },
+        {
+          "raw": "HK",
+          "canonical": "HK"
+        },
+        {
+          "raw": "SINGAPORE",
+          "canonical": "SG"
+        },
+        {
+          "raw": "SG",
+          "canonical": "SG"
+        },
+        {
+          "raw": "LUXEMBOURG",
+          "canonical": "LU"
+        },
+        {
+          "raw": "LUX",
+          "canonical": "LU"
+        },
+        {
+          "raw": "NETHERLANDS",
+          "canonical": "NL"
+        },
+        {
+          "raw": "THE NETHERLANDS",
+          "canonical": "NL"
+        },
+        {
+          "raw": "HOLLAND",
+          "canonical": "NL"
+        },
+        {
+          "raw": "BELGIUM",
+          "canonical": "BE"
+        },
+        {
+          "raw": "GERMANY",
+          "canonical": "DE"
+        },
+        {
+          "raw": "DEUTSCHLAND",
+          "canonical": "DE"
+        },
+        {
+          "raw": "FRANCE",
+          "canonical": "FR"
+        },
+        {
+          "raw": "SPAIN",
+          "canonical": "ES"
+        },
+        {
+          "raw": "ITALY",
+          "canonical": "IT"
+        },
+        {
+          "raw": "JAPAN",
+          "canonical": "JP"
+        },
+        {
+          "raw": "CHINA",
+          "canonical": "CN"
+        },
+        {
+          "raw": "PEOPLES REPUBLIC OF CHINA",
+          "canonical": "CN"
+        },
+        {
+          "raw": "INDIA",
+          "canonical": "IN"
+        },
+        {
+          "raw": "CANADA",
+          "canonical": "CA"
+        },
+        {
+          "raw": "AUSTRALIA",
+          "canonical": "AU"
+        },
+        {
+          "raw": "SWITZERLAND",
+          "canonical": "CH"
+        },
+        {
+          "raw": "IRELAND",
+          "canonical": "IE"
+        },
+        {
+          "raw": "REPUBLIC OF IRELAND",
+          "canonical": "IE"
+        },
+        {
+          "raw": "EIRE",
+          "canonical": "IE"
+        },
+        {
+          "raw": "RUSSIA",
+          "canonical": "RU"
+        },
+        {
+          "raw": "RUSSIAN FEDERATION",
+          "canonical": "RU"
+        },
+        {
+          "raw": "UAE",
+          "canonical": "AE"
+        },
+        {
+          "raw": "UNITED ARAB EMIRATES",
+          "canonical": "AE"
+        }
+      ]
+    }
+  },
+  "track_rules": [
+    {
+      "id": "t1",
+      "description": "An individual PSC or beneficial owner is a person",
+      "when": [
+        {
+          "column": "kind",
+          "op": "in",
+          "values": [
+            "individual-person-with-significant-control",
+            "individual-beneficial-owner"
+          ]
+        }
+      ],
+      "track": "person"
+    },
+    {
+      "id": "t2",
+      "description": "A corporate entity or legal person is an organisation",
+      "when": [
+        {
+          "column": "kind",
+          "op": "in",
+          "values": [
+            "corporate-entity-person-with-significant-control",
+            "corporate-entity-beneficial-owner",
+            "legal-person-person-with-significant-control",
+            "legal-person-beneficial-owner"
+          ]
+        }
+      ],
+      "track": "organisation"
+    },
+    {
+      "id": "t3",
+      "description": "Anything with a parsed surname is a person",
+      "when": [
+        {
+          "column": "surname",
+          "op": "not_null"
+        }
+      ],
+      "track": "person"
+    }
+  ],
+  "default_track": "organisation",
+  "cleaning": {
+    "person": [
+      {
+        "id": "p1",
+        "description": "Surname as filed, upper-cased",
+        "op": "upper",
+        "source": "surname",
+        "target": "surname_clean"
+      },
+      {
+        "id": "p2",
+        "description": "Fold accents so L\u00d6WE and LOWE meet",
+        "op": "accent_fold",
+        "source": "surname_clean",
+        "target": "surname_clean"
+      },
+      {
+        "id": "p3",
+        "description": "A surname that is only a filler word is missing",
+        "op": "nullify",
+        "source": "surname_clean",
+        "target": "surname_clean",
+        "lists": [
+          "fake_nulls"
+        ]
+      },
+      {
+        "id": "p4",
+        "description": "A surname that is only a title is missing",
+        "op": "nullify",
+        "source": "surname_clean",
+        "target": "surname_clean",
+        "lists": [
+          "person_titles"
+        ]
+      },
+      {
+        "id": "p5",
+        "description": "Forename upper-cased",
+        "op": "upper",
+        "source": "forename",
+        "target": "forename_clean"
+      },
+      {
+        "id": "p6",
+        "description": "Fold accents",
+        "op": "accent_fold",
+        "source": "forename_clean",
+        "target": "forename_clean"
+      },
+      {
+        "id": "p7",
+        "description": "A forename that is only a filler word is missing",
+        "op": "nullify",
+        "source": "forename_clean",
+        "target": "forename_clean",
+        "lists": [
+          "fake_nulls"
+        ]
+      },
+      {
+        "id": "p8",
+        "description": "A forename that is only a title is missing",
+        "op": "nullify",
+        "source": "forename_clean",
+        "target": "forename_clean",
+        "lists": [
+          "person_titles"
+        ]
+      },
+      {
+        "id": "p9",
+        "description": "Map a diminutive to its canonical forename",
+        "op": "lookup",
+        "source": "forename_clean",
+        "target": "forename_canon",
+        "table": "nicknames",
+        "scope": "value"
+      },
+      {
+        "id": "p10",
+        "description": "Middle names upper-cased",
+        "op": "upper",
+        "source": "middle_name",
+        "target": "middle_clean"
+      },
+      {
+        "id": "p11",
+        "description": "Fold accents",
+        "op": "accent_fold",
+        "source": "middle_clean",
+        "target": "middle_clean"
+      },
+      {
+        "id": "p12",
+        "description": "A middle name that is only a filler word is missing",
+        "op": "nullify",
+        "source": "middle_clean",
+        "target": "middle_clean",
+        "lists": [
+          "fake_nulls"
+        ]
+      },
+      {
+        "id": "p13",
+        "description": "Phonetic key of the surname, for blocking",
+        "op": "function",
+        "name": "metaphone",
+        "source": "surname_clean",
+        "target": "surname_metaphone"
+      },
+      {
+        "id": "p14",
+        "description": "Phonetic key of the canonical forename",
+        "op": "function",
+        "name": "metaphone",
+        "source": "forename_canon",
+        "target": "forename_metaphone"
+      },
+      {
+        "id": "p15",
+        "description": "First letter of the canonical forename",
+        "op": "function",
+        "name": "initials",
+        "source": "forename_canon",
+        "target": "forename_initial"
+      },
+      {
+        "id": "p16",
+        "description": "Sorted distinct letters of forename and surname, so a middle name on one side only does not break the key",
+        "op": "concat",
+        "sources": [
+          "forename_canon",
+          "surname_clean"
+        ],
+        "separator": " ",
+        "require_all": false,
+        "target": "name_fingerprint"
+      },
+      {
+        "id": "p17",
+        "description": "Sorted tokens of that",
+        "op": "function",
+        "name": "sorted_tokens",
+        "source": "name_fingerprint",
+        "target": "name_fingerprint"
+      },
+      {
+        "id": "p18",
+        "description": "Nationality, first one listed, home nations collapsed",
+        "op": "lookup",
+        "source": "nationality",
+        "target": "nationality_norm",
+        "table": "nationalities",
+        "scope": "value"
+      },
+      {
+        "id": "p19",
+        "description": "Country of residence, home nations collapsed",
+        "op": "lookup",
+        "source": "country_of_residence",
+        "target": "residence_norm",
+        "table": "residences",
+        "scope": "value"
+      },
+      {
+        "id": "p20",
+        "description": "Postcode as 'OUTWARD INWARD'",
+        "op": "function",
+        "name": "normalise_postcode",
+        "source": "postcode",
+        "target": "postcode_clean"
+      },
+      {
+        "id": "p21",
+        "description": "A postcode used by thousands of records is a formation agent's office, not where anybody lives",
+        "op": "nullify",
+        "source": "postcode_clean",
+        "target": "postcode_clean",
+        "lists": [
+          "junk_postcodes"
+        ]
+      },
+      {
+        "id": "p22",
+        "description": "Postcode district, for blocking",
+        "op": "function",
+        "name": "postcode_district",
+        "source": "postcode_clean",
+        "target": "postcode_district"
+      },
+      {
+        "id": "p23",
+        "description": "A birth year later than 16 years ago, or before 1890, is a copied filing date or a redaction sentinel",
+        "op": "nullify_outside_range",
+        "source": "dob_year",
+        "target": "dob_year_clean",
+        "min": 1890,
+        "max_years_ago": 16
+      },
+      {
+        "id": "p24",
+        "description": "The month only counts when the year does",
+        "op": "copy",
+        "source": "dob_month",
+        "target": "dob_month_clean"
+      },
+      {
+        "id": "p25",
+        "description": "Address line, upper-cased, for the over-merge split",
+        "op": "upper",
+        "source": "address_line_1",
+        "target": "address_line_clean"
+      },
+      {
+        "id": "p26",
+        "description": "A filler address line corroborates nothing",
+        "op": "nullify",
+        "source": "address_line_clean",
+        "target": "address_line_clean",
+        "lists": [
+          "fake_nulls"
+        ]
+      },
+      {
+        "id": "p27",
+        "description": "Address line and town as one key: a street number means an address only beside its town",
+        "op": "concat",
+        "sources": [
+          "address_line_clean",
+          "locality"
+        ],
+        "separator": " | ",
+        "target": "address_key"
+      }
+    ],
+    "organisation": [
+      {
+        "id": "o1",
+        "description": "Name upper-cased",
+        "op": "upper",
+        "source": "name",
+        "target": "name_clean"
+      },
+      {
+        "id": "o2",
+        "description": "Fold accents",
+        "op": "accent_fold",
+        "source": "name_clean",
+        "target": "name_clean"
+      },
+      {
+        "id": "o3",
+        "description": "Spell out the ampersand",
+        "op": "regex_replace",
+        "source": "name_clean",
+        "target": "name_clean",
+        "pattern": "\\s*&\\s*",
+        "replacement": " AND "
+      },
+      {
+        "id": "o4",
+        "description": "Drop anything in brackets \u2014 it is a note, not the name",
+        "op": "regex_replace",
+        "source": "name_clean",
+        "target": "name_clean",
+        "pattern": "\\([^)]*\\)",
+        "replacement": " "
+      },
+      {
+        "id": "o5",
+        "description": "Drop punctuation",
+        "op": "strip_punctuation",
+        "source": "name_clean",
+        "target": "name_clean",
+        "keep": " "
+      },
+      {
+        "id": "o6",
+        "description": "Collapse repeated spaces",
+        "op": "collapse_spaces",
+        "source": "name_clean",
+        "target": "name_clean"
+      },
+      {
+        "id": "o7",
+        "description": "A name that is only a filler word is missing",
+        "op": "nullify",
+        "source": "name_clean",
+        "target": "name_clean",
+        "lists": [
+          "fake_nulls"
+        ]
+      },
+      {
+        "id": "o8",
+        "description": "Drop a leading 'TRUSTEES OF THE'",
+        "op": "regex_replace",
+        "source": "name_clean",
+        "target": "name_clean",
+        "pattern": "^TRUSTEES? OF (THE )?",
+        "replacement": ""
+      },
+      {
+        "id": "o9",
+        "description": "Drop a leading 'THE'",
+        "op": "strip_tokens",
+        "source": "name_clean",
+        "target": "name_clean",
+        "lists": [
+          "leading_articles"
+        ],
+        "position": "leading",
+        "repeat": true
+      },
+      {
+        "id": "o10",
+        "description": "Drop a leading personal title",
+        "op": "strip_tokens",
+        "source": "name_clean",
+        "target": "name_clean",
+        "lists": [
+          "person_titles"
+        ],
+        "position": "leading",
+        "repeat": true
+      },
+      {
+        "id": "o11",
+        "description": "Split the legal form off the end, keeping it",
+        "op": "strip_tokens",
+        "source": "name_clean",
+        "target": "name_core",
+        "lists": [
+          "legal_forms"
+        ],
+        "position": "trailing",
+        "repeat": true,
+        "keep_as": "legal_form_clean"
+      },
+      {
+        "id": "o12",
+        "description": "Sorted distinct words of the core name",
+        "op": "function",
+        "name": "sorted_tokens",
+        "source": "name_core",
+        "target": "name_tokens_sorted"
+      },
+      {
+        "id": "o13",
+        "description": "First word of the core name, for blocking",
+        "op": "function",
+        "name": "first_token",
+        "source": "name_core",
+        "target": "name_first_token"
+      },
+      {
+        "id": "o14",
+        "description": "Phonetic key of the core name",
+        "op": "function",
+        "name": "metaphone",
+        "source": "name_core",
+        "target": "name_core_metaphone"
+      },
+      {
+        "id": "o15",
+        "description": "Registration number, punctuation and padding fixed",
+        "op": "function",
+        "name": "normalise_company_number",
+        "source": "registration_number",
+        "target": "regnum_clean"
+      },
+      {
+        "id": "o16",
+        "description": "A placeholder number names no company",
+        "op": "nullify",
+        "source": "regnum_clean",
+        "target": "regnum_clean",
+        "lists": [
+          "placeholder_numbers"
+        ]
+      },
+      {
+        "id": "o17",
+        "description": "Country of registration, upper-cased",
+        "op": "upper",
+        "source": "country_registered",
+        "target": "country_canonical"
+      },
+      {
+        "id": "o17b",
+        "description": "Spell out the ampersand before punctuation goes, or 'England & Wales' becomes 'ENGLAND WALES' and misses the map (it does exactly that in the prior art)",
+        "op": "regex_replace",
+        "source": "country_canonical",
+        "target": "country_canonical",
+        "pattern": "\\s*&\\s*",
+        "replacement": " AND "
+      },
+      {
+        "id": "o18",
+        "description": "Drop punctuation from the country",
+        "op": "strip_punctuation",
+        "source": "country_canonical",
+        "target": "country_canonical",
+        "keep": " "
+      },
+      {
+        "id": "o19",
+        "description": "Collapse spaces",
+        "op": "collapse_spaces",
+        "source": "country_canonical",
+        "target": "country_canonical"
+      },
+      {
+        "id": "o20",
+        "description": "Canonical country code",
+        "op": "lookup",
+        "source": "country_canonical",
+        "target": "country_canonical",
+        "table": "countries",
+        "scope": "value"
+      },
+      {
+        "id": "o21",
+        "description": "Postcode as 'OUTWARD INWARD'",
+        "op": "function",
+        "name": "normalise_postcode",
+        "source": "postcode",
+        "target": "postcode_clean"
+      },
+      {
+        "id": "o22",
+        "description": "A formation agent's postcode is not an address",
+        "op": "nullify",
+        "source": "postcode_clean",
+        "target": "postcode_clean",
+        "lists": [
+          "junk_postcodes"
+        ]
+      },
+      {
+        "id": "o23",
+        "description": "Postcode district",
+        "op": "function",
+        "name": "postcode_district",
+        "source": "postcode_clean",
+        "target": "postcode_district"
+      },
+      {
+        "id": "o24",
+        "description": "Address line upper-cased",
+        "op": "upper",
+        "source": "address_line_1",
+        "target": "address_line_clean"
+      },
+      {
+        "id": "o25",
+        "description": "Every organisation starts as OTHER; the type rules below move the ones they recognise",
+        "op": "regex_replace",
+        "source": "name_clean",
+        "target": "type_bucket_default",
+        "pattern": "^.+$",
+        "replacement": "OTHER"
+      }
+    ]
+  },
+  "derived_columns": [
+    {
+      "id": "d1",
+      "target": "type_bucket",
+      "description": "What kind of body this is, from words in the name. A trust, a government body, a school or a charity outranks every legal form, so SMITH FAMILY TRUST LIMITED is a TRUST.",
+      "default_from": "type_bucket_default",
+      "tracks": [
+        "organisation"
+      ],
+      "rules": [
+        {
+          "id": "d1r1",
+          "description": "A will, settlement, estate, fund or foundation is a trust",
+          "when": [
+            {
+              "column": "name_clean",
+              "op": "matches",
+              "pattern": "\\b(WILL TRUST|DISCRETIONARY TRUST|FAMILY TRUST|LIFE SETTLEMENT|ESTATE OF|TRUST|SETTLEMENT|FUND|FOUNDATION)\\b"
+            }
+          ],
+          "value": "TRUST"
+        },
+        {
+          "id": "d1r2",
+          "description": "A ministry, council or agency is government",
+          "when": [
+            {
+              "column": "name_clean",
+              "op": "matches",
+              "pattern": "\\b(GOVERNMENT|MINISTRY|MINISTER|DEPARTMENT|COUNCIL|AUTHORITY|MUNICIPALITY|BOROUGH|COUNTY|CITY OF|STATE ADMINISTRATION|COMMISSION|AGENCY|OFFICE OF)\\b"
+            }
+          ],
+          "value": "GOVT"
+        },
+        {
+          "id": "d1r3",
+          "description": "A university, college or school is education",
+          "when": [
+            {
+              "column": "name_clean",
+              "op": "matches",
+              "pattern": "\\b(UNIVERSITY|COLLEGE|SCHOOL|INSTITUTE|FACULTY|ACADEMY)\\b"
+            }
+          ],
+          "value": "EDU"
+        },
+        {
+          "id": "d1r4",
+          "description": "A charity, association, society or church",
+          "when": [
+            {
+              "column": "name_clean",
+              "op": "matches",
+              "pattern": "\\b(CHARITY|ASSOCIATION|SOCIETY|CHURCH|FEDERATION|UNION)\\b"
+            }
+          ],
+          "value": "CHARITY"
+        },
+        {
+          "id": "d1r5",
+          "description": "A public limited company",
+          "when": [
+            {
+              "column": "name_clean",
+              "op": "matches",
+              "pattern": "\\b(PLC|PUBLIC LIMITED COMPANY)\\b"
+            }
+          ],
+          "value": "PLC"
+        },
+        {
+          "id": "d1r6",
+          "description": "A limited liability partnership",
+          "when": [
+            {
+              "column": "name_clean",
+              "op": "matches",
+              "pattern": "\\b(LLP|LIMITED LIABILITY PARTNERSHIP)\\b"
+            }
+          ],
+          "value": "LLP"
+        },
+        {
+          "id": "d1r7",
+          "description": "A limited liability company",
+          "when": [
+            {
+              "column": "name_clean",
+              "op": "matches",
+              "pattern": "\\b(LLC|LIMITED LIABILITY COMPANY)\\b"
+            }
+          ],
+          "value": "LLC"
+        },
+        {
+          "id": "d1r8",
+          "description": "A limited partnership",
+          "when": [
+            {
+              "column": "name_clean",
+              "op": "matches",
+              "pattern": "\\b(LP|LIMITED PARTNERSHIP)\\b"
+            }
+          ],
+          "value": "LP"
+        },
+        {
+          "id": "d1r9",
+          "description": "A German GmbH",
+          "when": [
+            {
+              "column": "name_clean",
+              "op": "matches",
+              "pattern": "\\bGMBH\\b"
+            }
+          ],
+          "value": "GMBH"
+        },
+        {
+          "id": "d1r10",
+          "description": "An incorporated company",
+          "when": [
+            {
+              "column": "name_clean",
+              "op": "matches",
+              "pattern": "\\b(INC|INCORPORATED|CORPORATION|CORP)\\b"
+            }
+          ],
+          "value": "INC"
+        },
+        {
+          "id": "d1r11",
+          "description": "A private limited company",
+          "when": [
+            {
+              "column": "name_clean",
+              "op": "matches",
+              "pattern": "\\b(LIMITED|LTD)\\b"
+            }
+          ],
+          "value": "LTD"
+        }
+      ]
+    }
+  ],
+  "match_keys": [
+    {
+      "id": "k1",
+      "name": "Person: name and date of birth",
+      "track": "person",
+      "tier": 1,
+      "description": "deduping's stage 1 key plus its stage 1.5 split. Surname, canonical forename and both parts of the date of birth, none of them missing. The corroborators are the split: a group this size that shares no address and no company is several people with one name, not one person.",
+      "columns": [
+        "surname_clean",
+        "forename_canon",
+        "dob_year_clean",
+        "dob_month_clean"
+      ],
+      "allow_null": false,
+      "applies_when": "always",
+      "guards": {
+        "max_group_size": 30,
+        "require_any_equal": [
+          "postcode_clean",
+          "company_number",
+          "address_key"
+        ]
+      },
+      "on_guard_fail": "review"
+    },
+    {
+      "id": "k2",
+      "name": "Organisation: country and registration number",
+      "track": "organisation",
+      "tier": 1,
+      "description": "The registration number names the company itself, so with the country it is the strongest key there is. Placeholder numbers are blocked, and a number carrying more than three different names is a formation agent's, not a company's.",
+      "columns": [
+        "country_canonical",
+        "regnum_clean"
+      ],
+      "allow_null": false,
+      "applies_when": "always",
+      "guards": {
+        "blocklists": [
+          "placeholder_numbers"
+        ],
+        "max_distinct": {
+          "column": "name_core",
+          "count": 3
+        },
+        "max_group_size": 50
+      },
+      "on_guard_fail": "review"
+    },
+    {
+      "id": "k3",
+      "name": "Organisation: core name and type",
+      "track": "organisation",
+      "tier": 2,
+      "description": "For the records the number could not key. Raw name prefixes once collapsed 1,800 unrelated trusts, so the whole core name and the type bucket are the empirically safe key.",
+      "columns": [
+        "name_core",
+        "type_bucket"
+      ],
+      "allow_null": false,
+      "applies_when": "no_earlier_key",
+      "guards": {
+        "max_group_size": 50
+      },
+      "on_guard_fail": "review"
+    }
+  ],
+  "vetoes": []
+}

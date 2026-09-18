@@ -142,6 +142,9 @@ def write(run_dir, scope: str, fmt: str, context: dict) -> Path:
     """Write the export and return its path."""
     run_dir = Path(run_dir)
     raw = context["raw"]
+    # The router hands it as a callable so a profile that never needs the
+    # original file does not pay to read it.
+    raw = raw() if callable(raw) else raw
     entities = context.get("entities")
     context = {**context, "exported_at": context.get("exported_at")
                or datetime.now(timezone.utc).isoformat()}

@@ -58,12 +58,12 @@ function UnitHead({ unit, side }) {
         </span>
       )}
       {/* Two or more old IDs inside one unit means an exact key merged records
-          the earlier manual work had kept apart. Worth saying out loud. */}
+          an earlier grouping had kept apart. Worth saying out loud. */}
       {ids.length > 1 && (
         <span
           className="tag amber"
           title={
-            "An exact key merged records that the earlier manual work kept apart, so this one " +
+            "An exact key merged records that an earlier grouping kept apart, so this one " +
             "unit carries more than one earlier entity ID. Splitting a group arrives with the " +
             "cluster screen."
           }

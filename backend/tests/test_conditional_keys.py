@@ -406,8 +406,8 @@ def test_an_operator_a_browser_cannot_evaluate_is_refused():
 
 
 def test_a_profile_with_no_focus_returns_none():
-    from app.profiles.psc import PscProfile
+    from app.profiles.base import Profile
 
-    profile = PscProfile()
+    profile = Profile(key="bare")
     assert profile.as_dict()["evidence_focus"] == []
     assert profile.evidence_focus_for({"anything": "x"}) is None

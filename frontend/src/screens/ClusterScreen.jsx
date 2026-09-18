@@ -21,6 +21,7 @@ import { FocusEvents } from "../components/FocusStrip";
 import { evidenceFocusFor, pickColumns } from "../evidenceFocus";
 import { guardReason } from "../components/ExactGroupsTable";
 import { useProfile } from "../profile";
+import { existingLabelName, noun } from "../profileText";
 
 const PER_PAGE = 50;
 const PART_NAMES = ["A", "B", "C", "D", "E", "F", "G", "H"];
@@ -50,7 +51,7 @@ const STATUSES = [
     key: "mixed_ids",
     label: "Mixed earlier IDs",
     tag: "blue",
-    help: "The group joins records that the earlier manual work gave different IDs.",
+    help: "The group joins records that an earlier grouping gave different IDs.",
   },
   {
     key: "held_key",
@@ -1044,7 +1045,7 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
           <div className="card-h">
             <h3>Evidence</h3>
             <span className="muted" style={{ fontSize: 12 }}>
-              the donations behind each unit
+              the {noun(profile, "unit_evidence")} behind each unit
             </span>
             <div className="actions">
               <button className="btn sm" onClick={() => setOpenEvidence((v) => !v)}>
@@ -1058,7 +1059,7 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
                 <div key={u.unit_id}>
                   <div style={{ fontWeight: 600, fontSize: 13 }}>{u.name}</div>
                   <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-                    {patternSummary(u) || "no pattern recorded"}
+                    {patternSummary(u, profile) || "no summary recorded"}
                   </div>
                   <FocusEvents
                     events={u.events}

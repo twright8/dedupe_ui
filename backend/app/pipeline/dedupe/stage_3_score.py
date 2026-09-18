@@ -614,7 +614,8 @@ def _strip_overlays(pairs: pd.DataFrame) -> pd.DataFrame:
 
 
 def counts_from(units: pd.DataFrame, pairs: pd.DataFrame, evaluation: dict,
-                outcome: dict | None = None, run_dir=None) -> dict:
+                outcome: dict | None = None, run_dir=None,
+                untrained: list[dict] | None = None) -> dict:
     """The run counts stage 3 contributes, in the pipeline's snake_case.
 
     The bucket counts are the ones a reviewer sees, so they carry the human
@@ -633,6 +634,7 @@ def counts_from(units: pd.DataFrame, pairs: pd.DataFrame, evaluation: dict,
     satisfied = (outcome or {}).get("satisfied")
     counts = {
         **units_module.counts_from(units),
+        "untrained_comparisons": len(untrained or []),
         "pairs_scored": int(len(pairs)),
         "pairs_accept": int(buckets.get("accept", 0)),
         "pairs_review": int(buckets.get("review", 0)),
@@ -787,6 +789,65 @@ def write_contradictions(run_dir: Path, contradictions: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def untrained_levels(model: dict) -> list[dict]:
+    """Comparison levels EM left without an m or a u probability.
+
+    A level with no m contributes nothing to the score, whatever the settings
+    say. It happens when every training rule holds that comparison's column
+    equal, so there is no disagreement inside the training block to learn from.
+    Nothing else reports it: the run succeeds and the comparison is quietly
+    worth zero. The PSC person track shipped that way and accepted pairs 37
+    birth-years apart.
+    """
+    found = []
+    for comparison in model.get("comparisons") or []:
+        name = comparison.get("output_column_name")
+        for level in comparison.get("comparison_levels") or []:
+            if level.get("is_null_level"):
+                continue  # a null level is meant to have neither
+            missing = [
+                key.split("_")[0] for key in ("m_probability", "u_probability")
+                if level.get(key) is None
+            ]
+            if missing:
+                found.append({
+                    "comparison": name,
+                    "level": level.get("label_for_charts"),
+                    "missing": missing,
+                })
+    return found
+
+
+def inspect_trained_model(path, track: str, progress_callback=None) -> list[dict]:
+    """Read back the model just saved and report anything EM could not learn."""
+    try:
+        model = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    found = untrained_levels(model)
+    for entry in found:
+        entry["track"] = track
+    if found:
+        columns = sorted({entry["comparison"] for entry in found})
+        _step(
+            f"  WARNING: {len(found)} comparison level(s) on the {track} track were "
+            f"not trained ({', '.join(columns)}). They will count for nothing. "
+            "Add an em_blocking_rule that does not hold those columns equal.",
+            progress_callback,
+        )
+        if progress_callback:
+            progress_callback("warning", {
+                "stage": STAGE, "track": track, "kind": "untrained_comparisons",
+                "comparisons": columns,
+                "message": (
+                    f"{len(found)} comparison level(s) on the {track} track were not "
+                    f"trained ({', '.join(columns)}) and contribute nothing to the "
+                    "score."
+                ),
+            })
+    return found
+
+
 def run_stage_3_score(
     run_dir: str,
     config_dir: str,
@@ -857,6 +918,7 @@ def run_stage_3_score(
         raise failure
 
     scored: list[pd.DataFrame] = []
+    untrained: list[dict] = []
     for track in linkage.TRACK_KEYS:
         config = linkage.track_settings(settings, track)
         rows = units_module.track_units(units, track)
@@ -872,9 +934,9 @@ def run_stage_3_score(
         _step(f"Scoring {track} ({len(rows):,} units)...", progress_callback)
         linker, pairs = train_track(rows, config, settings, ruleset, track,
                                     run_dir, progress_callback)
-        linker.misc.save_model_to_json(
-            str(run_dir / MODEL_FILENAME.format(track=track)), overwrite=True
-        )
+        model_path = run_dir / MODEL_FILENAME.format(track=track)
+        linker.misc.save_model_to_json(str(model_path), overwrite=True)
+        untrained.extend(inspect_trained_model(model_path, track, progress_callback))
         pairs["track"] = track
         pairs = apply_overlays(pairs, units, review, high)
         scored.append(pairs)
@@ -922,7 +984,15 @@ def run_stage_3_score(
     )
     _write_evaluation(run_dir, evaluation)
 
-    counts = counts_from(units, pairs, evaluation, outcome, run_dir=run_dir)
+    counts = counts_from(units, pairs, evaluation, outcome, run_dir=run_dir,
+                         untrained=untrained)
+    if untrained:
+        # Beside the pairs, so a reader of the report sees it without opening
+        # the model, and the UI has something to show on the run.
+        report["untrained_comparisons"] = untrained
+        (run_dir / BLOCKING_REPORT_FILENAME).write_text(
+            json.dumps(report, indent=2), encoding="utf-8"
+        )
     elapsed = time.time() - t_start
     precision = evaluation["pair_precision"]
     _step(

@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+#
+# /srv/dedupe_ui.git/hooks/post-receive
+#
+# This runs on the server every time you type "git push prod-dedupe main" on
+# your laptop. It takes the new code, installs what changed, builds the
+# frontend, and restarts the two dedupe services.
+#
+# It never touches roe_ui. roe_ui has its own bare repo at /srv/roe_ui.git
+# and its own hook. Nothing here reads or writes anything under /opt/roe_ui.
+#
+# Install with:
+#   sudo install -m 0755 -o ubuntu -g ubuntu \
+#     /opt/dedupe_ui/deploy/hooks/post-receive \
+#     /srv/dedupe_ui.git/hooks/post-receive
+#
+# It needs the sudoers drop-in deploy/sudoers/dedupe_deploy, which lets the
+# ubuntu user restart exactly these two services and nothing else.
+
+set -euo pipefail
+
+# Git sets GIT_DIR for hooks. Anything below that runs in the work tree would
+# pick it up and get confused, so clear it and pass paths explicitly instead.
+unset GIT_DIR
+
+BARE_REPO=/srv/dedupe_ui.git
+DEPLOY_DIR=/opt/dedupe_ui
+BRANCH=main
+VENV="$DEPLOY_DIR/backend/.venv"
+PYTHON=/usr/bin/python3.12
+LOCKFILE="backend/requirements.lock"
+SERVICES=(dedupe_donations dedupe_psc)
+
+say() { printf '  -> %s\n' "$*"; }
+
+# ---------------------------------------------------------------------------
+# Only act on a push to main. A push to any other branch is ignored.
+# ---------------------------------------------------------------------------
+deployed=0
+
+while read -r oldrev newrev ref; do
+	if [ "$ref" != "refs/heads/$BRANCH" ]; then
+		echo "post-receive: ignoring $ref (only $BRANCH deploys)"
+		continue
+	fi
+	deployed=1
+
+	echo
+	echo "=============================================================="
+	echo " Deploying dedupe_ui to $DEPLOY_DIR"
+	echo "=============================================================="
+
+	# -------------------------------------------------------------------
+	# Work out what changed, so we can skip slow steps.
+	# On the very first push oldrev is all zeros and there is nothing to
+	# compare against, so treat everything as changed.
+	# -------------------------------------------------------------------
+	if [ "$oldrev" = "0000000000000000000000000000000000000000" ]; then
+		say "First push. Every install step will run."
+		changed_files="ALL"
+	else
+		changed_files=$(git --git-dir="$BARE_REPO" diff --name-only "$oldrev" "$newrev")
+	fi
+
+	file_changed() {
+		[ "$changed_files" = "ALL" ] && return 0
+		printf '%s\n' "$changed_files" | grep -qx -- "$1"
+	}
+
+	# -------------------------------------------------------------------
+	# 1. Put the new code in place.
+	# -------------------------------------------------------------------
+	say "Checking out $BRANCH into $DEPLOY_DIR"
+	mkdir -p "$DEPLOY_DIR"
+	git --git-dir="$BARE_REPO" --work-tree="$DEPLOY_DIR" checkout -f "$BRANCH"
+	say "Now at $(git --git-dir="$BARE_REPO" rev-parse --short "$newrev")"
+
+	# -------------------------------------------------------------------
+	# 2. Python virtual environment.
+	#
+	# Built with python3.12 on purpose. The server's default python3 is
+	# 3.10, which would install older versions of pandas and Splink that
+	# behave differently from the ones used in development.
+	# -------------------------------------------------------------------
+	venv_is_new=0
+	if [ ! -x "$VENV/bin/python" ]; then
+		say "No virtual environment yet. Creating one with $PYTHON"
+		if [ ! -x "$PYTHON" ]; then
+			echo "ERROR: $PYTHON is not installed. Install it and push again:" >&2
+			echo "  sudo apt install python3.12 python3.12-venv" >&2
+			exit 1
+		fi
+		"$PYTHON" -m venv "$VENV"
+		"$VENV/bin/python" -m pip install --upgrade pip
+		venv_is_new=1
+	fi
+
+	# -------------------------------------------------------------------
+	# 3. Python packages, from the exact-version lock file.
+	#
+	# The lock file is generated on the laptop with
+	#   backend/.venv/bin/pip freeze > backend/requirements.lock
+	# so the server runs the same library versions that were tested.
+	# -------------------------------------------------------------------
+	if [ ! -f "$DEPLOY_DIR/$LOCKFILE" ]; then
+		echo "ERROR: $LOCKFILE is missing from the pushed code." >&2
+		echo "Generate it on your laptop and push again:" >&2
+		echo "  cd ~/PycharmProjects/dedupe_ui/backend" >&2
+		echo "  .venv/bin/pip freeze > requirements.lock" >&2
+		exit 1
+	fi
+
+	if [ "$venv_is_new" = "1" ] || file_changed "$LOCKFILE"; then
+		say "Installing Python packages from $LOCKFILE"
+		"$VENV/bin/pip" install --require-virtualenv -r "$DEPLOY_DIR/$LOCKFILE"
+	else
+		say "Python packages unchanged. Skipping pip install."
+	fi
+
+	# -------------------------------------------------------------------
+	# 4. Node packages. Only when the package files changed.
+	# -------------------------------------------------------------------
+	if [ ! -d "$DEPLOY_DIR/frontend/node_modules" ] \
+		|| file_changed "frontend/package.json" \
+		|| file_changed "frontend/package-lock.json"; then
+		say "Installing Node packages with npm ci"
+		( cd "$DEPLOY_DIR/frontend" && npm ci --no-audit --no-fund )
+	else
+		say "Node packages unchanged. Skipping npm ci."
+	fi
+
+	# -------------------------------------------------------------------
+	# 5. Build the frontend. Once, not twice.
+	#
+	# One build serves both instances. The build writes relative asset
+	# URLs, and each backend injects its own base path into index.html as
+	# it serves the page. So /donations and /psc share these files.
+	# Output lands in backend/static.
+	# -------------------------------------------------------------------
+	say "Building the frontend"
+	( cd "$DEPLOY_DIR/frontend" && npm run build )
+
+	# -------------------------------------------------------------------
+	# 6. Restart both dedupe services.
+	#
+	# roe_ui is not restarted and not touched.
+	# -------------------------------------------------------------------
+	for svc in "${SERVICES[@]}"; do
+		say "Restarting $svc"
+		sudo /bin/systemctl restart "$svc"
+	done
+
+	# Give each service a moment, then report whether it is running.
+	sleep 3
+	failed=0
+	for svc in "${SERVICES[@]}"; do
+		if sudo /bin/systemctl is-active --quiet "$svc"; then
+			say "$svc is running"
+		else
+			echo "ERROR: $svc did not start. Read its log with:" >&2
+			echo "  journalctl -u $svc -n 50 --no-pager" >&2
+			failed=1
+		fi
+	done
+
+	if [ "$failed" = "1" ]; then
+		exit 1
+	fi
+
+	echo
+	echo "Deploy finished."
+	echo "Check it at https://<the server address>:8000/donations/ and /psc/"
+	echo
+done
+
+if [ "$deployed" = "0" ]; then
+	echo "post-receive: nothing to deploy."
+fi

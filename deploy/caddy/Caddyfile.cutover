@@ -1,0 +1,105 @@
+# /etc/caddy/Caddyfile - AFTER CUTOVER
+#
+# This is a whole file. Applying it is a file replace, not an edit.
+#
+# WHAT CHANGES
+# Caddy takes port 8000, the address users already have. roe_ui moves to
+# 127.0.0.1:8001 and is reached through Caddy.
+#
+# DO NOT APPLY THIS FILE until roe_ui is already listening on port 8001.
+# Caddy cannot take port 8000 while roe_ui still holds it. Reloading Caddy
+# with this file too early fails, and Caddy keeps running its old config.
+# deploy/scripts/cutover.sh does the two steps in the right order for you.
+#
+# WHAT DOES NOT CHANGE
+# Harrier still owns 127.0.0.1:8400 behind the three blocks below.
+#
+# BEFORE YOU APPLY IT
+# Check that the three Harrier blocks below still match the live file:
+#
+#   diff /etc/caddy/Caddyfile /opt/dedupe_ui/deploy/caddy/Caddyfile.original
+#
+# The only differences should be comments and blank lines. If a real routing
+# line differs, stop and fix this file first.
+
+{
+	default_sni 141.147.81.233
+}
+
+# --- Harrier. Do not change these three blocks. ---
+
+https://141.147.81.233:8080 {
+	tls {
+		issuer acme {
+			profile shortlived
+		}
+	}
+	reverse_proxy 127.0.0.1:8400
+}
+
+https://harrier.141-147-81-233.sslip.io:8080 {
+	reverse_proxy 127.0.0.1:8400
+}
+
+http://harrier.141-147-81-233.sslip.io {
+	redir https://harrier.141-147-81-233.sslip.io:8080{uri} permanent
+}
+
+# ---------------------------------------------------------------------------
+# The one public address for all three tools.
+#
+# handle blocks are mutually exclusive: a request enters exactly one of them.
+# Caddy sorts them by how specific the path is, so the exact "/" match is
+# tried before the catch-all at the bottom.
+#
+# handle is used, never handle_path. handle_path would cut the prefix off the
+# path before forwarding. The dedupe app removes its own prefix, so if Caddy
+# removed it too the app would see the wrong path and answer 404.
+#
+# flush_interval -1 turns off response buffering. The run progress bar is a
+# server-sent event stream. With buffering on, the bar would sit still and
+# then jump at the end.
+# ---------------------------------------------------------------------------
+
+http://:8000 {
+	# The chooser page, and only the path "/".
+	@chooser path /
+	handle @chooser {
+		root * /var/www/chooser
+		file_server
+	}
+
+	# A private folder for anything the chooser page needs besides its HTML.
+	# It is a separate prefix so it can never collide with roe_ui's /assets/.
+	handle /_chooser/* {
+		root * /var/www/chooser
+		file_server
+	}
+
+	# Donations reconciliation.
+	@donations path /donations /donations/*
+	handle @donations {
+		reverse_proxy 127.0.0.1:8101 {
+			flush_interval -1
+		}
+	}
+
+	# PSC reconciliation.
+	@psc path /psc /psc/*
+	handle @psc {
+		reverse_proxy 127.0.0.1:8102 {
+			flush_interval -1
+		}
+	}
+
+	# Everything else goes to roe_ui, so old bookmarks such as /runs/123 and
+	# roe_ui's own /assets/... files keep working.
+	#
+	# roe_ui is now on 127.0.0.1:8001. Its code did not change. Only one line
+	# of its service file changed.
+	handle {
+		reverse_proxy 127.0.0.1:8001 {
+			flush_interval -1
+		}
+	}
+}

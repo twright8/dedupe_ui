@@ -566,6 +566,25 @@ class DonationsProfile(Profile):
             event_columns=[DisplayColumn(*c) for c in EVENT_COLUMNS],
             consensus_columns=["donor_status_std"],
             evidence_focus=list(EVIDENCE_FOCUS),
+            nouns={
+                "record": "donor",
+                "record_plural": "donors",
+                "unit_evidence": "donation history",
+                "evidence_row": "donation",
+                "evidence_row_plural": "donations",
+            },
+            pattern_summary=[
+                {"template": "{n_donations} donations · usually {modal_value:money} · "
+                             "{n_distinct_values} different amounts · "
+                             "{share_round_1000:percent} round thousands · "
+                             "{first_year}–{last_year}"}
+            ],
+            export_description=(
+                "The Electoral Commission sheet exactly as you uploaded it, with the "
+                "entity ID, how it was decided and the standardised donor status added "
+                "to every row, plus the retired IDs and what the run was."
+            ),
+            existing_label_name="earlier manual grouping",
             references=list(donations_features.REFERENCES),
         )
 
@@ -608,10 +627,14 @@ class DonationsProfile(Profile):
 
         return donations_export.write(run_dir, scope, fmt, context)
 
-    def load_records(self, input_path: Path) -> tuple[pd.DataFrame, dict]:
+    def load_records(self, input_path: Path, options=None) -> tuple[pd.DataFrame, dict]:
         return build_records(read_input(Path(input_path)))
 
-    def load_events(self, input_path: Path) -> pd.DataFrame:
+    def read_input_frame(self, input_path: Path):
+        """The donations sheet as read, so the export can give it back whole."""
+        return read_input(Path(input_path))
+
+    def load_events(self, input_path: Path, options=None) -> pd.DataFrame:
         """The individual donations. Reuses the parse ``load_records`` just did."""
         return build_events(read_input(Path(input_path)))
 

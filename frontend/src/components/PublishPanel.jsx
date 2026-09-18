@@ -12,6 +12,7 @@ import { api } from "../api";
 import { Icons } from "./Icons";
 import { fmtNumber, fmtDateTime } from "./ProbBar";
 import { Empty } from "./Empty";
+import { exportDescription } from "../profileText";
 
 // Each line of the preview, with the sentence that says what it means.
 const SUMMARY_ROWS = [
@@ -305,10 +306,7 @@ export default function PublishPanel({ runId, run, profile }) {
               </a>
             </div>
             <p className="muted" style={{ fontSize: 12, margin: "6px 0 0", lineHeight: 1.5 }}>
-              The original sheet, row for row and column for column, with five columns added:
-              RecordID, EntityID, EntityBasis, DonorStatusStandardNew and DonorStatusBasis. The Excel
-              file has a second sheet of aliases and a third naming the run and its config version.
-              The CSV is the first sheet only.
+              {exportDescription(profile)}
             </p>
           </div>
 

@@ -191,20 +191,47 @@ def library_counts(db_path: str) -> dict:
     }
 
 
-def list_labels(
-    db_path: str,
+# What the list may be sorted by, and the SQL each one means. Anything else is
+# refused rather than interpolated, because this string reaches the query.
+SORTS = {
+    "created_at": "created_at",
+    "name": "lower(coalesce(name_a, ''))",
+    "reviewer": "lower(coalesce(reviewer, ''))",
+    "is_match": "upper(is_match)",
+    "provenance": "coalesce(provenance, '')",
+}
+DEFAULT_SORT = "created_at"
+
+# The same, for the grouped view, where a column is one decision's worth.
+GROUP_SORTS = {
+    "created_at": "created_at",
+    "name": "lower(coalesce(first_name, ''))",
+    "reviewer": "lower(coalesce(reviewer, ''))",
+    "is_match": "n_true",
+    "provenance": "coalesce(provenance, '')",
+}
+
+# How many member names a grouped row carries.
+GROUP_NAMES = 4
+
+
+def build_filters(
     track: str | None = None,
     is_match: str | None = None,
     provenance: str | None = None,
     reviewer: str | None = None,
     held_out: int | None = None,
     q: str | None = None,
-    active: int = 1,
-    offset: int = 0,
-    limit: int = 50,
+    active: int | None = 1,
     decision_id: str | None = None,
-) -> dict:
-    """One page of the library, newest first. ``counts`` ignore the filters."""
+    created_from: str | None = None,
+    created_to: str | None = None,
+) -> tuple[str, list]:
+    """``(WHERE clause, parameters)`` — the one place a label filter is written.
+
+    The list and the export share it, so a download is always exactly what was
+    on screen. Every value is bound, never interpolated.
+    """
     where: list[str] = []
     params: list = []
     if active is not None:
@@ -228,6 +255,14 @@ def list_labels(
     if decision_id is not None:
         where.append("decision_id = ?")
         params.append(decision_id)
+    if created_from:
+        # Inclusive, and a bare date means from its first moment.
+        where.append("created_at >= ?")
+        params.append(_from_bound(created_from))
+    if created_to:
+        # Inclusive, so a bare date covers the whole of that day.
+        where.append("created_at <= ?")
+        params.append(_to_bound(created_to))
     if q:
         pattern = f"%{q.lower()}%"
         where.append(
@@ -236,20 +271,156 @@ def list_labels(
             "OR lower(coalesce(notes, '')) LIKE ? OR lower(coalesce(reviewer, '')) LIKE ?)"
         )
         params.extend([pattern] * 6)
-    where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+    return (f" WHERE {' AND '.join(where)}" if where else ""), params
 
+
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _from_bound(value: str) -> str:
+    value = str(value).strip()
+    return f"{value}T00:00:00" if _DATE_ONLY.match(value) else value
+
+
+def _to_bound(value: str) -> str:
+    """A bare date means the end of that day, so `to` is inclusive."""
+    value = str(value).strip()
+    return f"{value}T23:59:59.999999" if _DATE_ONLY.match(value) else value
+
+
+def _order_by(sort: str | None, order: str | None, allowed: dict) -> str:
+    key = (sort or DEFAULT_SORT).strip().lower()
+    if key not in allowed:
+        raise LabelError(f"sort must be one of {', '.join(allowed)}")
+    direction = (order or "desc").strip().lower()
+    if direction not in ("asc", "desc"):
+        raise LabelError("order must be asc or desc")
+    # id breaks every tie, so a page boundary never repeats or skips a row.
+    return f"{allowed[key]} {direction.upper()}, id DESC"
+
+
+def list_labels(
+    db_path: str,
+    track: str | None = None,
+    is_match: str | None = None,
+    provenance: str | None = None,
+    reviewer: str | None = None,
+    held_out: int | None = None,
+    q: str | None = None,
+    active: int = 1,
+    offset: int = 0,
+    limit: int = 50,
+    decision_id: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    sort: str | None = None,
+    order: str | None = None,
+    group_by: str | None = None,
+) -> dict:
+    """One page of the library. ``counts`` describe the whole library.
+
+    ``group_by="decision"`` folds the labels one group decision wrote into a
+    single row: a cluster merge can write a thousand of them, and a reviewer
+    wants to see the decision, not the star it produced.
+    """
+    where_sql, params = build_filters(
+        track, is_match, provenance, reviewer, held_out, q, active, decision_id,
+        created_from, created_to,
+    )
+    if (group_by or "").strip().lower() == "decision":
+        return _grouped(db_path, where_sql, params, offset, limit, sort, order)
+
+    order_sql = _order_by(sort, order, SORTS)
     total = query_db(
         db_path, f"SELECT count(*) AS n FROM pair_labels{where_sql}", tuple(params)
     )[0]["n"]
     items = [dict(row) for row in query_db(
         db_path,
-        f"SELECT * FROM pair_labels{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM pair_labels{where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?",
         tuple([*params, int(limit), int(offset)]),
     )]
     return {
         "total": int(total), "offset": int(offset), "limit": int(limit),
-        "items": items, "counts": library_counts(db_path),
+        "grouped": False, "items": items, "counts": library_counts(db_path),
     }
+
+
+def _grouped(db_path, where_sql, params, offset, limit, sort, order) -> dict:
+    """The list with one row per decision, and single labels left as they are."""
+    order_sql = _order_by(sort, order, GROUP_SORTS)
+    # A label with no decision is its own group, so nothing is hidden by the mode.
+    key = "coalesce(decision_id, 'label:' || id)"
+    base = f"""
+        SELECT {key} AS group_key,
+               decision_id,
+               max(decision_scope) AS decision_scope,
+               count(*) AS n_labels,
+               sum(CASE WHEN upper(is_match) = 'TRUE' THEN 1 ELSE 0 END) AS n_true,
+               sum(CASE WHEN upper(is_match) = 'FALSE' THEN 1 ELSE 0 END) AS n_false,
+               max(provenance) AS provenance,
+               max(reviewer) AS reviewer,
+               min(created_at) AS created_at,
+               max(id) AS id,
+               max(notes) AS notes,
+               max(evidence_url) AS evidence_url,
+               min(name_a) AS first_name
+        FROM pair_labels{where_sql}
+        GROUP BY {key}
+    """
+    total = query_db(
+        db_path, f"SELECT count(*) AS n FROM ({base})", tuple(params)
+    )[0]["n"]
+    rows = [dict(row) for row in query_db(
+        db_path, f"SELECT * FROM ({base}) ORDER BY {order_sql} LIMIT ? OFFSET ?",
+        tuple([*params, int(limit), int(offset)]),
+    )]
+
+    names = _group_names(db_path, where_sql, params,
+                         [row["group_key"] for row in rows])
+    kinds = {v: k for k, v in DECISION_PROVENANCES.items()}
+    items = []
+    for row in rows:
+        items.append({
+            "decision_id": row["decision_id"],
+            "decision_scope": row["decision_scope"],
+            "kind": kinds.get(row["provenance"]),
+            "provenance": row["provenance"],
+            "n_labels": int(row["n_labels"]),
+            "n_true": int(row["n_true"]),
+            "n_false": int(row["n_false"]),
+            "names": names.get(row["group_key"], []),
+            "reviewer": row["reviewer"],
+            "created_at": row["created_at"],
+            "notes": row["notes"],
+            "evidence_url": row["evidence_url"],
+        })
+    return {
+        "total": int(total), "offset": int(offset), "limit": int(limit),
+        "grouped": True, "items": items, "counts": library_counts(db_path),
+    }
+
+
+def _group_names(db_path, where_sql, params, group_keys) -> dict:
+    """Up to four member names per group, for the page's groups only."""
+    if not group_keys:
+        return {}
+    key = "coalesce(decision_id, 'label:' || id)"
+    marks = ", ".join("?" * len(group_keys))
+    rows = query_db(
+        db_path,
+        f"""SELECT {key} AS group_key, name_a, name_b
+            FROM pair_labels{where_sql or " WHERE 1=1"}
+              AND {key} IN ({marks})
+            ORDER BY id""",
+        tuple([*params, *group_keys]),
+    )
+    found: dict[str, list] = {}
+    for row in rows:
+        seen = found.setdefault(row["group_key"], [])
+        for name in (row["name_a"], row["name_b"]):
+            if name and name not in seen and len(seen) < GROUP_NAMES:
+                seen.append(name)
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -580,13 +751,35 @@ def withdraw_label(db_path: str, a, b) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def export_csv(db_path: str) -> str:
-    buffer = io.StringIO()
-    writer = csvmod.DictWriter(buffer, fieldnames=CSV_COLUMNS, extrasaction="ignore")
-    writer.writeheader()
-    for row in active_labels(db_path):
-        writer.writerow({c: ("" if row.get(c) is None else row.get(c)) for c in CSV_COLUMNS})
-    return buffer.getvalue()
+def export_rows(db_path: str, where_sql: str, params: list, sort=None, order=None):
+    """Yield the CSV a line at a time, so a large download holds no more than a row.
+
+    The filters are the list's own, so the file is always what was on screen.
+    """
+    # Validated before the first byte, so a bad sort is a 400 and not a
+    # half-written download the caller has to notice for themselves.
+    order_sql = _order_by(sort, order, SORTS)
+    header = io.StringIO()
+    csvmod.DictWriter(header, fieldnames=CSV_COLUMNS).writeheader()
+    yield header.getvalue()
+    for row in query_db(
+        db_path, f"SELECT * FROM pair_labels{where_sql} ORDER BY {order_sql}",
+        tuple(params),
+    ):
+        line = io.StringIO()
+        csvmod.DictWriter(line, fieldnames=CSV_COLUMNS, extrasaction="ignore").writerow(
+            {c: ("" if dict(row).get(c) is None else dict(row).get(c))
+             for c in CSV_COLUMNS}
+        )
+        yield line.getvalue()
+
+
+def export_csv(db_path: str, where_sql: str = "", params: list | None = None,
+               sort=None, order=None) -> str:
+    """The whole file as one string. Tests use it; the endpoint streams instead."""
+    if not where_sql:
+        where_sql, params = build_filters()
+    return "".join(export_rows(db_path, where_sql, params or [], sort, order))
 
 
 def parse_csv(text: str) -> list[dict]:

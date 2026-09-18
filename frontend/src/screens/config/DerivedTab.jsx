@@ -98,7 +98,7 @@ export default function DerivedTab({ ruleset, setRuleset, errors, profile }) {
         {derivedColumns.length === 0 ? (
           <Empty
             title="No derived columns"
-            sub="A derived column standardises a category that is often wrong at source, such as donor status."
+            sub="A derived column standardises a category the source often records wrongly."
             action={
               <button className="btn primary" onClick={addColumn}>
                 <Icons.plus size={14} stroke="#fff" /> Add derived column
@@ -180,7 +180,7 @@ function DerivedColumnCard({
             <label>Column it writes</label>
             <input
               className="input mono"
-              placeholder="donor_status_std"
+              placeholder="status_std"
               value={target}
               onChange={(e) => onChange({ target: cleanTarget(e.target.value) })}
               style={targetOk && !clashes ? undefined : { borderColor: "var(--ti-red)" }}

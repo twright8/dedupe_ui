@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.db import query_db, write_db
+from app.profiles.base import LoadOptions
 from app.pipeline import gbt_model
 from app.services.audit_logger import log_event
 from app.services.config_manager import get_version
@@ -528,6 +529,7 @@ def start_run(
     threshold_high: float,
     threshold_review: float,
     render_diagnostics: bool = True,
+    quick_mode: bool = False,
 ) -> str:
     """Prepare a run directory and launch the pipeline in a background thread.
 
@@ -571,6 +573,7 @@ def start_run(
             "threshold_high": threshold_high,
             "threshold_review": threshold_review,
             "render_diagnostics": render_diagnostics,
+            "quick_mode": quick_mode,
         },
         daemon=True,
     )
@@ -589,6 +592,7 @@ def _run_pipeline(
     threshold_high: float,
     threshold_review: float,
     render_diagnostics: bool = True,
+    quick_mode: bool = False,
 ) -> None:
     """Execute the dedupe stages sequentially in a background thread.
 
@@ -638,6 +642,7 @@ def _run_pipeline(
                 run_dir=run_dir,
                 input_path=input_path,
                 progress_callback=progress_callback,
+                options=LoadOptions(quick_mode=quick_mode),
             )
             # Per-track counts are only known after the ruleset has been applied,
             # so they replace whatever stage 0 reported.
@@ -892,6 +897,7 @@ def enqueue_run(
     threshold_high: float,
     threshold_review: float,
     render_diagnostics: bool = True,
+    quick_mode: bool = False,
 ) -> None:
     """If no run is active, start immediately. Otherwise queue for later."""
     kwargs = {
@@ -903,6 +909,7 @@ def enqueue_run(
         "threshold_high": threshold_high,
         "threshold_review": threshold_review,
         "render_diagnostics": render_diagnostics,
+        "quick_mode": quick_mode,
     }
 
     with _run_lock:

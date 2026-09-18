@@ -1,0 +1,41 @@
+# /etc/caddy/Caddyfile - AS IT IS TODAY, before anything changes.
+#
+# READ THIS BEFORE YOU USE THIS FILE FOR A ROLLBACK.
+#
+# This file is a readable copy of today's Caddy setup. It says the same thing
+# as the live file. It may not be byte-for-byte identical to it, because the
+# live file was read as a summary and not copied.
+#
+# So this file is NOT the rollback copy.
+#
+# The real rollback copy is the one deploy/scripts/backup_before_cutover.sh
+# takes straight off the server, before anything changes. It lands at
+#   /home/ubuntu/backups/<timestamp>/etc/caddy/Caddyfile
+# and deploy/scripts/rollback.sh restores that one.
+#
+# This file is here for two reasons. First, so you can read today's routing
+# without logging in. Second, as a last resort if a backup is ever lost.
+#
+# The three site blocks below belong to Harrier. Harrier is a separate app on
+# 127.0.0.1:8400. Nothing in this deployment touches it.
+
+{
+	default_sni 141.147.81.233
+}
+
+https://141.147.81.233:8080 {
+	tls {
+		issuer acme {
+			profile shortlived
+		}
+	}
+	reverse_proxy 127.0.0.1:8400
+}
+
+https://harrier.141-147-81-233.sslip.io:8080 {
+	reverse_proxy 127.0.0.1:8400
+}
+
+http://harrier.141-147-81-233.sslip.io {
+	redir https://harrier.141-147-81-233.sslip.io:8080{uri} permanent
+}

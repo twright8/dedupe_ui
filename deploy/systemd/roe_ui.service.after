@@ -1,0 +1,30 @@
+# REFERENCE FILE - do not copy this file over the live unit.
+#
+# This is what /etc/systemd/system/roe_ui.service must look like after the
+# cutover. Only ONE line changes. It is the ExecStart line.
+#
+#   before:  ... --host 0.0.0.0 --port 8000
+#   after:   ... --host 127.0.0.1 --port 8001
+#
+# Why: after the cutover Caddy owns port 8000. Caddy forwards to roe_ui on
+# port 8001. roe_ui listens on 127.0.0.1 only, so nothing but Caddy can reach
+# it. roe_ui's own code does not change at all.
+#
+# How to make the change: deploy/scripts/cutover.sh edits the live file in
+# place with one search-and-replace, prints the diff, and refuses to continue
+# if more than one line changed. Editing in place is safer than replacing the
+# file, because the live file may carry [Unit] or [Install] lines that are not
+# reproduced here.
+#
+# The [Service] section below is the part that must match after the change.
+# Everything else in the live file stays exactly as it is today.
+
+[Service]
+Type=simple
+User=roe_ui_app
+Group=roe_ui_app
+WorkingDirectory=/opt/roe_ui/backend
+EnvironmentFile=/etc/roe_ui.env
+ExecStart=/opt/roe_ui/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8001
+Restart=on-failure
+RestartSec=3

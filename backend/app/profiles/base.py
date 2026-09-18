@@ -31,6 +31,19 @@ TRACK_KEYS = ("person", "organisation")
 
 
 @dataclass(frozen=True)
+class LoadOptions:
+    """What the run asked the loader for, beyond the file itself.
+
+    ``quick_mode`` is the run screen's "sample" switch. A profile whose input is
+    small ignores it; one reading a 13 GB snapshot stops after ``quick_rows``
+    records so the rules can be iterated in the UI without a full pass.
+    """
+
+    quick_mode: bool = False
+    quick_rows: int | None = None
+
+
+@dataclass(frozen=True)
 class InputSpec:
     """The one input file a run takes."""
 
@@ -95,6 +108,20 @@ class EvidenceFocus:
 # browser can evaluate without the backend.
 EVIDENCE_FOCUS_OPS = ("equals", "in", "is_null", "not_null", "starts_with")
 
+# What the shared screens call a record and its child rows (docs/PROFILE_UI.md).
+# Every key has a neutral fallback, so a profile that declares none still reads.
+DEFAULT_NOUNS = {
+    "record": "record",
+    "record_plural": "records",
+    "unit_evidence": "history",
+    "evidence_row": "row",
+    "evidence_row_plural": "rows",
+}
+
+DEFAULT_EXPORT_DESCRIPTION = (
+    "One row per record with the entity ID it was given and how that was decided."
+)
+
 
 # Every profile has exactly these two tracks (design decision D5). A profile may
 # relabel them but may not add or remove one.
@@ -135,22 +162,47 @@ class Profile:
     # the profile needs none. A declared table that is not built is not an error:
     # its features go null and the training report says so.
     references: list = field(default_factory=list)
+    # What the shared screens call things (docs/PROFILE_UI.md). Missing keys
+    # fall back to DEFAULT_NOUNS, so a profile may declare only what differs.
+    nouns: dict = field(default_factory=dict)
+    # One-line summaries of a unit, tried in order like an evidence focus. Each
+    # is {template, when?}; the template names unit columns as {column} or
+    # {column:money|percent|number|year}. Empty means the neutral default line.
+    pattern_summary: list = field(default_factory=list)
+    # One plain sentence for the Publish and export tab.
+    export_description: str = ""
+    # What the earlier grouping is called, or None for a profile that has none —
+    # the UI then hides every mention of one.
+    existing_label_name: str | None = None
     # Only the default mint uses this; a profile with an ID convention of its
     # own ignores it.
     _entity_counter: int = 0
 
-    def load_records(self, input_path: Path) -> tuple[pd.DataFrame, dict]:
-        """Read the input file and return (records frame, load stats).
+    def load_records(
+        self, input_path: Path, options: LoadOptions | None = None
+    ) -> tuple[pd.DataFrame | Path, dict]:
+        """Read the input file and return (records, load stats).
 
-        The frame carries one row per record, with at least SHARED_COLUMNS.
-        The stats dict is stored as the run's counts.
+        *records* is either a pandas frame, which suits a profile whose input
+        fits in memory comfortably, or a **path to a parquet file** the profile
+        has already written. A profile reading a 13 GB snapshot returns the path:
+        the rows have been through DuckDB on the way out, and building a frame
+        from them afterwards would undo the streaming.
+
+        Either way the records carry one row per record with at least
+        SHARED_COLUMNS, and the stats dict is stored as the run's counts. The
+        stats must be identical whichever form is returned.
         """
         raise NotImplementedError(
             f"Profile '{self.key}' cannot load records yet."
         )
 
-    def load_events(self, input_path: Path) -> pd.DataFrame | None:
+    def load_events(
+        self, input_path: Path, options: LoadOptions | None = None
+    ) -> pd.DataFrame | Path | None:
         """The evidence rows behind the records, or None when there are none.
+
+        A path to a parquet file is accepted here too, for the same reason.
 
         One row per underlying event, keyed on ``record_id`` and carrying the
         columns ``event_columns`` describes. Stage 0 writes it to
@@ -158,6 +210,15 @@ class Profile:
 
         A profile whose input is slow to read should read it once and serve both
         this and ``load_records`` from the same parse.
+        """
+        return None
+
+    def read_input_frame(self, input_path: Path) -> pd.DataFrame | None:
+        """The original input file as a frame, for an export that gives it back.
+
+        Only a profile whose export promises "your own file, plus our columns"
+        needs this. A profile reading a 13 GB snapshot returns None rather than
+        parse it again, and its export writes from the run's own parquet.
         """
         return None
 
@@ -267,6 +328,10 @@ class Profile:
             "event_columns": [c.as_dict() for c in self.event_columns],
             "consensus_columns": list(self.consensus_columns),
             "evidence_focus": [f.as_dict() for f in self.evidence_focus],
+            "nouns": {**DEFAULT_NOUNS, **(self.nouns or {})},
+            "pattern_summary": [dict(p) for p in self.pattern_summary],
+            "export_description": self.export_description or DEFAULT_EXPORT_DESCRIPTION,
+            "existing_label_name": self.existing_label_name,
         }
 
     def evidence_focus_for(self, row) -> str | None:
@@ -339,6 +404,47 @@ def evidence_focus_id(focuses, row) -> str | None:
         if all(_condition_holds(c, row) for c in focus.when):
             return focus.id
     return None
+
+
+def validate_records_file(path) -> None:
+    """The same checks as ``validate_records``, without reading the file.
+
+    DuckDB does the work, so a 16-million-record parquet is checked by scanning
+    two columns rather than by materialising every one of them.
+    """
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        columns = {
+            row[0] for row in
+            con.execute(f"SELECT * FROM read_parquet('{path}') LIMIT 0").description
+        }
+        missing = [c for c in SHARED_COLUMNS if c not in columns]
+        if missing:
+            raise ValueError(
+                f"Records frame is missing required column(s): {', '.join(missing)}"
+            )
+        repeated = con.execute(
+            f"SELECT record_id FROM read_parquet('{path}') "
+            f"GROUP BY 1 HAVING count(*) > 1 LIMIT 3"
+        ).fetchall()
+        if repeated:
+            raise ValueError(
+                f"record_id must be unique — repeated: {[r[0] for r in repeated]}"
+            )
+        if TRACK_COLUMN in columns:
+            bad = con.execute(
+                f"SELECT DISTINCT {TRACK_COLUMN} FROM read_parquet('{path}') "
+                f"WHERE {TRACK_COLUMN} IS NOT NULL "
+                f"AND {TRACK_COLUMN} NOT IN {tuple(TRACK_KEYS)}"
+            ).fetchall()
+            if bad:
+                raise ValueError(
+                    f"track must be one of {TRACK_KEYS} — found: {sorted(r[0] for r in bad)}"
+                )
+    finally:
+        con.close()
 
 
 def validate_records(records: pd.DataFrame) -> None:

@@ -208,7 +208,7 @@ export default function ModelPanel({ runId }) {
         <p className="muted" style={{ fontSize: 12.5, margin: 0, lineHeight: 1.55 }}>
           Splink finds the candidate pairs and scores them. This model re-scores those candidates
           using the answers people have saved. It learns from your answers, from the decisions taken
-          on whole groups, and at a lower weight from the earlier manual grouping.
+          on whole groups, and at a lower weight from any earlier grouping.
         </p>
 
         {loading ? (

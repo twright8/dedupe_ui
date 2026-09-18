@@ -276,3 +276,142 @@ def test_the_pipeline_stages_endpoint_lists_the_stages_that_exist(client):
     for stage in stages:
         assert set(stage) == {"key", "label", "description"}
         assert stage["label"] and stage["description"]
+
+
+# ---------------------------------------------------------------------------
+# Batching (slice 8b): the file is cleaned in row batches, and the batch size
+# must not be able to change the answer.
+# ---------------------------------------------------------------------------
+
+
+def _many_rows(n: int):
+    """Enough rows, varied enough, to span several batches."""
+    import pandas as pd
+
+    from app.profiles.donations import RAW_COLUMNS as DONATION_COLUMNS
+
+    rows = []
+    for i in range(n):
+        rows.append({
+            "record_id": str(i),
+            "name": ["Mr John Smith", "Acme Ltd", "UNISON", "N/A", "Dr Jane Doe"][i % 5],
+            "donor_status": ["Individual", "Company", "Trade Union", "Other",
+                             "Impermissible Donor"][i % 5],
+            "company_number": ["4250076", None, None, "OC314414", None][i % 5],
+            "postcode": ["le1 1fb", None, "SW1A 1AA", None, None][i % 5],
+            "review_state": "unreviewed",
+            "existing_entity_id": None,
+        })
+    frame = pd.DataFrame(rows)
+    for column in DONATION_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = None
+    return frame[DONATION_COLUMNS]
+
+
+def _clean_with_batch_size(tmp_path, frame, size, monkeypatch, name):
+    import pandas as pd
+
+    from app.pipeline.dedupe.stage_1_clean import RECORDS_FILENAME, run_stage_1_clean
+
+    run = tmp_path / name
+    (run / "config").mkdir(parents=True)
+    frame.to_parquet(run / "records_raw.parquet", index=False)
+    (run / "config" / "ruleset.json").write_text(
+        json.dumps(default_ruleset()), encoding="utf-8"
+    )
+    monkeypatch.setenv("CLEAN_BATCH_ROWS", str(size))
+    stats = run_stage_1_clean(run_dir=str(run), config_dir=str(run / "config"))
+    return stats, pd.read_parquet(run / RECORDS_FILENAME)
+
+
+def test_the_batch_size_cannot_change_the_answer(tmp_path, monkeypatch):
+    """Every op is row-independent, so 1,000 rows at a time and 1,000,000 at a
+    time have to agree exactly — values, counts and column order."""
+    frame = _many_rows(2500)
+    small_stats, small = _clean_with_batch_size(tmp_path, frame, 1000, monkeypatch, "a")
+    big_stats, big = _clean_with_batch_size(tmp_path, frame, 1_000_000, monkeypatch, "b")
+
+    assert small_stats == big_stats
+    assert list(small.columns) == list(big.columns)
+    pd.testing.assert_frame_equal(
+        small.sort_values("record_id").reset_index(drop=True),
+        big.sort_values("record_id").reset_index(drop=True),
+    )
+
+
+def test_a_batch_of_one_row_still_agrees(tmp_path, monkeypatch):
+    frame = _many_rows(25)
+    one, single = _clean_with_batch_size(tmp_path, frame, 1, monkeypatch, "c")
+    all_at_once, whole = _clean_with_batch_size(tmp_path, frame, 1_000_000, monkeypatch, "d")
+    assert one == all_at_once
+    pd.testing.assert_frame_equal(
+        single.sort_values("record_id").reset_index(drop=True),
+        whole.sort_values("record_id").reset_index(drop=True),
+    )
+
+
+def test_a_batch_whose_track_is_empty_writes_the_same_columns(tmp_path, monkeypatch):
+    """A batch of only organisations must still carry the person columns, or the
+    parquet's schema changes half way through the file."""
+    import pandas as pd
+
+    from app.profiles.donations import RAW_COLUMNS as DONATION_COLUMNS
+
+    rows = [
+        {"record_id": "1", "name": "Acme Ltd", "donor_status": "Company"},
+        {"record_id": "2", "name": "Beta Ltd", "donor_status": "Company"},
+        {"record_id": "3", "name": "Mr John Smith", "donor_status": "Individual"},
+        {"record_id": "4", "name": "Ms Jane Doe", "donor_status": "Individual"},
+    ]
+    frame = pd.DataFrame(rows)
+    for column in DONATION_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = None
+    frame["review_state"] = "unreviewed"
+    frame = frame[DONATION_COLUMNS]
+
+    # Two batches: the first is all organisations, the second all people.
+    stats, cleaned = _clean_with_batch_size(tmp_path, frame, 2, monkeypatch, "e")
+    assert stats["records_person"] == 2 and stats["records_organisation"] == 2
+    for column in ("surname", "forename_canon", "surname_metaphone",
+                   "name_core", "legal_form", "company_number_clean"):
+        assert column in cleaned.columns, column
+    # The organisations carry no surname and the people no core name.
+    by_id = cleaned.set_index("record_id")
+    assert pd.isna(by_id.loc["1", "surname"])
+    assert pd.isna(by_id.loc["3", "name_core"])
+
+
+def test_the_written_columns_are_known_before_a_row_is_read():
+    """The schema comes from the ruleset, not from whatever the first batch
+    happened to contain."""
+    from app.pipeline.dedupe.stage_1_clean import written_columns
+    from app.profiles.donations import RAW_COLUMNS as DONATION_COLUMNS
+
+    columns = written_columns(list(DONATION_COLUMNS), default_ruleset())
+    assert columns[:len(DONATION_COLUMNS)] == list(DONATION_COLUMNS)
+    assert columns[len(DONATION_COLUMNS)] == "track"
+    for expected in ("name_clean", "surname", "name_core", "donor_status_std",
+                     "donor_status_std_rule"):
+        assert expected in columns
+
+
+def test_a_duplicate_record_id_is_caught_across_batches(tmp_path, monkeypatch):
+    """Uniqueness spans the file, so it cannot be checked inside one batch."""
+    import pandas as pd
+
+    from app.profiles.donations import RAW_COLUMNS as DONATION_COLUMNS
+
+    frame = pd.DataFrame([
+        {"record_id": "1", "name": "A", "donor_status": "Company"},
+        {"record_id": "2", "name": "B", "donor_status": "Company"},
+        {"record_id": "1", "name": "C", "donor_status": "Company"},
+    ])
+    for column in DONATION_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = None
+    frame["review_state"] = "unreviewed"
+
+    with pytest.raises(ValueError, match="record_id must be unique"):
+        _clean_with_batch_size(tmp_path, frame[DONATION_COLUMNS], 2, monkeypatch, "f")

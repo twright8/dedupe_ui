@@ -23,11 +23,14 @@ const BUCKET_SERIES = [
   { key: "reject", label: "rejected", colour: "var(--ti-red)" },
 ];
 
-const IMPORT_SERIES = [
-  { key: "agrees", label: "earlier labels agree", colour: "var(--green)" },
-  { key: "disagrees", label: "earlier labels disagree", colour: "var(--amber)" },
-  { key: "unknown", label: "no earlier label", colour: "var(--muted-2)" },
-];
+function importSeries(earlier) {
+  const name = earlier || "the earlier grouping";
+  return [
+    { key: "agrees", label: `${name} agrees`, colour: "var(--green)" },
+    { key: "disagrees", label: `${name} disagrees`, colour: "var(--amber)" },
+    { key: "unknown", label: "no earlier decision", colour: "var(--muted-2)" },
+  ];
+}
 
 export function ThresholdPanel({
   threshold,
@@ -44,6 +47,8 @@ export function ThresholdPanel({
   onBrush,
   scoreEval,
   model,
+  earlier,
+  showEarlier = true,
 }) {
   const [stack, setStack] = useState("bucket"); // bucket | import
   const histoRef = useRef(null);
@@ -58,7 +63,7 @@ export function ThresholdPanel({
   const series = useModel ? histogram?.by_score_column || {} : histogram || {};
   const edges = Array.isArray(histogram?.edges) ? histogram.edges : [];
   const nBins = Math.max(0, edges.length - 1);
-  const stackSeries = stack === "bucket" ? BUCKET_SERIES : IMPORT_SERIES;
+  const stackSeries = stack === "bucket" ? BUCKET_SERIES : importSeries(earlier);
   const totals = Array.isArray(series.total) ? series.total : [];
   const maxBin = totals.length ? Math.max(...totals, 1) : 1;
 
@@ -107,9 +112,11 @@ export function ThresholdPanel({
             <button className={stack === "bucket" ? "on" : ""} onClick={() => setStack("bucket")}>
               By bucket
             </button>
-            <button className={stack === "import" ? "on" : ""} onClick={() => setStack("import")}>
-              By earlier labels
-            </button>
+            {showEarlier && (
+              <button className={stack === "import" ? "on" : ""} onClick={() => setStack("import")}>
+                By {earlier || "earlier decisions"}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -397,7 +404,7 @@ export function ThresholdPanel({
           )}
         </div>
 
-        {scoreEval && <ScoreEvalStrip scoreEval={scoreEval} />}
+        {scoreEval && showEarlier && <ScoreEvalStrip scoreEval={scoreEval} earlier={earlier} />}
       </div>
     </div>
   );
@@ -405,7 +412,7 @@ export function ThresholdPanel({
 
 /* How the run scored against the labels that already exist, in the same plain
    words the Match keys tab uses. */
-function ScoreEvalStrip({ scoreEval }) {
+function ScoreEvalStrip({ scoreEval, earlier }) {
   const rows = [
     {
       key: "all",
@@ -448,7 +455,7 @@ function ScoreEvalStrip({ scoreEval }) {
   return (
     <div style={{ marginTop: 14, borderTop: "1px solid var(--line)", paddingTop: 12 }}>
       <div className="eyebrow" style={{ marginBottom: 6 }}>
-        Agreement with the labels that already exist
+        Agreement with the {earlier || "earlier grouping"}
       </div>
       <div className="tbl-wrap">
         <table className="t" style={{ borderRadius: 0 }}>
@@ -484,8 +491,8 @@ function ScoreEvalStrip({ scoreEval }) {
         </table>
       </div>
       <div className="muted" style={{ fontSize: 11.5, marginTop: 6, lineHeight: 1.5 }}>
-        Precision: of the labelled pairs this run joins, how many the earlier manual work also
-        joined. Recall: of the pairs the manual work joined, how many this run already finds.
+        Precision: of the labelled pairs this run joins, how many the {earlier || "earlier grouping"}{" "}
+        also joined. Recall: of the pairs it joined, how many this run already finds.
         {scoreEval.conflicts > 0 && (
           <>
             {" "}

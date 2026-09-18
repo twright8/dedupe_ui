@@ -270,6 +270,74 @@ def _check_track(track: str, config: dict, known: set[str], errors: list[dict]) 
         _error(errors, f"{base}.max_pairs", "max_pairs must be a whole number above zero")
 
 
+# Every `l.col = r.col` a rule holds equal. The same parser the blocking rules
+# already use, so a rule this reads is a rule Splink will read the same way.
+_EQUALITY_RE = re.compile(r"\bl\.(\w+)\s*=\s*r\.(\w+)\b")
+
+
+def columns_held_equal(sql: str) -> set[str]:
+    """The columns one blocking rule forces to agree on both sides."""
+    return {
+        left for left, right in _EQUALITY_RE.findall(sql or "") if left == right
+    }
+
+
+def untrainable_comparisons(config: dict) -> list[int]:
+    """Indexes of comparisons no EM training rule ever lets vary.
+
+    Splink cannot estimate a comparison whose column every training rule holds
+    equal: there is no disagreement inside the training block to learn from, so
+    the level comes back with no m probability and contributes **nothing** to
+    the score. It is silent — the run finishes, the comparison is listed, and
+    it counts for zero. The PSC person track shipped this way and accepted
+    pairs 37 birth-years apart.
+    """
+    rules = config.get("em_blocking_rules")
+    if not isinstance(rules, list) or not rules:
+        return []
+    held = [columns_held_equal(rule) for rule in rules if isinstance(rule, str)]
+    if not held:
+        return []
+    comparisons = config.get("comparisons")
+    if not isinstance(comparisons, list):
+        return []
+    stuck = []
+    for index, comparison in enumerate(comparisons):
+        if not isinstance(comparison, dict):
+            continue
+        column = comparison.get("column")
+        if column and all(column in fixed for fixed in held):
+            stuck.append(index)
+    return stuck
+
+
+def linkage_warnings(settings, ruleset: dict = None) -> list[dict]:
+    """Things that are legal but will not do what the user meant.
+
+    Warnings never block a save. They are the difference between a run that is
+    wrong and a run that is wrong in a way nobody notices.
+    """
+    warnings: list[dict] = []
+    if not isinstance(settings, dict):
+        return warnings
+    for track in TRACK_KEYS:
+        config = track_settings(settings, track)
+        if not config:
+            continue
+        for index in untrainable_comparisons(config):
+            comparison = config["comparisons"][index]
+            warnings.append({
+                "path": f"linkage_settings.tracks.{track}.comparisons[{index}]",
+                "message": (
+                    "No training rule lets this comparison vary, so the model cannot "
+                    "learn its weight and it will count for nothing. Add an "
+                    f"em_blocking_rule that does not hold '{comparison.get('column')}' "
+                    "equal."
+                ),
+            })
+    return warnings
+
+
 def validate_linkage_settings(settings, ruleset: dict, raw_columns) -> list[dict]:
     """Every problem with *settings*, as ``[{path, message}]``. Empty means good.
 
