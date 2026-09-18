@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+507,TRUE,high,Same entity NV/SA is Belgian legal form suffix
+778,FALSE,high,PTC suffix indicates different trustee entity
+691,FALSE,high,ZFM suffix indicates different Madeira free zone entity
+292,FALSE,high,Core names differ SIAVONGA vs ZAYONA
+332,FALSE,high,Core names differ LOWRY vs CAROLA
+433,FALSE,high,Core names differ LOWRY vs PR
+269,TRUE,high,M8 and M 8 are same entity spacing only
+845,FALSE,high,Core names differ AMR vs BRAYMOOR
+645,FALSE,high,Core names differ AMR vs FARAH
+751,FALSE,high,Core names differ AMR vs MGH
+752,FALSE,high,Core names differ AMR vs MP
+753,FALSE,high,Core names differ AMR vs MAY
+644,FALSE,high,Core names differ DELAND vs ELENA
+395,TRUE,high,IJ SEVEN and IJSEVEN identical with space only
+1065,FALSE,medium,Core names SANTINO vs SANSIN differ
+290,FALSE,high,BNF suffix indicates different beneficial entity
+805,FALSE,high,Different jurisdictions SARL Luxembourg vs LTD and different legal form
+643,FALSE,high,Core names differ PRINCESLAND vs KINGCLAVEN
+187,TRUE,high,J BALLANTYNE and J.BALLANTYNE same name punctuation only
+624,FALSE,high,Core names differ FLAXBY vs FLYNN
+613,FALSE,high,Core names differ MILL vs LW
+167,TRUE,high,Same name THE vs no THE trivial article difference
+870,FALSE,high,Core names differ ELMDON vs ESTON
+391,FALSE,high,PTC suffix indicates different trustee entity
+254,TRUE,high,Same name punctuation differences only
+561,FALSE,high,Core names differ CARNIVAL vs SCRIVAN
+843,FALSE,high,Core names differ CARNIVAL vs CHICARA
+92,TRUE,high,Same entity punctuation differences SA vs S.A.
+997,FALSE,high,NAG vs NAC different abbreviation different entity
+227,TRUE,high,RH COMPASS SARL same entity spacing and punctuation only
+748,FALSE,high,Core names differ BRAVIO vs ORVALA
+286,FALSE,high,Core names differ MAYA vs YASAWA
+389,FALSE,high,Core names differ MAYA vs FY
+1060,FALSE,high,Core names differ EMAN vs STEGMAN
+560,FALSE,high,Core names differ WEST END GATE vs WEST END LETTINGS
+559,FALSE,high,Core names differ WEST END INVESTMENTS vs WEST END LETTINGS
+265,FALSE,high,Core names differ ECHO vs METZO
+216,FALSE,high,Core names differ ECHO vs EDO
+1059,FALSE,high,Core names differ ECHO vs VICO
+840,TRUE,high,DH SECURITIES same entity punctuation spacing only
+194,TRUE,high,PTE LTD and PRIVATE LIMITED same Singaporean legal form
+642,FALSE,high,Core names differ CORDALE vs IVORDALE
+70,TRUE,high,DELIVEST SA same entity SA suffix dropped
+221,FALSE,high,Core names differ CADMORE vs MORLEY
+329,FALSE,high,Core names differ TONI vs ATOMIC
+423,FALSE,high,Core names differ TONI vs MADINAT
+839,FALSE,high,Core names differ INTEGRA vs ANISE
+747,TRUE,high,BVI suffix qualifier same core NETWORK LONDON
+1057,FALSE,high,Core names differ SAMOS vs SANE
+599,FALSE,high,Core names differ SAMOS vs ARDROSS
+1056,FALSE,medium,SAMOS vs SAMONA similar but different entities
+301,FALSE,high,Core names differ TAS vs TAU
+328,FALSE,high,DANDARA LAND vs DANDARA different entity with LAND qualifier
+557,TRUE,high,Same entity LTD suffix only difference
+297,FALSE,high,Core names differ HANOVER vs VERO

@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+507,TRUE,high,Same core name; legal form varies
+778,TRUE,high,Same core name; legal form varies
+691,TRUE,high,Same core name; legal form varies
+292,UNCERTAIN,medium,Minor token differences
+332,UNCERTAIN,medium,Minor token differences
+433,UNCERTAIN,medium,Minor token differences
+269,TRUE,high,Same tokens; spacing varies
+845,UNCERTAIN,medium,Minor token differences
+645,UNCERTAIN,medium,Minor token differences
+751,UNCERTAIN,medium,Minor token differences
+752,UNCERTAIN,medium,Minor token differences
+753,UNCERTAIN,medium,Minor token differences
+644,UNCERTAIN,medium,Minor token differences
+395,TRUE,high,Same tokens; spacing varies
+1065,FALSE,high,No common tokens in core
+290,TRUE,high,Same core name; legal form varies
+805,TRUE,high,Same tokens; spacing varies
+643,UNCERTAIN,medium,Minor token differences
+187,TRUE,high,Same tokens; spacing varies
+624,FALSE,high,No common tokens in core
+613,UNCERTAIN,medium,Minor token differences
+167,TRUE,high,Same core name; legal form varies
+870,UNCERTAIN,medium,Minor token differences
+391,TRUE,high,Same core name; legal form varies
+254,FALSE,high,Different core names
+561,UNCERTAIN,medium,Minor token differences
+843,UNCERTAIN,medium,Minor token differences
+92,UNCERTAIN,medium,Minor token differences
+997,UNCERTAIN,medium,Minor token differences
+227,TRUE,high,Same tokens; spacing varies
+748,UNCERTAIN,medium,Minor token differences
+286,FALSE,high,No common tokens in core
+389,FALSE,high,No common tokens in core
+1060,FALSE,high,No common tokens in core
+560,UNCERTAIN,medium,Minor token differences
+559,UNCERTAIN,medium,Minor token differences
+265,UNCERTAIN,medium,Minor token differences
+216,UNCERTAIN,medium,Minor token differences
+1059,UNCERTAIN,medium,Minor token differences
+840,TRUE,high,Same tokens; spacing varies
+194,TRUE,high,Same core name; legal form varies
+642,FALSE,high,No common tokens in core
+70,TRUE,high,Same core name; legal form varies
+221,UNCERTAIN,medium,Minor token differences
+329,UNCERTAIN,medium,Minor token differences
+423,UNCERTAIN,medium,Minor token differences
+839,UNCERTAIN,medium,Minor token differences
+747,UNCERTAIN,medium,Minor token differences
+1057,UNCERTAIN,medium,Minor token differences
+599,UNCERTAIN,medium,Minor token differences
+1056,UNCERTAIN,medium,Minor token differences
+301,FALSE,high,No common tokens in core
+328,UNCERTAIN,medium,Minor token differences
+557,TRUE,high,Same core name; legal form varies
+297,UNCERTAIN,medium,Minor token differences

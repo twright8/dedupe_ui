@@ -1,0 +1,52 @@
+pair_id,verdict,confidence,reason
+879,TRUE,high,Legal form
+1020,FALSE,high,Different
+71,FALSE,high,Different
+595,FALSE,high,Different
+899,TRUE,high,Legal form
+885,FALSE,high,Different
+707,FALSE,high,Different
+284,FALSE,high,Different
+285,FALSE,high,Different
+385,FALSE,high,Different
+384,FALSE,high,Different
+485,FALSE,high,Different
+733,FALSE,high,Different
+193,TRUE,high,Legal form
+406,FALSE,high,Different
+1071,FALSE,high,Different
+87,FALSE,high,Different
+404,FALSE,high,Different
+403,FALSE,high,Different
+897,FALSE,high,Different
+957,TRUE,high,Legal form
+99,FALSE,high,Different
+590,FALSE,high,Different
+370,FALSE,high,Different
+717,FALSE,high,Different
+716,FALSE,high,Different
+367,FALSE,high,Different
+256,FALSE,high,Different
+1013,FALSE,high,Different
+611,FALSE,high,Different
+276,FALSE,high,Different
+209,FALSE,high,Different
+610,FALSE,high,Different
+995,FALSE,high,Different
+345,FALSE,high,Different
+275,FALSE,high,Different
+1010,FALSE,high,Different
+1009,FALSE,high,Different
+767,FALSE,high,Different
+535,FALSE,high,Different
+541,TRUE,high,Legal form
+465,FALSE,high,Different
+525,TRUE,high,Legal form
+1007,FALSE,high,Different
+635,FALSE,high,Different
+362,FALSE,high,Different
+1050,FALSE,high,Different
+510,FALSE,high,Different
+400,FALSE,high,Different
+86,TRUE,high,Legal form
+270,FALSE,high,Different

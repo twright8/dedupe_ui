@@ -1,0 +1,41 @@
+pair_id,verdict,confidence,reason
+592,FALSE,high,MARTIAN vs CAMBRIAN: entirely different core names
+718,FALSE,high,MARTIAN vs MARITZA: different core names
+688,TRUE,high,YEUZT vs YEUTZ: single-character transposition; same entity
+89,TRUE,high,Identical name; SARL vs LTD legal form difference only
+512,TRUE,high,Y S vs YS: spacing difference only; same entity
+967,FALSE,high,SY vs YS: initials reversed; different entity
+435,UNCERTAIN,low,RHA vs RAHA: inserted letter; could be typo or different entity
+436,FALSE,high,RHA vs RHONA: different names; unrelated
+974,TRUE,high,Identical name; SARL vs LTD legal form difference only
+156,TRUE,high,BESCHRAENKTER vs BESCHRANKTER: umlaut transliteration; same entity
+434,FALSE,high,QUEEN STREET vs QUEENS GATE: different core name tokens
+872,TRUE,high,Identical name; extra LTD in one version; same entity
+460,FALSE,high,ROUND SQUARE vs ALLEPAM: different unique identifiers
+461,FALSE,high,ROUND SQUARE vs GIEKI: different unique identifiers
+462,FALSE,high,ROUND SQUARE vs MAUD: different unique identifiers
+933,TRUE,high,P G P vs PGP: spacing difference only; same entity
+888,FALSE,high,MILES LAMBETH vs QUAYSIDE: different location identifiers
+887,FALSE,high,MILES LAMBETH vs HEBER ST: different location identifiers
+420,TRUE,high,INCORPORATION vs INC: abbreviation of same legal form
+293,FALSE,medium,INN present in OCOD but absent in ROE; different entities
+895,FALSE,high,JMC vs J F: different initials; different entities
+217,FALSE,high,JMC vs PC: different initials; different entities
+218,FALSE,high,JMC vs REMC: different initials; different entities
+796,FALSE,high,JMC vs CK: different initials; different entities
+315,FALSE,high,NBF vs BO: different initials; different entities
+316,FALSE,high,NBF vs DNS: different initials; different entities
+574,FALSE,high,ADEOGUN vs ARUNDEL: different core names
+1051,FALSE,high,ADEOGUN vs SANE: different core names
+363,FALSE,high,UPLEIGH vs GAELIC: different core names
+365,FALSE,high,UPLEIGH vs ISLE: different core names
+246,FALSE,high,BRISTOL vs ALEXANDRIA: different location suffix
+247,FALSE,high,BRISTOL vs ALPHA: different location suffix
+248,FALSE,high,BRISTOL vs BIRMINGHAM: different location suffix
+251,FALSE,high,BRISTOL vs MANCHESTER: different location suffix
+252,FALSE,high,BRISTOL vs READING: different location suffix
+249,FALSE,high,BRISTOL vs CREDITON: different location suffix
+250,FALSE,high,BRISTOL vs HULL: different location suffix
+922,FALSE,high,EDEN vs EDGEFERN: different core names
+517,FALSE,high,MANCOB vs SIGMACON: different core names
+529,TRUE,high,Identical name; LLC suffix absent in OCOD; same entity

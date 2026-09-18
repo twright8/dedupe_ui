@@ -1,0 +1,55 @@
+pair_id,verdict,confidence,reason
+278,FALSE,high,Core name LIS vs SLBI completely different
+378,FALSE,high,Core name LIS vs GSS completely different
+713,FALSE,high,Core name LIS vs SALE completely different
+1036,FALSE,high,Core initials TG vs WG differ
+902,FALSE,high,Core name GWM vs WG differ
+1037,TRUE,high,WG PROPERTIES = W G PROPERTIES spacing only
+153,TRUE,high,GOLDV = GOLD V trivial spacing difference
+304,TRUE,medium,SJP WEST GEORGE match; ST suffix likely same entity
+52,FALSE,high,Core initials BB vs CH differ
+427,TRUE,high,NEUVA vs NUEVA single-char typo same entity
+303,FALSE,high,Core name KAQ vs SKE completely different
+425,FALSE,high,Core name KAQ vs MUK completely different
+426,FALSE,high,Core name KAQ vs PAX completely different
+330,FALSE,high,Core name KAQ vs AUK completely different
+515,TRUE,medium,Same entity; LONDON BRANCH qualifier dropped in ROE
+192,TRUE,high,Identical core name; S.A. punctuation variant only
+701,TRUE,high,Identical core name; NV legal form absent in ROE only
+530,TRUE,high,Identical name; punctuation variant only
+710,FALSE,high,Core name AMINA vs OMNA completely different
+376,FALSE,high,Core name AMINA vs KAMCHIN completely different
+709,TRUE,high,BOX+ vs BOX + trivial spacing; identical otherwise
+1031,FALSE,high,Core name WESTERINGS vs WESTLINER differ
+788,FALSE,high,Core name PC vs CD differ
+890,FALSE,high,Core name PC vs FY differ
+708,FALSE,high,Core name CNC vs OMNA completely different
+508,TRUE,medium,Same entity; BRANCH UK qualifier absent in ROE
+298,FALSE,high,PROPERTY vs PRIVATE different modifier word
+152,FALSE,high,Core name SAKSON vs FERSSON completely different
+619,FALSE,high,Core name PARKDEAN vs KAPTURE completely different
+547,FALSE,high,Core name MANDER vs SHERMAN completely different
+617,UNCERTAIN,medium,FINANCIAL vs FINANCING close but distinct word forms
+660,TRUE,high,SCANDINAVIAN BRANCH = SCANDINAVIA same entity variant
+944,FALSE,high,Core name HAMMER vs NAGEL different project names
+943,TRUE,high,HAMMER matches; punctuation variant only
+257,TRUE,high,PIONEER POINT LP = PIONEER POINT LIMITED PARTNERSHIP
+615,TRUE,high,Identical core; BVI jurisdiction suffix in ROE only
+474,TRUE,high,Identical name; punctuation variant only
+490,TRUE,high,Same core; LIMITED PARTNERSHIP suffix dropped in ROE
+479,TRUE,high,DIMENSIONS vs DIMENSION trivial plural; same entity
+570,FALSE,high,Core name HAYA vs AVIVA completely different
+571,FALSE,high,Core name HAYA vs BUCHANAN completely different
+1049,FALSE,high,Core name HAYA vs TAY completely different
+289,FALSE,high,Core name MAPLELIGHT vs SIMPLEPATH completely different
+725,TRUE,high,Identical core name; punctuation variant only
+141,TRUE,high,KOELNER = KOLNER umlaut transliteration; same entity
+724,FALSE,high,Core name KENNOCH vs LENNOX completely different
+793,FALSE,high,Core name CARELLI vs CARLISLE completely different
+723,TRUE,high,NEWPEAK = NEW PEAK trivial spacing same entity
+597,FALSE,high,Core name OHO vs DAGWOOD completely different
+721,FALSE,high,Core name OHO vs MP completely different
+386,FALSE,high,Core name OHO vs JOOD completely different
+596,FALSE,high,Core name OHO vs COOK completely different
+720,FALSE,high,Core name OHO vs MGH completely different
+41,TRUE,high,Identical name; punctuation variant only

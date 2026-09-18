@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+816,FALSE,high,DESIGNATED ACTIVITY COMPANY vs LIMITED different legal form
+824,TRUE,high,Same core name BELMORE CORP SA punctuation only differs
+623,FALSE,high,IM INVESTMENTS vs HAMIDA INVESTMENTS different core names
+177,TRUE,high,INDIMMO NV vs INDIMMO same entity NV boilerplate only differs
+871,TRUE,high,LC vs L C ABELHEIM trivial spacing difference only
+950,TRUE,medium,MOHAMMED ALI AL DUKHAN vs MOHAMMAD ALI ALDUKHAN same entity transliteration
+448,FALSE,high,JU INVESTMENTS vs MGH INVESTMENT completely different core names
+450,FALSE,high,JU INVESTMENTS vs MAY INVESTMENTS different core names
+451,FALSE,high,JU INVESTMENTS vs PAULA INVESTMENTS different core names
+567,FALSE,high,JU INVESTMENTS vs VLJ INVESTMENT different core names
+449,FALSE,high,JU INVESTMENTS vs MP INVESTMENT different core names
+651,FALSE,high,JU INVESTMENTS vs JLI INVESTMENT different core names
+652,FALSE,high,JU INVESTMENTS vs JOOD INVESTMENTS different core names
+408,FALSE,high,HEATHERMARK vs HEALTHCARE different core names
+179,TRUE,high,ST MARTIN vs SAINT-MARTIN same entity abbreviated form
+516,TRUE,high,SARON vs SARON NV same entity legal suffix only differs
+405,FALSE,high,GALETTA vs GLEBE different core names
+443,TRUE,medium,PEEL LAND LINCOLN vs PEEL LP LAND LINCOLN same entity abbreviation LP
+857,FALSE,high,CENTRAL PROPERTIES vs CERIUM PROPERTIES different core names
+650,FALSE,high,CENTRAL PROPERTIES vs GLENCAIRN PROPERTIES different core names
+622,FALSE,high,DEVERON PROPERTIES vs EGERTON PROPERTY different core names
+548,TRUE,high,WALTER KNOLL AG CO KG vs WALTER KNOLL AG CO KG punctuation only
+912,TRUE,high,LANCASHIRE INVESTMENT DAC vs LANCASHIRE INVESTMENTS DAC same entity
+322,FALSE,high,K D PROPERTY vs AK PROPERTIES different core names
+620,TRUE,high,K D PROPERTY vs KD PROPERTY same entity spacing only
+785,TRUE,high,DEUTSCHE BORSE AG vs DEUTSCHE BORSE AKTIENGESELLSCHAFT AG abbreviated
+564,FALSE,high,ALRAHMA vs TALUMA different core names
+854,FALSE,high,ALRAHMA vs ALFARAN different core names
+195,TRUE,high,FRANCE MANCHE SA vs FRANCE MANCHE same entity suffix only
+339,UNCERTAIN,low,AGTON vs AUGHTON one letter differs could be typo or different
+82,TRUE,high,SA CEMUNNOS vs CEMUNNOS SA same entity word order differs
+48,TRUE,high,ALMANARA NATIONAL REAL ESTATE CO vs same entity LLC suffix
+891,FALSE,high,WATERMILL vs HAVERHILL different core names
+563,FALSE,high,TOMKIN PROPERTY vs TIMONA PROPERTIES different core names
+649,FALSE,high,VENTNOR ESTATES vs EATON ESTATES different core names
+648,FALSE,high,OVERLAND ENTERPRISES vs EVORA ENTERPRISES different core names
+437,TRUE,high,PANORAMIC HOLDINGS IOM vs PANORAMIC HOLDINGS same entity IOM suffix
+1069,FALSE,high,GF HOLDINGS vs SGUK HOLDINGS different core names
+401,TRUE,high,GF HOLDINGS vs G F HOLDINGS same entity spacing only
+972,TRUE,high,PACIFIC TECHNOLOGIES vs PACIFIC TECHNOLOGIES NEVIS same entity
+998,TRUE,high,OSBORNE AND CHAPPEL INTERNATIONAL SDN same entity BHD vs BERHAD
+806,FALSE,high,CAPITAL HOUSE vs HARROW different property names in series
+807,FALSE,high,CAPITAL HOUSE vs ST GABRIELS HALL different property names
+808,FALSE,high,CAPITAL HOUSE vs STAINES different property names in series
+760,TRUE,high,PEACELAND vs PEACE LAND same entity spacing only
+759,TRUE,high,MIKA1 vs MIKA 1 same entity spacing only
+852,TRUE,medium,ALBARRAK AND ALMULHEM vs ALBARRAK AND ALMUHEM one letter typo
+538,TRUE,high,ZEN KIARA SDNBHD vs ZEN KIARA SDN BHD same entity
+780,TRUE,high,ACTION INVESTMENTS vs ACTION INVESMENTS typo in ROE
+758,FALSE,high,STEMAR INVESTMENTS vs ROSELA INVESTMENTS different core names
+851,FALSE,high,STEMAR INVESTMENTS vs DEMARK INVESTMENTS different core names
+756,TRUE,high,MATRIX CONSTRUCTION vs MATRIX CONSTRUCTIONS trivial plural
+531,TRUE,high,WHITE HORSE HOLDINGS vs WHITE HORSE HOLDINGSLIMITED same entity
+606,FALSE,high,QUAVER HOLDINGS vs AVTAR HOLDINGS different core names
+399,FALSE,high,RADLEIGH INVESTMENTS vs GAELIC INVESTMENTS different core names

@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+35,TRUE,high,Same name INC suffix dropped
+37,FALSE,high,NECTAR vs ALDERTON different core names
+51,TRUE,high,SA expanded to SOCIEDAD ANONIMA same entity
+54,TRUE,high,Same name SDN.BHD punctuation variant only
+65,FALSE,high,SRL vs SPA different legal forms different entities
+117,FALSE,medium,ILLOVO SUGAR vs ILLOVO SUGAR AFRICA different entities
+137,TRUE,high,FR vs F R spacing difference only
+205,FALSE,high,JOYOUS vs JOOD different core names
+206,FALSE,high,JOYOUS vs JOSMA different core names
+208,FALSE,high,WAILY vs KIWI different core names
+211,TRUE,high,Same core EGPAT HOLDING BVI suffix only
+229,TRUE,high,MAPLELEAF vs MAPLE LEAF spacing difference only
+280,FALSE,high,ROMULUS vs TROILUS different core names
+291,TRUE,high,TP vs T P spacing difference only
+308,FALSE,high,BCAP RD 13 vs BCAP RD 13 A different unit
+309,FALSE,high,BCAP RD 13 vs BCAP RD 13 B different unit
+313,FALSE,high,DAR vs AVTAR different core names
+314,FALSE,high,DAR vs D M different core names
+321,TRUE,high,CLOUDHQ vs CLOUD HQ spacing difference only
+334,FALSE,high,ARIS vs ALBUS different core names
+335,FALSE,high,ARIS vs CASA different core names
+336,FALSE,high,MIKADO vs DIORA different core names
+338,FALSE,high,CATLENA vs CLAYDEN different core names
+440,TRUE,high,NUESTATE vs NU ESTATE same core spacing only
+447,FALSE,high,JOYOUS vs LOUKAS different core names
+489,TRUE,high,Same name SDN.BHD punctuation variant only
+492,TRUE,high,SUITE vs SUITES trivial plural difference
+521,TRUE,high,Same core name LTD suffix only difference
+532,TRUE,high,CLG is legal form abbreviation for same entity
+533,FALSE,medium,COMPANY LIMITED BY GUARANTEE is different legal form
+539,FALSE,high,TANDI vs TAVINA different core names
+626,FALSE,high,INSIGNIA vs INFINITY different core names
+627,FALSE,high,DEEL vs ELENA different core names
+628,FALSE,high,DEEL vs EMBLEM different core names
+630,FALSE,high,DEEL vs GENIE different core names
+631,FALSE,high,DEEL vs JESEM different core names
+633,FALSE,high,CATLENA vs GRANET different core names
+634,FALSE,high,KINGSLAND vs KINGLAKE different core names
+693,TRUE,high,Same core HOLDINGS suffix dropped
+694,FALSE,high,NEHASIM vs ASSETS different descriptors different entities
+714,FALSE,high,ROMULUS vs MJS different core names
+731,FALSE,high,DAR vs RIA different core names
+810,FALSE,high,BRYNNA vs AYR different core names
+811,TRUE,high,BRYNWOOD vs BYRNWOOD letter transposition typo
+819,FALSE,high,MUCH HOOLE vs LSA ONE different sites
+820,FALSE,high,MUCH HOOLE vs LSA TWO different sites
+925,TRUE,high,LIMTIED is typo for LIMITED same entity
+935,TRUE,high,Same name SPRL legal form suffix dropped
+947,TRUE,high,COPORATION is typo for CORPORATION same entity
+1011,TRUE,high,RIVERVALE vs RIVER VALE spacing difference only
+1012,FALSE,high,RIVERVALE OVERSEAS vs RIVERDALE ESTATES different names
+1016,FALSE,high,GOLDEN vs MEADOW different core names
+1017,FALSE,high,EGPAT vs PAX completely different core names
+1019,FALSE,high,ROMSEY vs ROSELA different core names
+1021,FALSE,high,SAJARA vs MARKASA different core names

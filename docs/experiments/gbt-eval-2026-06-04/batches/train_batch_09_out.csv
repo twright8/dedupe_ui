@@ -1,0 +1,10 @@
+pair_id,verdict,confidence,reason
+466,FALSE,high,Different core entity names
+122,FALSE,high,Different core entity names
+668,FALSE,high,Different core entity names
+6,TRUE,high,Same core name
+453,FALSE,high,Different core entity names
+454,FALSE,high,Different core entity names
+861,FALSE,high,Different core entity names
+862,FALSE,high,Different core entity names
+859,TRUE,high,Same core name

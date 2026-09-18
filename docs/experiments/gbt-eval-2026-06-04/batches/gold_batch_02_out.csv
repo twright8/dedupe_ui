@@ -1,0 +1,41 @@
+pair_id,verdict,confidence,reason
+412,FALSE,high,YUMA vs HAMLYN - different core names
+1078,FALSE,high,YUMA vs UK PROPERTY - different core names
+736,FALSE,high,YUMA vs MAM PROPERTY - different core names
+679,TRUE,high,Same tokens; EST and CONTRACTING swapped; same entity
+411,TRUE,high,HANSONS vs HANSON - trivial s difference; same entity
+1077,FALSE,high,MARINA vs TARQUIN - different core names
+410,FALSE,high,MARINA vs KIRAMA - different core names
+1074,FALSE,high,PENTOS vs TANDEM - different core names
+732,FALSE,high,PENTOS vs NEWTOP - different core names
+239,TRUE,high,PWAR LLC vs PWAR LTD - same name; legal form abbreviation only
+282,TRUE,high,T B vs T.B. - same initials; trivial punctuation difference
+348,FALSE,high,AARI vs ALKARBAR - different core names
+347,FALSE,medium,AARI INVESTMENT vs AARI INVESTMENT HOLDINGS - extra HOLDINGS token
+813,TRUE,high,Same name; L P vs LP trivial spacing difference
+145,TRUE,high,IDEAL COMBI vs IDEALCOMBI - space only difference; same entity
+255,FALSE,high,NORA vs OR - different core names
+575,FALSE,high,R W vs B B - different initials
+366,FALSE,high,R W vs F R - different initials
+274,FALSE,high,HEMBA vs LOREMAR - different core names
+608,FALSE,high,HEMBA vs ACHAEA - different core names
+609,FALSE,high,HEMBA vs DEMARK - different core names
+1068,FALSE,high,HEMBA vs THEOBALD - different core names
+528,TRUE,high,COKG vs CO KG - trivial spacing; identical entity
+585,FALSE,high,HILL vs AKHAI - different core names
+101,TRUE,high,COMPNAY is typo of COMPANY; same name; trivial typo
+83,FALSE,high,27B vs 27A - different unit numbers
+84,TRUE,high,27B vs 27 B - same unit; trivial spacing difference
+272,FALSE,high,PETRA vs PETERMAN - different core names
+273,FALSE,high,PETRA vs PRIMAL - different core names
+1067,FALSE,high,PETRA vs SPARA - different core names
+271,FALSE,high,PETRA vs PENRITH - different core names
+398,FALSE,high,PETRA vs KAPTURE - different core names
+140,TRUE,high,Same core name; LTD PARTNERSHIP suffix omitted; same entity
+64,TRUE,high,Identical core name; SA suffix dropped in ROE
+456,TRUE,high,Identical core; CO suffix dropped in ROE
+981,TRUE,high,PAPERCLIP vs PAPER CLIP - space only difference; same entity
+244,FALSE,high,RH vs RBC - different initials/companies
+823,FALSE,high,FERN vs BRONZE - different core names
+711,TRUE,high,OAK LODGE vs OAKLODGE - space only difference; same entity
+582,TRUE,high,C B vs CB - trivial spacing of initials; same entity

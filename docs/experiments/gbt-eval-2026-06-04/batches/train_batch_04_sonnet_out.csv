@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+569,FALSE,high,CARGO vs PA completely different core names
+923,FALSE,high,FAWZYA vs PA completely different core names
+924,FALSE,high,GINVESTMENT vs PA different core names
+1047,FALSE,high,ZAHRA vs PA completely different core names
+568,FALSE,high,CA INVESTMENTS vs PA INVESTMENTS different core names
+342,FALSE,high,CENTURY vs CANTEL different core names
+341,FALSE,high,BETHNAL vs CANTEL different core names
+1045,FALSE,high,SWAN vs SAN different core names
+583,TRUE,high,CARIBINA vs CARABINA minor transposition typo same entity
+33,FALSE,medium,ROE adds CONTRACTING making it a different entity
+392,TRUE,high,GIPUFEN LIMTED vs GIPUFEN LIMITED trivial typo same entity
+765,TRUE,high,ULYSESS vs ULYSSES trivial typo same entity
+441,TRUE,high,Same entity in liquidation status suffix only differs
+80,FALSE,high,27B vs 27A different numbered unit
+79,TRUE,high,27A vs 27A same unit trivial spacing difference
+604,FALSE,high,BORRET vs JOLETA completely different core names
+1064,FALSE,high,THEOBALD vs JOLETA completely different core names
+439,FALSE,high,OCHALA vs HB completely different core names
+438,TRUE,high,BOX+ vs BOX + trivial spacing same entity
+603,FALSE,high,ARINDEL vs VALERINA completely different core names
+1061,FALSE,high,SKE vs WISKE different core names
+678,TRUE,high,Same name word order reordering EST vs CONTRACTING EST
+266,FALSE,high,LENNOX vs NOLAN completely different core names
+267,FALSE,high,NINA vs NOLAN completely different core names
+602,FALSE,high,ALTO vs NOLAN completely different core names
+764,FALSE,high,SANE vs SIREN different core names
+504,FALSE,medium,ROE drops TRADING making scope potentially different entity
+110,TRUE,high,SA vs AE both Greek legal form abbreviations same entity
+601,FALSE,high,DH vs ADAM completely different core names
+600,FALSE,high,ASBJ vs BYAM completely different core names
+305,FALSE,high,SOL vs MS different core names
+430,FALSE,high,MARS vs MS different core names
+431,FALSE,medium,MJS vs MS close but different initials
+577,FALSE,high,BORLAND vs OVERLAND different core names
+155,TRUE,high,ESI REX SCI adds French legal form suffix same entity
+121,TRUE,high,IMOGA LDA vs IMOGA LDA trivial punctuation same entity
+869,TRUE,high,LTD vs AB Swedish legal form same entity
+956,TRUE,medium,NIGERIA vs NIGERIAN reinsurance corp likely same entity
+801,TRUE,high,BASSETT vs BASSET trivial typo same entity
+1055,TRUE,high,EXTENSIONS vs EXTENSIONSS trivial typo same entity
+1027,TRUE,high,LIMTED vs LIMITED trivial typo same entity
+952,TRUE,high,MUSAL NIG abbreviation of MUSAL NIGERIA same entity
+982,TRUE,high,VERMOGENSVERWALTUNG vs VERMOEGENSVERWALTUNGS trivial spelling variant
+661,TRUE,high,SP ZO.O vs SP.ZO.O trivial punctuation Polish legal form
+1006,TRUE,medium,PITTMAN vs PITMAN single char typo likely same entity
+498,TRUE,high,ESTABLISHMENT vs ANSTALT both Liechtenstein legal forms same entity
+948,TRUE,high,PEOPLES vs PEOPLES abbreviation same core entity
+214,FALSE,high,KELANDER vs BEAVER completely different core names
+1023,FALSE,high,MASON vs ASH completely different core names
+576,FALSE,high,CHAMFRON vs HARUTO completely different core names
+353,FALSE,high,ANBEEZ vs YARSEN completely different core names
+354,FALSE,high,BERLLAN vs YARSEN completely different core names
+771,TRUE,high,COMPANY dropped trivial boilerplate difference same entity
+212,TRUE,high,S. A. vs S.A. trivial punctuation same entity
+351,FALSE,high,ALBERT vs AREEB different core names

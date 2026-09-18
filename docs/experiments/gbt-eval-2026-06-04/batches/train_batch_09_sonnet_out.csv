@@ -1,0 +1,10 @@
+pair_id,verdict,confidence,reason
+466,FALSE,high,FLINTSTONE vs TONTINE different core names
+122,FALSE,high,MARREL vs ELA different core names
+668,FALSE,high,PAL vs ORYX different core names
+6,TRUE,high,Same entity OF vs FOR trivial preposition difference
+453,FALSE,high,MM vs TG different core names
+454,FALSE,high,MM vs WG different core names
+861,FALSE,high,MM vs FD different core names
+862,FALSE,high,MM vs GWM different core names
+859,TRUE,high,Same core name INC vs INCORPORATED ESTABLISHMENT legal form

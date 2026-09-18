@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+backend/.venv/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Build output
+backend/static/
+
+# Data (runtime)
+backend/data/
+data/
+
+# Environment
+.env
+*.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Mockup artifacts (development only)
+mockup/
+roeocod.zip

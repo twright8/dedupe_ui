@@ -1,0 +1,52 @@
+pair_id,verdict,confidence,reason
+879,TRUE,high,Identical core name legal form suffix dropped in ROE
+1020,FALSE,high,Different core names FW vs RUFO
+71,UNCERTAIN,medium,DOMINION vs DOMINIUM near-match possible typo
+595,FALSE,high,Different location qualifiers CHURCH ROAD vs LIVERPOOL ROAD SOUTH
+899,TRUE,high,Identical core name INC vs LIMITED legal form difference only
+885,TRUE,high,Identical name accent and diacritic variation only
+707,FALSE,high,Different core names TRAVCORP vs PROPERTY
+284,FALSE,high,Different initials FS vs TG
+285,FALSE,high,Different initials FS vs WG
+385,FALSE,high,Different initials FS vs FD
+384,FALSE,high,Different initials FS vs FD
+485,TRUE,high,Identical tokens SENSE PROJECT vs SENSEPROJECT spacing only
+733,FALSE,high,Different core names PEACE AND WEALTH vs PEACE TOWER
+193,FALSE,medium,ROE lacks CO KG suffix indicating different entity type
+406,FALSE,high,Different core names PEPITA vs DUPLICATE
+1071,FALSE,high,Different core names PEPITA vs TOBIE
+87,TRUE,high,Identical core name SRLS vs SRL S formatting variant
+404,TRUE,high,Identical name GEE VEE vs GEEVEE spacing only
+403,FALSE,high,Different core names RED vs KARAME
+897,FALSE,high,Different core names DAISY vs FLASH
+957,TRUE,high,Identical core name INC suffix absent in ROE
+99,FALSE,high,Different core names NOUR vs ASPRO
+590,FALSE,high,Different core names IH vs AWALI
+370,FALSE,high,Different core names DUAIJ vs HAMIDA
+717,FALSE,high,Different core names MAO vs NOMIS
+716,FALSE,high,Different core names MAO vs MALDON
+367,FALSE,high,Different initials PML vs GP
+256,FALSE,medium,BNF qualifier indicates different branch entity
+1013,TRUE,high,Identical name IN ADMINISTRATION is status not different entity
+611,FALSE,high,Different core names PALMERA vs BALMER
+276,FALSE,high,Different core names PALMERA vs PLUMERIA
+209,FALSE,high,Different core names WINSLEY vs HANLEY
+610,FALSE,high,Different core names AL MAJED vs AA LEND
+995,FALSE,medium,PIETERPIKZONEN vs PIETERPIK ZONEN suffix changes entity meaning
+345,TRUE,high,Identical tokens PHC16 vs PHC 16 spacing only
+275,FALSE,high,Different core names STERLINVESTMENTS vs ROSELA
+1010,FALSE,high,Different core names PREMIUM vs PAMIR
+1009,FALSE,high,Different initials VMSB vs SMA
+767,FALSE,high,Different initials VMSB vs SV
+535,TRUE,high,Identical name T U vs TU spacing only
+541,TRUE,high,Identical core name INCORPORATION vs INC abbreviation only
+465,FALSE,high,ROE includes OCH ESSITY AKTIEBOLAGS indicating different combined entity
+525,FALSE,medium,AG Swiss form vs LTD different legal form possible different entity
+1007,FALSE,high,Different core names CJL vs OCHALA
+635,FALSE,high,Different function MANAGING II vs CO-TRUSTEE in name
+362,FALSE,high,Different core names OMNA vs DUGONG
+1050,FALSE,high,Different core names OMNA vs SWAN
+510,TRUE,high,SS is abbreviation for SOCIETA SEMPLICE same entity
+400,FALSE,high,Different core names DENWOOD vs LADYWOOD
+86,TRUE,high,Identical name LIMITED suffix absent in OCOD
+270,FALSE,high,Different core names CLAVERTON vs LETON

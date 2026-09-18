@@ -1,0 +1,35 @@
+pair_id,verdict,confidence,reason
+1041,TRUE,high,Identical name; punctuation and spacing differences only
+946,FALSE,high,Different Roman numeral suffix; XLV vs CCCXXIV
+945,FALSE,high,Different Roman numeral suffix; XLV vs CCCLXIII
+901,FALSE,high,Different core name; FLEET vs FLEXILIS
+128,FALSE,high,Different legal form; GmbH & Co KG vs GmbH alone
+581,FALSE,high,Different core name; DAWN vs DH
+36,TRUE,high,Same entity; DEKA BANK vs DEKABANK spacing only
+973,UNCERTAIN,medium,ROE name drops PROPERTIES; may be same or different entity
+68,FALSE,high,Different core name; BELLAY vs BEAM
+69,FALSE,high,Different core name; BELLAY vs BELL
+699,FALSE,high,Different number; HOLDING IV vs III
+700,TRUE,medium,Same number IV; HOLDING omitted in ROE but same entity
+237,FALSE,high,Different core name; NOVITA vs NOVANAT
+238,FALSE,high,Different core name; NOVITA vs NOVIANE
+906,TRUE,high,Same core name; BVI jurisdiction tag in OCOD only
+1035,TRUE,high,Obvious typo WESTMIINSTER vs WESTMINSTER; same entity
+113,TRUE,medium,Same core name KALIVES; SA vs LIMITED legal form difference
+927,TRUE,high,Typo PHONEIX vs PHOENIX; same entity
+127,TRUE,high,Same name; BV legal suffix absent in OCOD only
+799,TRUE,high,Minor typo ALFRATRADE vs ALFATRADE; same entity
+977,FALSE,high,Different core name; SOHA vs MJS
+978,FALSE,high,Different core name; SOHA vs OCHALA
+979,FALSE,high,Different core name; SOHA vs RORA
+523,FALSE,high,Different core name; SOHA vs SOL
+57,FALSE,high,Different core name; DASARA vs DANDARA
+455,FALSE,high,Different core name; OR vs MARATIKA
+123,FALSE,high,Different core name; AK vs KD
+684,FALSE,high,Different core name; AK vs LSA
+28,TRUE,high,Same name; A K vs AK spacing only
+471,TRUE,high,Same name; UK1 vs UK 1 spacing only
+53,FALSE,high,Different core name; AMODEO vs DEMARK
+148,FALSE,high,Different core name; AMODEO vs ELWOOD
+139,FALSE,high,Different core name; AJM vs JALAL
+929,FALSE,high,Different core name; AJM vs MAM

@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+569,FALSE,high,Different core names
+923,FALSE,high,Different core names
+924,FALSE,high,Different core names
+1047,FALSE,high,Different core names
+568,FALSE,high,Different core names
+342,FALSE,high,Different core names
+341,FALSE,high,Different core names
+1045,FALSE,high,Different core names
+583,FALSE,high,Different core names
+33,FALSE,high,Different core names
+392,FALSE,high,Different core names
+765,FALSE,high,Different core names
+441,TRUE,medium,Boilerplate word variation
+80,FALSE,high,Different numbered units
+79,FALSE,high,Different numbered units
+604,FALSE,high,Different core names
+1064,FALSE,high,Different core names
+439,FALSE,high,Different core names
+438,FALSE,high,Different core names
+603,FALSE,high,Different core names
+1061,FALSE,high,Different core names
+678,FALSE,high,Different core names
+266,FALSE,high,Different core names
+267,FALSE,high,Different core names
+602,FALSE,high,Different core names
+764,FALSE,high,Different core names
+504,TRUE,medium,Boilerplate word variation
+110,TRUE,medium,Typo or spelling variant (edit dist 2)
+601,FALSE,high,Different core names
+600,FALSE,high,Different core names
+305,FALSE,high,Different core names
+430,FALSE,high,Different core names
+431,FALSE,high,Different core names
+577,FALSE,high,Different core names
+155,UNCERTAIN,low,Cannot confidently determine match
+121,TRUE,medium,Boilerplate word variation
+869,UNCERTAIN,low,Cannot confidently determine match
+956,FALSE,high,Different core names
+801,FALSE,high,Different core names
+1055,FALSE,high,Different core names
+1027,FALSE,high,Different core names
+952,FALSE,high,Different core names
+982,FALSE,high,Different core names
+661,FALSE,high,Different core names
+1006,FALSE,high,Different core names
+498,TRUE,medium,Boilerplate word variation
+948,FALSE,high,Different core names
+214,FALSE,high,Different core names
+1023,FALSE,high,Different core names
+576,FALSE,high,Different core names
+353,FALSE,high,Different core names
+354,FALSE,high,Different core names
+771,TRUE,medium,Typo or spelling variant (edit dist 2)
+212,FALSE,high,Different core names
+351,FALSE,high,Different core names

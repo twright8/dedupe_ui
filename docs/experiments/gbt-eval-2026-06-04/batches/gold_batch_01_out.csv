@@ -1,0 +1,40 @@
+pair_id,verdict,confidence,reason
+169,TRUE,high,Same name; SCI is legal form abbreviation omitted in ROE
+258,TRUE,high,Trivial typo; LIMTED vs LIMITED; same core name
+259,FALSE,high,Different core name; MJS vs MARS
+281,FALSE,high,Different core name; SWAN vs JOAN
+299,FALSE,high,Different core name; TEMPLIAS vs TESLA
+300,UNCERTAIN,medium,One-letter difference; TESLA vs TESSA; could be typo
+358,UNCERTAIN,medium,BLUE ANGEL LTD vs BLUE ANGEL PROPERTIES LTD; extra word ambiguous
+361,TRUE,high,Identical; ASM9 vs ASM 9 spacing only
+379,FALSE,high,Different initials; KD vs SJ
+380,FALSE,high,Different initials; LW vs SJ
+382,FALSE,high,Different core name; DUGONG vs JOAN
+415,FALSE,high,Different core name; FRUITION vs BRUTON
+416,FALSE,high,Different core name; KERITONA vs BRUTON
+458,TRUE,high,Minor transliteration difference; LITIJERAT vs LITIJARAT
+552,FALSE,high,Different core name; ZAID vs DAS
+555,FALSE,high,Different core name; TARAYA vs ZHTA
+556,TRUE,high,One-char difference; ZHTA vs ZHITA; same entity
+587,FALSE,high,Different initials; AK vs SJ
+588,FALSE,high,Different initials; CW vs SJ
+589,FALSE,high,Different core name; DASH vs SJ
+598,TRUE,high,Same trustee and trust; on behalf of vs as trustee of
+639,FALSE,high,Different core name; DYF vs DAS
+640,FALSE,high,Different core name; FRUITION vs CITRON
+641,FALSE,high,Different core name; KERITONA vs CITRON
+715,FALSE,high,Different initials; LSA vs SJ
+745,FALSE,high,Different core name; MAM vs DAS
+775,TRUE,high,Identical; TROJAN RE2 vs TROJAN RE 2 spacing only
+781,FALSE,high,Different fund location; STAINES vs KEHL AUENHEIM
+829,FALSE,high,Different core name; ARCUS vs ROCCA
+834,FALSE,high,Different core name; ALFARAN vs BALINA
+835,FALSE,high,Different core name; BARRIE vs BALINA
+865,TRUE,high,Plural vs singular; AUCTIONEERS vs AUCTIONEER
+884,TRUE,high,Identical except HONG KONG vs HONGKONG spacing
+999,FALSE,high,Different fund name; HAMMER vs NAGEL
+1000,TRUE,high,Identical core name; trivial punctuation difference only
+1001,TRUE,high,KG is abbreviated form of GMBH and CO KG; same entity
+1018,FALSE,high,Different core name; RUFO vs BURJ
+1058,FALSE,high,Different core name; SOL vs MARS
+1079,FALSE,high,Different core name; SPARCO vs ROCCA

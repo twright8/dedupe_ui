@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+120,FALSE,high,FRANCHE vs FRANCE different core word
+242,FALSE,high,MAM vs A L different core initials
+815,FALSE,high,A L vs A R different middle initial
+817,FALSE,high,A L vs ALTO different core name
+913,FALSE,high,JALAL vs A L different core name
+240,FALSE,high,PITON vs NOTCLIF different core name
+241,FALSE,high,PITON vs POLYGAIN different core name
+683,TRUE,high,Same name INCOPORATED vs INC trivial abbreviation
+1040,FALSE,high,SWINA vs STAMINA different core name
+904,TRUE,high,KINGS GATE vs KINGSGATE spacing only difference
+1030,FALSE,high,STEIN vs SUNISA different core name
+804,FALSE,high,AS vs CW different core initials
+230,FALSE,high,AS vs SAG different core name
+802,FALSE,high,ARAN vs ARDENA different core name
+59,TRUE,high,Identical name missing space only
+25,TRUE,high,PTE LTD vs PRIVATE LIMITED same abbreviation
+32,FALSE,high,GROWTH vs MID-CAP different fund designation
+30,FALSE,high,GROWTH suffix absent in ROE name
+31,FALSE,high,GROWTH vs GPES different fund designation
+546,FALSE,high,PATONGA vs WAGON different core name
+16,FALSE,high,H J vs AKK different core initials
+667,TRUE,high,SARL suffix omitted only trivial difference
+138,TRUE,medium,Same core name different legal form CORP vs SDE RL
+543,FALSE,high,SWAN vs OVERSEAS different core word
+118,TRUE,high,Identical except article THE trivial difference
+61,FALSE,high,BARWOOD vs BYRNWOOD different core name
+15,UNCERTAIN,low,Same initials GCV vs BV different legal form
+494,FALSE,high,ROARK vs UK different core name
+657,TRUE,high,Same core name LIMITED SIRKETI vs ANONIM SIRKETI legal form
+109,FALSE,high,JERMYN vs GEMONA different core name
+112,TRUE,high,I BERSUMI vs IBERSUMI spacing only difference
+457,TRUE,high,SAS prefix addition only trivial difference
+5,FALSE,high,BORAL vs COROLLA different core name
+486,UNCERTAIN,medium,REALTY vs REAL ESTATE same meaning different tokens
+487,FALSE,medium,RESIDENTIAL added making it different entity
+3,TRUE,high,BYGGEGR abbreviation of BYGGEGRUPPENS trivial
+62,FALSE,high,V G vs D M different core initials
+503,FALSE,high,V G vs T P different core initials
+157,FALSE,high,V G vs G F different core initials
+129,FALSE,high,W B vs GWM different core initials
+481,FALSE,high,W B vs WG different core initials
+22,TRUE,high,Identical core ALDFOLK plural S only difference
+860,TRUE,high,INVESTIMENTI Italian for INVESTMENTS trivial translation
+686,TRUE,high,COMPANY LIMITED suffix omitted only
+18,TRUE,high,UNIPERSONAL suffix omitted trivial difference
+12,FALSE,high,MID-CAP suffix absent in ROE name
+13,FALSE,high,MID-CAP vs GPES different fund designation
+14,TRUE,high,MID-CAP matches SARL suffix omitted
+20,FALSE,high,RG vs CAROLA different core name
+671,FALSE,high,RG vs MAY different core name
+111,FALSE,high,RG vs FRC different core initials
+463,FALSE,high,RG vs TB different core initials
+675,FALSE,high,RG vs RBRK different core initials
+674,FALSE,high,RG vs PR different core initials
+9,TRUE,high,Same name accents and EV suffix only differences

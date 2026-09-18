@@ -1,0 +1,51 @@
+pair_id,verdict,confidence,reason
+36,TRUE,high,DEKA BANK vs DEKABANK spacing only differs
+57,FALSE,high,DASARA vs DANDARA different core names
+89,TRUE,medium,CUCF GB1W10 same project SARL vs LTD legal form only
+113,TRUE,high,KALIVES same name SA vs LIMITED legal form only
+132,TRUE,high,IMOBILARIA vs IMOBILIARIA single char typo only
+148,FALSE,high,AMODEO vs ELWOOD different core names
+239,TRUE,high,PWAR same name LLC vs LTD legal form only
+255,FALSE,high,NORA vs OR entirely different core names
+260,FALSE,high,MP vs MGH different initials
+261,TRUE,high,MP vs MP same initials punctuation only differs
+262,FALSE,high,MP vs MAY different core names
+271,FALSE,high,PETRA vs PENRITH different core names
+274,FALSE,high,HEMBA vs LOREMAR different core names
+323,FALSE,high,FR vs DM different core initials
+325,FALSE,high,Operational Hotel vs Retail Leisure different subject
+348,FALSE,high,AARI vs ALKARBAR different core names
+358,FALSE,medium,BLUE ANGEL vs BLUE ANGEL PROPERTIES different entity
+361,TRUE,high,ASM9 vs ASM 9 spacing only differs
+396,FALSE,high,ULEX vs EKLUS different core names
+410,FALSE,high,MARINA vs KIRAMA different core names
+420,TRUE,high,ROCKWICK same name INC abbreviation only
+446,FALSE,high,ORELLAN vs ORIOLE different core names
+455,FALSE,high,OR vs MARATIKA different core names
+517,FALSE,high,MANCOB vs SIGMACON different core names
+528,TRUE,high,Identical name punctuation and spacing only differ
+565,FALSE,high,DORCAS vs TORSA different core names
+621,FALSE,high,FR vs GF different core initials
+639,FALSE,high,DAS vs DYF different core names
+646,FALSE,high,HERO LEAP vs HERO WEALTH different core descriptor
+679,TRUE,high,Same name EST and CONTRACTING word order swapped
+700,FALSE,medium,PROLOGIS UK HOLDING IV vs UK IV different entity level
+715,FALSE,high,SJ vs LSA different core initials
+718,FALSE,medium,MARTIAN vs MARITZA different core names
+757,TRUE,high,MONTEMERLO same name BVI jurisdiction suffix only
+781,FALSE,high,KEHL AUENHEIM vs STAINES different fund location
+786,FALSE,high,FINCHLEY vs BINGLEY different core names
+823,FALSE,high,FERN vs BRONZE different core names
+849,FALSE,high,MORLAKE vs ASHKE different core names
+884,TRUE,high,HONG KONG vs HONGKONG spacing only differs
+905,FALSE,high,PLACE vs GP different core names
+909,FALSE,high,LONDON vs EDINBURGH different location
+933,TRUE,high,PGP same name spacing difference only
+967,FALSE,high,YS vs SY reversed initials different entity
+978,FALSE,high,SOHA vs OCHALA different core names
+996,TRUE,high,Same name LLC OPC suffix addition only
+1018,FALSE,high,BURJ vs RUFO different core names
+1041,TRUE,high,TCRP 1A1B same name spacing only differs
+1051,FALSE,high,ADEOGUN vs SANE different core names
+1077,FALSE,high,MARINA vs TARQUIN different core names
+1078,FALSE,high,YUMA vs UK entirely different core names

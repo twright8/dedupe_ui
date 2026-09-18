@@ -1,0 +1,41 @@
+pair_id,verdict,confidence,reason
+1076,FALSE,high,Core initials differ: JM vs SV
+735,FALSE,high,Core initials differ: JM vs SMA
+132,TRUE,high,Single letter typo: IMOBILARIA vs IMOBILIARIA
+565,FALSE,high,Different core name: DORCAS vs TORSA
+855,FALSE,high,Different core name: DORCAS vs DIORA
+231,TRUE,high,Identical name; SA suffix omitted in ROE
+853,FALSE,high,Different core name: BENHAM vs BENTHORP
+782,TRUE,high,AG is abbreviation of Aktiengesellschaft; same entity
+996,TRUE,medium,Same core name; ROE adds LLC OPC qualifiers
+757,TRUE,high,Same name; BVI is jurisdiction tag only
+886,FALSE,high,Different core name: FINCHLEY vs FENIX
+786,FALSE,high,Different core name: FINCHLEY vs BINGLEY
+874,FALSE,high,Different project: WITHERNWICK vs HYNDBURN
+849,FALSE,high,Different core name: MORLAKE vs ASHKE
+755,FALSE,high,Different core name: MORLAKE vs LOREMAR
+850,FALSE,high,Different core name: MORLAKE vs DEMARK
+518,TRUE,high,Same name; UNIPERSONAL suffix omitted in ROE
+848,TRUE,high,Identical name; CORAL BAY vs CORALBAY spacing only
+754,FALSE,high,Different core name: TALMI vs POLIUM
+847,FALSE,high,Different core name: TALMI vs ACCALIA
+562,FALSE,high,Different core name: TALMI vs TALUMA
+647,FALSE,high,Different core name: KUMARI vs KIRAMA
+396,FALSE,high,Different core name: ULEX vs EKLUS
+397,FALSE,high,Different core name: ULEX vs ELA
+646,FALSE,high,Different core name: HERO LEAP vs HERO WEALTH VENTURES
+803,TRUE,high,DAC = Designated Activity Company; same entity
+908,TRUE,high,Same name; spacing difference in S A vs SA only
+1062,FALSE,high,Different location: GLOUCESTER vs SOUTH ELMSALL
+1063,FALSE,high,Different location: GLOUCESTER vs ST HELENS
+429,FALSE,high,Different core name: ARMER vs MARE
+390,TRUE,high,One letter typo: HUTCHINSON vs HUTCHISON
+428,TRUE,high,Same name; LIMITED appended after SA in ROE
+306,FALSE,high,Different core name: DURABLE vs BEAM
+307,FALSE,high,Different core name: DURABLE vs BELL
+388,UNCERTAIN,medium,Same name but mismatched legal form: LTD vs SRL
+898,UNCERTAIN,medium,Same core name; legal form SA vs Private Ltd differs
+841,FALSE,high,Different core name: MSAR vs A E
+842,FALSE,high,Different core name: MSAR vs ARCUS
+990,TRUE,high,Same name; SDN.BHD vs SDN BHD punctuation only
+722,TRUE,high,Same name; UK 131 vs UK131 spacing only

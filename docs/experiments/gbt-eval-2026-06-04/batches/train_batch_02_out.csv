@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+554,TRUE,high,Excellent match
+180,UNCERTAIN,low,Partial overlap
+553,FALSE,high,Different entities
+838,TRUE,medium,Likely match
+383,TRUE,medium,Good match
+215,FALSE,high,Different entities
+181,FALSE,high,Different entities
+893,TRUE,high,Excellent match
+43,TRUE,medium,Likely match
+638,TRUE,medium,Likely match
+234,TRUE,high,Excellent match
+920,TRUE,high,Excellent match
+791,FALSE,high,Not best match for OCOD
+790,FALSE,high,Not best match for OCOD
+789,TRUE,high,Excellent match
+837,FALSE,high,Different entities
+637,FALSE,high,Different entities
+419,FALSE,high,Different entities
+1024,TRUE,high,Excellent match
+100,TRUE,medium,Good match
+213,TRUE,medium,Good match
+689,TRUE,high,Excellent match
+743,FALSE,high,All candidates poor
+832,FALSE,high,Not best match for OCOD
+833,FALSE,high,Not best match for OCOD
+1022,FALSE,high,Different entities
+614,FALSE,high,Different entities
+317,FALSE,high,Different entities
+636,FALSE,high,All candidates poor
+741,FALSE,high,Not best match for OCOD
+742,FALSE,high,Not best match for OCOD
+352,TRUE,high,Excellent match
+676,TRUE,medium,Likely match
+1033,TRUE,high,Excellent match
+550,TRUE,high,Excellent match
+730,FALSE,high,Different entities
+940,FALSE,medium,Poor match
+787,FALSE,high,All candidates poor
+889,FALSE,high,Not best match for OCOD
+881,TRUE,high,Excellent match
+413,FALSE,high,All candidates poor
+739,FALSE,high,Not best match for OCOD
+1080,FALSE,high,Not best match for OCOD
+459,TRUE,medium,Likely match
+514,TRUE,medium,Likely match
+612,FALSE,high,All candidates poor
+727,FALSE,high,Not best match for OCOD
+312,FALSE,high,Not best match for OCOD
+728,FALSE,high,Not best match for OCOD
+830,FALSE,high,All candidates poor
+737,FALSE,high,Not best match for OCOD
+288,FALSE,high,Not best match for OCOD
+311,TRUE,medium,Good match
+726,FALSE,high,Not best match for OCOD
+310,FALSE,high,Not best match for OCOD

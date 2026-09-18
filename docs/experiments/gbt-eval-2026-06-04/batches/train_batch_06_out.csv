@@ -1,0 +1,55 @@
+pair_id,verdict,confidence,reason
+41,UNCERTAIN,medium,Insufficient name similarity
+52,TRUE,medium,Primary tokens match
+141,TRUE,high,Core names match
+152,TRUE,medium,Primary tokens match
+153,FALSE,high,Different core name
+192,TRUE,medium,Primary tokens match
+257,TRUE,medium,Primary tokens match
+278,UNCERTAIN,medium,Insufficient name similarity
+289,TRUE,medium,Primary tokens match
+298,TRUE,medium,Primary tokens match
+303,TRUE,medium,Primary tokens match
+304,TRUE,medium,Primary tokens match
+330,FALSE,high,Not best match in group
+376,FALSE,high,Not best match in group
+378,TRUE,medium,Primary tokens match
+386,FALSE,high,Not best match in group
+425,FALSE,high,Not best match in group
+426,FALSE,high,Not best match in group
+427,TRUE,medium,Primary tokens match
+474,TRUE,medium,Primary tokens match
+479,TRUE,medium,Primary tokens match
+490,TRUE,high,Core names match
+508,TRUE,medium,Primary tokens match
+515,TRUE,medium,Primary tokens match
+530,UNCERTAIN,medium,Insufficient name similarity
+547,TRUE,medium,Primary tokens match
+570,TRUE,medium,Primary tokens match
+571,FALSE,high,Not best match in group
+596,FALSE,high,Not best match in group
+597,TRUE,medium,Primary tokens match
+615,TRUE,high,Core names match
+617,TRUE,medium,Primary tokens match
+619,TRUE,medium,Primary tokens match
+660,TRUE,medium,Primary tokens match
+701,TRUE,high,Core names match
+708,TRUE,medium,Primary tokens match
+709,TRUE,medium,Primary tokens match
+710,TRUE,medium,Primary tokens match
+713,FALSE,high,Not best match in group
+720,FALSE,high,Not best match in group
+721,FALSE,high,Not best match in group
+723,UNCERTAIN,medium,Insufficient name similarity
+724,TRUE,medium,Primary tokens match
+725,TRUE,medium,Primary tokens match
+788,TRUE,medium,Primary tokens match
+793,FALSE,high,Different core name
+890,FALSE,high,Not best match in group
+902,UNCERTAIN,medium,Insufficient name similarity
+943,TRUE,medium,Primary tokens match
+944,UNCERTAIN,medium,Insufficient name similarity
+1031,FALSE,high,Different core name
+1036,UNCERTAIN,medium,Insufficient name similarity
+1037,UNCERTAIN,medium,Insufficient name similarity
+1049,FALSE,high,Not best match in group

@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+48,TRUE,medium,Most tokens match
+82,FALSE,medium,Some similarity
+177,TRUE,high,Same core with different legal forms
+179,TRUE,medium,St/Saint variant
+195,TRUE,high,Same core with different legal forms
+322,FALSE,medium,Not best match for ocod_uid
+339,TRUE,medium,High similarity
+399,UNCERTAIN,medium,Moderate similarity
+401,TRUE,high,Very high similarity
+405,UNCERTAIN,medium,Moderate similarity
+408,UNCERTAIN,medium,Moderate similarity
+437,TRUE,medium,High similarity
+443,TRUE,medium,Most tokens match
+448,FALSE,medium,Not best match for ocod_uid
+449,TRUE,medium,Trivial difference (typo)
+450,FALSE,medium,Not best match for ocod_uid
+451,FALSE,medium,Not best match for ocod_uid
+516,TRUE,high,Same core with different legal forms
+531,TRUE,medium,High similarity
+538,TRUE,high,Very high similarity
+548,TRUE,high,Very high similarity
+563,UNCERTAIN,medium,Moderate similarity
+564,TRUE,medium,High similarity
+567,FALSE,medium,Not best match for ocod_uid
+606,TRUE,medium,High similarity
+620,TRUE,high,Very high similarity
+622,TRUE,medium,High similarity
+623,UNCERTAIN,medium,Moderate similarity
+648,UNCERTAIN,medium,Moderate similarity
+649,UNCERTAIN,medium,Moderate similarity
+650,UNCERTAIN,medium,Moderate similarity
+651,FALSE,medium,Not best match for ocod_uid
+652,FALSE,medium,Not best match for ocod_uid
+756,TRUE,high,Very high similarity
+758,TRUE,medium,High similarity
+759,TRUE,medium,Spacing variant
+760,TRUE,high,Very high similarity
+780,TRUE,high,Very high similarity
+785,TRUE,high,Same core with different legal forms
+806,UNCERTAIN,medium,Moderate similarity
+807,FALSE,medium,Some similarity
+808,UNCERTAIN,medium,Moderate similarity
+816,TRUE,medium,Most tokens match
+824,TRUE,high,Very high similarity
+851,FALSE,medium,Not best match for ocod_uid
+852,TRUE,high,Very high similarity
+854,FALSE,medium,Not best match for ocod_uid
+857,UNCERTAIN,medium,Moderate similarity
+871,TRUE,high,Very high similarity
+891,TRUE,medium,High similarity
+912,FALSE,medium,Some similarity
+950,TRUE,medium,High similarity
+972,TRUE,medium,High similarity
+998,TRUE,high,Same core with different legal forms
+1069,FALSE,medium,Not best match for ocod_uid

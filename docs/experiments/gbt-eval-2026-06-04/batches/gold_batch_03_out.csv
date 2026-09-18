@@ -1,0 +1,41 @@
+pair_id,verdict,confidence,reason
+763,TRUE,high,Same name; one letter typo SHARACHCHANDRA vs SHARACHANDRA
+260,FALSE,high,Different initials: MP vs MGH
+262,FALSE,high,Different core name: MP vs MAY
+261,TRUE,high,Same name; punctuation only difference
+58,TRUE,high,Same name; LLC is additional legal-form suffix
+773,FALSE,high,Different core name: SOFIEL vs SKE
+774,FALSE,high,Different core name: SOFIEL vs TOBIE
+909,FALSE,high,Different city: LONDON vs EDINBURGH
+910,FALSE,high,Different location: LONDON vs VICTORIA ROAD
+911,FALSE,high,Different entity type: OPERATOR vs NOMINEE
+47,TRUE,high,Same name; SA is legal-form suffix only
+324,FALSE,high,Different type: HOTEL vs RETAIL LEISURE F&B GP
+325,FALSE,high,Different type: HOTEL vs RETAIL LEISURE F&B LP
+326,FALSE,high,Different phase and type: 3A HOTEL vs 3B OFFICE
+327,FALSE,high,Different phase and type: 3A HOTEL vs 3B RETAIL
+469,TRUE,high,A.S. is abbreviation for Anonim Sirketi; same entity
+356,FALSE,high,Different core name: ROTA vs BO
+357,FALSE,high,Different core name: ROTA vs DIORA
+772,FALSE,high,Different core name: ROTA vs TORSA
+296,FALSE,high,Different initials: FR vs TP
+323,FALSE,high,Different initials: FR vs DM
+621,FALSE,high,Different initials: FR vs GF
+236,FALSE,high,Different core name: PLACE vs RFL
+235,FALSE,high,Different core name: PLACE vs PML; BNF suffix
+905,FALSE,high,Different core name: PLACE vs GP
+495,TRUE,high,Same name; punctuation difference SDN.BHD vs SDN BHD
+294,FALSE,high,Different core name: SCOTBURY vs SCOTWAY
+245,FALSE,high,CY suffix indicates distinct entity
+991,FALSE,high,Different core name: KAROLI vs MICRO
+103,TRUE,high,Same name; SA vs S.A. punctuation only
+76,TRUE,high,Same name; space omission BTI 65 vs BTI65
+491,FALSE,high,Different name: LSR vs MARATIKA
+207,FALSE,high,Different core name: JENNING vs JEM
+226,FALSE,high,Different core name: MALLVIEW vs MARYVIEW
+225,FALSE,high,BNF suffix indicates distinct entity
+446,FALSE,high,Different core name: ORELLAN vs ORIOLE
+445,FALSE,high,Different core name: ORELLAN vs MOREL
+224,FALSE,high,Different type: TRAVCORP vs PROPERTY
+66,TRUE,high,Single letter typo: GESELLSCHAFT vs GESELLSCHAFT
+188,TRUE,high,Same name; HEIGHTS vs HEIGHT plural/singular

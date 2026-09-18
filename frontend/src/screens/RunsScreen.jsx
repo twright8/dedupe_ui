@@ -1,0 +1,437 @@
+/* ============================================================
+   Screen: Runs list
+   ============================================================ */
+
+import { useState, useEffect, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
+import { api } from "../api";
+import { Icons } from "../components/Icons";
+import { fmtNumber, fmtPct, fmtDateTime, timeAgo } from "../components/ProbBar";
+import { Empty } from "../components/Empty";
+
+function normalizeRun(r) {
+  const dur = r.duration_secs;
+  let duration = "—";
+  if (dur != null) {
+    const m = Math.floor(dur / 60);
+    const s = Math.round(dur % 60);
+    duration = m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+  return {
+    ...r,
+    started: r.started_at || r.started,
+    finished: r.finished_at || r.finished,
+    duration,
+    config: r.config_version != null ? `v${r.config_version}` : r.config || "",
+    by: r.triggered_by || r.by || "",
+    byInit: r.triggered_by ? r.triggered_by.split(" ").map(w => w[0] || "").join("").toUpperCase().slice(0, 2) : r.byInit || "",
+    label: r.label || `${r.ocod_filename || ""} · ${r.ch_filename || ""}`,
+    counts: r.counts || null,
+  };
+}
+
+export default function RunsScreen() {
+  const navigate = useNavigate();
+  const [runs, setRuns] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [filter, setFilter] = useState("all");
+  const [search, setSearch] = useState("");
+
+  const fetchRuns = useCallback(() => {
+    setLoading(true);
+    api
+      .listRuns()
+      .then((data) => {
+        const raw = Array.isArray(data) ? data : data.runs || [];
+        setRuns(raw.map(normalizeRun));
+        setError(null);
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    fetchRuns();
+  }, [fetchRuns]);
+
+  // Filter + search
+  const filtered = runs
+    .filter((r) => (filter === "all" ? true : r.status === filter))
+    .filter((r) => {
+      if (!search) return true;
+      const q = search.toLowerCase();
+      return (
+        (r.id && r.id.toLowerCase().includes(q)) ||
+        (r.label && r.label.toLowerCase().includes(q)) ||
+        (r.by && r.by.toLowerCase().includes(q)) ||
+        (r.config && r.config.toLowerCase().includes(q))
+      );
+    });
+
+  // Sparkline: recent match rates (oldest -> newest, left -> right)
+  const recent = [...runs]
+    .filter((r) => r.counts)
+    .reverse()
+    .slice(-8);
+  const maxRate = recent.length
+    ? Math.max(...recent.map((r) => r.counts.matchRate))
+    : 1;
+
+  // KPI values from latest run (if exists)
+  const latest = runs.length ? runs[0] : null;
+  const prior = runs.length > 1 ? runs[1] : null;
+
+  if (loading) {
+    return (
+      <div className="content">
+        <p className="muted pulse" style={{ fontSize: 13.5, padding: 40 }}>
+          Loading runs...
+        </p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="content">
+        <Empty
+          title="Failed to load runs"
+          sub={error}
+          action={
+            <button className="btn primary" onClick={fetchRuns}>
+              Retry
+            </button>
+          }
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="content">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">Runs</h1>
+          <p className="page-sub">
+            Each run links one pair of uploads (OCOD + Companies House) into
+            matches, review queue, ambiguous, and unmatched. Labels persist
+            across runs.
+          </p>
+        </div>
+        <button
+          className="btn primary lg"
+          onClick={() => navigate("/runs/new")}
+        >
+          <Icons.plus size={14} stroke="#fff" />
+          New run
+        </button>
+      </div>
+
+      {/* KPI strip */}
+      {latest && latest.counts && (
+        <div className="kpi-grid" style={{ marginBottom: 20 }}>
+          <div className="kpi">
+            <div className="label">Latest match rate</div>
+            <div className="value">
+              {fmtPct(latest.counts.matchRate, 1)}
+            </div>
+            <div className={`delta ${prior && prior.counts && latest.counts.matchRate >= prior.counts.matchRate ? "up" : "down"}`}>
+              {prior && prior.counts
+                ? `${latest.counts.matchRate >= prior.counts.matchRate ? "+" : ""}${((latest.counts.matchRate - prior.counts.matchRate) * 100).toFixed(1)}pp vs prior`
+                : "first run"}
+            </div>
+          </div>
+          <div className="kpi">
+            <div className="label">Auto-accepted (latest)</div>
+            <div className="value">
+              {fmtNumber(
+                latest.counts.exact + latest.counts.probAccept
+              )}
+            </div>
+            <div className="delta muted">
+              {fmtNumber(latest.counts.exact)} exact &middot;{" "}
+              {fmtNumber(latest.counts.probAccept)} prob.
+            </div>
+          </div>
+          <div className="kpi">
+            <div className="label">Review queue</div>
+            <div className="value" style={{ color: "var(--amber)" }}>
+              {fmtNumber(latest.counts.review)}
+            </div>
+            <div className="delta down">
+              {prior && prior.counts
+                ? `${latest.counts.review <= prior.counts.review ? "" : "+"}${latest.counts.review - prior.counts.review} vs prior`
+                : ""}{" "}
+              &middot; {latest.counts.ambiguous} ambiguous
+            </div>
+          </div>
+          <div className="kpi">
+            <div className="label">Match rate &middot; last 8 runs</div>
+            <div style={{ marginTop: 6 }}>
+              <div className="barchart">
+                {recent.map((r, i) => (
+                  <div
+                    key={i}
+                    className="b"
+                    style={{
+                      height: `${(r.counts.matchRate / maxRate) * 100}%`,
+                    }}
+                    title={`${r.id}: ${fmtPct(r.counts.matchRate, 1)}`}
+                  />
+                ))}
+              </div>
+              {recent.length >= 2 && (
+                <div
+                  className="muted"
+                  style={{ fontSize: 11, marginTop: 4 }}
+                >
+                  {fmtPct(recent[0].counts.matchRate, 1)} &rarr;{" "}
+                  {fmtPct(recent[recent.length - 1].counts.matchRate, 1)}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Filters */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          marginBottom: 12,
+        }}
+      >
+        <div className="seg">
+          {["all", "complete", "failed"].map((s) => (
+            <button
+              key={s}
+              className={filter === s ? "on" : ""}
+              onClick={() => setFilter(s)}
+            >
+              {s[0].toUpperCase() + s.slice(1)}
+              <span className="muted" style={{ fontSize: 11 }}>
+                &middot;{" "}
+                {
+                  runs.filter((r) =>
+                    s === "all" ? true : r.status === s
+                  ).length
+                }
+              </span>
+            </button>
+          ))}
+        </div>
+        <div className="search" style={{ width: 280 }}>
+          <Icons.search size={14} />
+          <input
+            className="input"
+            placeholder="Filter by run id, uploader, config..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <div className="spacer" />
+        <button className="btn" onClick={fetchRuns}>
+          <Icons.refresh size={14} />
+          Refresh
+        </button>
+      </div>
+
+      {/* Table */}
+      {filtered.length === 0 ? (
+        <Empty
+          title="No runs found"
+          sub={
+            search
+              ? "Try a different search term."
+              : "Start a new run to see results here."
+          }
+          action={
+            <button
+              className="btn primary"
+              onClick={() => navigate("/runs/new")}
+            >
+              <Icons.plus size={14} stroke="#fff" /> New run
+            </button>
+          }
+        />
+      ) : (
+        <div className="tbl-wrap">
+          <table className="t">
+            <thead>
+              <tr>
+                <th style={{ width: 50 }}></th>
+                <th>Run</th>
+                <th>Started</th>
+                <th>Duration</th>
+                <th className="tnum" style={{ textAlign: "right" }}>
+                  OCOD rows
+                </th>
+                <th className="tnum" style={{ textAlign: "right" }}>
+                  ROE rows
+                </th>
+                <th className="tnum" style={{ textAlign: "right" }}>
+                  Matches
+                </th>
+                <th className="tnum" style={{ textAlign: "right" }}>
+                  Review
+                </th>
+                <th className="tnum" style={{ textAlign: "right" }}>
+                  Ambig.
+                </th>
+                <th>Rate</th>
+                <th>Config</th>
+                <th>By</th>
+                <th style={{ width: 60 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((r) => (
+                <tr
+                  key={r.id}
+                  onClick={() => navigate(`/runs/${r.id}`)}
+                  style={{ cursor: "pointer" }}
+                >
+                  <td>
+                    {r.status === "complete" ? (
+                      <span className="dot green" />
+                    ) : r.status === "failed" ? (
+                      <span className="dot red" />
+                    ) : (
+                      <span className="dot amber" />
+                    )}
+                  </td>
+                  <td>
+                    <div style={{ fontWeight: 500 }}>{r.label}</div>
+                    <div
+                      className="mono muted"
+                      style={{ fontSize: 11 }}
+                    >
+                      {r.id}
+                    </div>
+                  </td>
+                  <td>
+                    <div>{fmtDateTime(r.started)}</div>
+                    <div
+                      className="muted"
+                      style={{ fontSize: 11 }}
+                    >
+                      {timeAgo(r.started)}
+                    </div>
+                  </td>
+                  <td className="mono">{r.duration}</td>
+                  <td
+                    className="mono"
+                    style={{ textAlign: "right" }}
+                  >
+                    {fmtNumber(r.counts?.ocod)}
+                  </td>
+                  <td
+                    className="mono"
+                    style={{ textAlign: "right" }}
+                  >
+                    {fmtNumber(r.counts?.roe)}
+                  </td>
+                  <td
+                    className="mono"
+                    style={{ textAlign: "right" }}
+                  >
+                    {r.counts
+                      ? fmtNumber(
+                          r.counts.exact + r.counts.probAccept
+                        )
+                      : "—"}
+                  </td>
+                  <td
+                    className="mono"
+                    style={{
+                      textAlign: "right",
+                      color: r.counts?.review
+                        ? "var(--amber)"
+                        : "var(--muted)",
+                    }}
+                  >
+                    {fmtNumber(r.counts?.review)}
+                  </td>
+                  <td
+                    className="mono"
+                    style={{
+                      textAlign: "right",
+                      color: r.counts?.ambiguous
+                        ? "var(--violet)"
+                        : "var(--muted)",
+                    }}
+                  >
+                    {fmtNumber(r.counts?.ambiguous)}
+                  </td>
+                  <td>
+                    {r.counts ? (
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <div
+                          className="probbar"
+                          style={{ width: 40 }}
+                        >
+                          <i
+                            style={{
+                              width: `${(r.counts.matchRate / 0.2) * 100}%`,
+                              background: "var(--ti-red)",
+                            }}
+                          />
+                        </div>
+                        <span className="mono">
+                          {fmtPct(r.counts.matchRate, 1)}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="tag red">
+                        <span className="dot" />
+                        failed
+                      </span>
+                    )}
+                  </td>
+                  <td>
+                    <span className="tag">{r.config}</span>
+                  </td>
+                  <td>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                      }}
+                    >
+                      <div
+                        className="avatar"
+                        style={{
+                          width: 22,
+                          height: 22,
+                          fontSize: 10,
+                        }}
+                      >
+                        {r.byInit}
+                      </div>
+                      <span style={{ fontSize: 12.5 }}>
+                        {r.by ? r.by.split(" ")[0] : ""}
+                      </span>
+                    </div>
+                  </td>
+                  <td>
+                    <Icons.more size={14} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}

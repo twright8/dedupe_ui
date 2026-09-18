@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+961,FALSE,high,Different numbering HOLDING III vs IV different entities
+960,TRUE,high,Same name PROLOGIS UK III A BV minor formatting only
+197,FALSE,high,Different core name F and Y vs BB
+98,TRUE,high,BB vs B B same initials only spacing differs
+883,FALSE,high,Different initials JF vs FD different entities
+594,FALSE,high,Different initials KK vs AE different entities
+381,FALSE,high,Different core name JOYLYN vs JOYRAND
+818,FALSE,high,Different core name CRANSTAL vs CRANSHAWS
+814,TRUE,high,Same entity with in liquidation suffix appended
+878,FALSE,high,Different initials JAS vs JRM
+877,FALSE,high,Different core name JAS vs JADE
+584,TRUE,high,Same name 2 COLERIDGE SQUARE omits legal form only
+939,TRUE,high,PARKWEST vs PARK WEST same word spacing only
+696,TRUE,high,Same name POLYGONE SA vs POLYGONE S.A. punctuation only
+1003,FALSE,high,Different core name PRIORY vs P.R. initials
+779,FALSE,high,Different core name DAMERELL vs DEEPRA
+658,TRUE,medium,PT TIMAH TBK same core PERSERO is ownership form only
+712,FALSE,high,Different core name FAULKNER vs LINEAR
+147,TRUE,high,Same core LAFONE INVESTMENT CO LTD c/o is address note
+969,TRUE,high,LENDELL SA vs LENDELL S.A. punctuation only
+232,FALSE,high,Different core name RIZARD vs RIMAL
+233,FALSE,high,Different core name RIZARD vs RORA
+580,FALSE,high,Different core name HBL vs BALZAC
+374,FALSE,high,Different core name HBL vs HILL
+579,FALSE,high,Different core name MARIANA vs ALFARAN
+478,UNCERTAIN,medium,Same core name WILHELM FRICKE but different legal form GMBH vs SE
+692,FALSE,high,Different core name EMME vs ROMEO
+705,FALSE,high,Different core name BARKAT vs MARKASA
+681,TRUE,medium,Same core PASA DEVELOPMENT AND INVESTMENT legal form variant
+372,FALSE,high,Different core name BRONTE vs FORTE
+124,TRUE,high,GJ vs G J same initials spacing only
+371,TRUE,high,Same name DUNCRAIG INVEST CORP abbreviated form
+108,FALSE,high,Different entity type TRUST vs LIMITED different structures
+369,FALSE,high,Different core name JANA vs JEM
+368,FALSE,high,Different core name JANA vs JALAL
+795,TRUE,high,BLACKHOLE vs BLACK HOLE same word spacing only
+364,FALSE,high,Different core name ANMA vs GEENAM
+573,FALSE,high,Different core name ANMA vs AUK
+572,TRUE,high,Same core ANMA HOLDINGS Cyprus is jurisdiction qualifier
+794,FALSE,high,Different core name CHERUB vs COLEBY
+520,TRUE,high,Same core TEMPLEVIEW with BNF qualifier appended
+1048,FALSE,high,Different core name SULTAY vs TARAYA
+85,FALSE,high,Different core name ROKU vs CARGO
+173,FALSE,high,Different core name ROKU vs HARBOUR
+955,TRUE,high,Same core REYACO INVESTMENT CORPORATION minor form difference
+24,TRUE,medium,Same core 21 HOLDINGS different legal form INC vs LTD
+1004,FALSE,high,Different core name TS vs SALE
+873,FALSE,high,Different core name TS vs GSS
+821,FALSE,high,Different core name KAMBER vs ASHKE
+822,FALSE,high,Different core name KAMBER vs DEMARK
+464,TRUE,high,SPRINGSON vs SPRINGSUN trivial 1 char typo
+1,UNCERTAIN,medium,Same core ABEL SANTIAGO but different legal form SA vs LDA
+1042,TRUE,high,Same core WATLING INVESTMENT with HOLDINGS addition
+126,TRUE,high,H CARE vs HCARE same name spacing only
+697,TRUE,high,Same name PRIME UK CONDOR T S SARL punctuation variant

@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+321,FALSE,high,Different core name tokens
+1021,FALSE,high,Core names differ
+65,TRUE,high,Core tokens match
+521,TRUE,high,Core tokens match
+51,TRUE,high,Exact match after normalization
+1019,FALSE,high,Core names differ
+54,TRUE,high,Exact match after normalization
+1017,FALSE,high,Core names differ
+211,TRUE,medium,One name subset of other
+492,FALSE,high,Different core name tokens
+935,TRUE,high,Core tokens match
+810,FALSE,high,Core names differ
+925,TRUE,high,Exact match after normalization
+1016,FALSE,high,Core names differ
+313,FALSE,high,Core names differ
+314,FALSE,high,Core names differ
+731,FALSE,high,Core names differ
+291,FALSE,high,Core names differ
+35,TRUE,high,Core tokens match
+489,TRUE,high,Exact match after normalization
+308,TRUE,medium,One name subset of other
+309,FALSE,medium,Multiple candidates; not best match
+1012,FALSE,high,Core names differ
+1011,FALSE,high,Different core name tokens
+947,TRUE,medium,One name subset of other
+208,FALSE,high,Different core name tokens
+117,TRUE,medium,One name subset of other
+539,FALSE,high,Core names differ
+229,FALSE,high,Core names differ
+533,TRUE,medium,One name subset of other
+532,FALSE,high,Multiple candidates; not best match
+205,FALSE,high,Core names differ
+447,FALSE,high,Core names differ
+206,FALSE,high,Core names differ
+693,TRUE,high,Core tokens match
+37,FALSE,high,Core names differ
+820,FALSE,high,Different core name tokens
+819,FALSE,high,Different core name tokens
+137,FALSE,high,Different core name tokens
+694,FALSE,high,Different core name tokens
+440,FALSE,high,Core names differ
+634,FALSE,high,Core names differ
+633,FALSE,high,Core names differ
+338,FALSE,high,Core names differ
+280,FALSE,high,Core names differ
+714,FALSE,high,Core names differ
+336,FALSE,high,Core names differ
+334,FALSE,high,Core names differ
+335,FALSE,high,Core names differ
+811,FALSE,high,Core names differ
+628,FALSE,high,Core names differ
+630,FALSE,high,Core names differ
+631,FALSE,high,Core names differ
+627,FALSE,high,Core names differ
+626,FALSE,high,Core names differ

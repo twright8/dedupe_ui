@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+554,TRUE,high,Core name SELBORNE INVESTMENT HOLDING identical
+180,TRUE,high,Same core HOLDING CKL legal form only difference
+553,FALSE,high,DOMAIN vs TIMONA are different core names
+838,TRUE,high,82 CENTURION core name matches descriptor dropped
+383,FALSE,high,NPW vs GP are different core names
+215,FALSE,high,ORCHARD vs GORDA are different core names
+181,FALSE,high,DUGONG vs JOAN are different core names
+893,TRUE,high,GLENCOVE SARL identical punctuation variant
+43,TRUE,medium,Same core DAVID AMID LEGAL SERVICES LAW name
+638,TRUE,high,FEDERAL ALLIANCE same entity BVI qualifier appended
+234,TRUE,high,RIDING HOUSE ESTATE same entity INC vs LTD form
+920,UNCERTAIN,medium,HOSCH PROPERTIES USA same but LP vs LLLP entity type differs
+791,FALSE,high,ASTORG ADVISORY SERVICES MID-CAP different fund to base entity
+790,FALSE,high,ASTORG ADVISORY SERVICES GPES different fund to base entity
+789,TRUE,high,ASTORG ADVISORY SERVICES exact core match
+837,FALSE,high,CARRADINE vs CARRIGANS are different core names
+637,FALSE,high,MEINA vs GEENAM are different core names
+419,FALSE,high,MONA vs OAKBANK are different core names
+1024,TRUE,high,M7 BOX II PROPCO identical spacing variant only
+100,TRUE,high,BEVERLEY vs BEVERLY trivial spelling variant
+213,FALSE,high,FORE JERSEY V vs VI are different numbered entities
+689,TRUE,high,SCI CALFI 07 same entity PARTNERSHIP descriptor dropped
+743,FALSE,high,DAMSEL vs MEDLEY are different core names
+832,FALSE,high,DAMSEL vs DALESTAR are different core names
+833,FALSE,high,DAMSEL vs DIAL are different core names
+1022,FALSE,high,MARSA vs MARITZA are different core names
+614,FALSE,high,EDEN vs EDEQUIN are different core names
+317,FALSE,high,KAYEMOOR vs AMODEO are different core names
+636,FALSE,high,ROCHE vs FORTE are different core names
+741,FALSE,high,ROCHE vs MOREL are different core names
+742,FALSE,high,ROCHE vs MOREY are different core names
+352,TRUE,high,BLCT PHC5 2005 identical spacing variant only
+676,TRUE,high,LITEX COMMERCE same entity JSC form dropped
+1033,TRUE,high,SEMER HOLDINGS SA identical punctuation variant
+550,TRUE,medium,SACRED HEART MISSIONARY EDUCATION TRUST same entity full form appended
+730,FALSE,high,EAS vs SAGE are different core names
+940,FALSE,high,RATHMOY STABLES vs RATHMOY CHAPEL ST different entities
+787,FALSE,high,BEX vs CYB are different core names
+889,FALSE,high,BEX vs EUREX are different core names
+881,TRUE,high,IQSA LPS NOTTINGHAM same entity SARL vs LTD form
+413,FALSE,high,ZAZARA vs FARAH are different core names
+739,FALSE,high,ZAZARA vs SAFA are different core names
+1080,FALSE,high,ZAZARA vs TARAYA are different core names
+459,TRUE,high,TRECA PETOLETKA DOO same entity city dropped
+514,TRUE,medium,French Embassy Trade Commission same entity extra alias appended
+612,FALSE,high,COPA vs FRC are different core names
+727,FALSE,high,COPA vs MAY are different core names
+312,FALSE,high,COPA vs CAROLA are different core names
+728,FALSE,high,COPA vs PR are different core names
+830,FALSE,high,OSWALD vs ALTO are different core names
+737,FALSE,high,OSWALD vs OSAKA are different core names
+288,FALSE,high,A&S vs TARA are different core names
+311,FALSE,high,A&S vs CK are different core names
+726,FALSE,high,A&S vs PC are different core names
+310,FALSE,medium,A&S initials vs ASH different core names

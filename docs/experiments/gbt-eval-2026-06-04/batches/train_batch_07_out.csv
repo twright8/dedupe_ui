@@ -1,0 +1,56 @@
+pair_id,verdict,confidence,reason
+961,FALSE,high,Different tranche/fund numbers
+960,UNCERTAIN,low,Cannot determine from names and jurisdiction
+197,TRUE,high,Trivial typo in one token
+98,UNCERTAIN,low,Cannot determine from names and jurisdiction
+883,UNCERTAIN,low,Cannot determine from names and jurisdiction
+594,UNCERTAIN,low,Cannot determine from names and jurisdiction
+381,TRUE,high,Trivial typo in one token
+818,TRUE,high,Trivial typo in one token
+814,TRUE,high,"Same core name, different suffix"
+878,TRUE,high,Trivial typo in one token
+877,FALSE,high,Better match exists for ocod_uid
+584,TRUE,high,"Same core name, different suffix"
+939,FALSE,high,Different core names
+696,UNCERTAIN,low,Cannot determine from names and jurisdiction
+1003,TRUE,high,Same token sequence
+779,TRUE,high,Same token sequence
+658,UNCERTAIN,low,Cannot determine from names and jurisdiction
+712,TRUE,high,Same token sequence
+147,UNCERTAIN,low,Cannot determine from names and jurisdiction
+969,UNCERTAIN,low,Cannot determine from names and jurisdiction
+232,TRUE,high,Trivial typo in one token
+233,FALSE,high,Better match exists for ocod_uid
+580,TRUE,high,Same token sequence
+374,FALSE,high,Better match exists for ocod_uid
+579,TRUE,high,Same token sequence
+478,TRUE,high,Trivial typo in one token
+692,TRUE,high,Trivial typo in one token
+705,TRUE,high,Trivial typo in one token
+681,TRUE,high,Same token sequence
+372,TRUE,high,Same token sequence
+124,UNCERTAIN,low,Cannot determine from names and jurisdiction
+371,TRUE,high,Same token sequence
+108,TRUE,high,Same token sequence
+369,TRUE,high,Trivial typo in one token
+368,FALSE,high,Better match exists for ocod_uid
+795,FALSE,high,Different core names
+364,TRUE,high,Same token sequence
+573,FALSE,high,Better match exists for ocod_uid
+572,FALSE,high,Better match exists for ocod_uid
+794,TRUE,high,Same token sequence
+520,TRUE,high,"Same core name, different suffix"
+1048,TRUE,high,Same token sequence
+85,TRUE,high,Same token sequence
+173,FALSE,high,Better match exists for ocod_uid
+955,TRUE,high,"Same core name, different suffix"
+24,TRUE,high,Same token sequence
+1004,TRUE,high,Trivial typo in one token
+873,FALSE,high,Better match exists for ocod_uid
+821,TRUE,high,Same token sequence
+822,FALSE,high,Better match exists for ocod_uid
+464,TRUE,high,Trivial typo in one token
+1,UNCERTAIN,low,Cannot determine from names and jurisdiction
+1042,UNCERTAIN,low,Cannot determine from names and jurisdiction
+126,FALSE,high,Different core names
+697,UNCERTAIN,low,Cannot determine from names and jurisdiction
