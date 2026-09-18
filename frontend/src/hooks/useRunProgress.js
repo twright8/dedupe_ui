@@ -3,6 +3,7 @@
    ============================================================ */
 
 import { useState, useEffect, useRef } from "react";
+import { apiUrl } from "../api";
 
 export function useRunProgress(runId) {
   const [events, setEvents] = useState([]);
@@ -14,7 +15,7 @@ export function useRunProgress(runId) {
   useEffect(() => {
     if (!runId) return;
 
-    const url = `/api/runs/${runId}/progress`;
+    const url = apiUrl(`/api/runs/${runId}/progress`);
     const es = new EventSource(url);
     esRef.current = es;
 

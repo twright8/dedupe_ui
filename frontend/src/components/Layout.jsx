@@ -6,15 +6,17 @@
 import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import { Icons } from "./Icons";
+import { useProfile } from "../profile";
 
 // ---------- Brand block ----------
 export function Brand() {
+  const profile = useProfile();
   return (
     <div className="brand">
       <div className="brand-mark">TI</div>
       <div className="brand-text">
         <span className="org">Transparency Intl. UK</span>
-        <span className="tool">Linkage</span>
+        <span className="tool" title={profile.subtitle}>{profile.title}</span>
       </div>
     </div>
   );

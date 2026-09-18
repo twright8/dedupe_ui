@@ -8,6 +8,7 @@ import { SidebarNav, Topbar } from "./components/Layout";
 import { Icons } from "./components/Icons";
 import { LoginScreen, UserPicker } from "./auth";
 import { api } from "./api";
+import { useProfile } from "./profile";
 import RunsScreen from "./screens/RunsScreen";
 import NewRunScreen from "./screens/NewRunScreen";
 import RunDetailScreen from "./screens/RunDetailScreen";
@@ -18,6 +19,7 @@ import LabelsScreen from "./screens/LabelsScreen";
 import AuditScreen from "./screens/AuditScreen";
 import MethodologyScreen from "./screens/MethodologyScreen";
 import { Empty } from "./components/Empty";
+import { hasPairCounts } from "./counts";
 
 // ---------- Placeholder page (replaced by real screens in later tasks) ----------
 function Placeholder({ name }) {
@@ -37,18 +39,19 @@ function Placeholder({ name }) {
 function useCrumbs() {
   const location = useLocation();
   const path = location.pathname;
+  const root = useProfile().title;
 
-  if (path === "/runs/new") return ["Linkage", "Runs", "New run"];
-  if (path.match(/^\/runs\/[^/]+\/review$/)) return ["Linkage", "Runs", "Run", "Review queue"];
-  if (path.match(/^\/runs\/[^/]+\/ambiguous$/)) return ["Linkage", "Runs", "Run", "Ambiguous"];
-  if (path.match(/^\/runs\/[^/]+$/)) return ["Linkage", "Runs", "Run detail"];
-  if (path === "/runs") return ["Linkage", "Runs"];
-  if (path === "/review") return ["Linkage", "Review queue"];
-  if (path === "/ambiguous") return ["Linkage", "Ambiguous"];
-  if (path === "/labels") return ["Linkage", "Label library"];
-  if (path === "/config") return ["Linkage", "Config & rules"];
-  if (path === "/audit") return ["Linkage", "Audit log"];
-  return ["Linkage"];
+  if (path === "/runs/new") return [root, "Runs", "New run"];
+  if (path.match(/^\/runs\/[^/]+\/review$/)) return [root, "Runs", "Run", "Review queue"];
+  if (path.match(/^\/runs\/[^/]+\/ambiguous$/)) return [root, "Runs", "Run", "Ambiguous"];
+  if (path.match(/^\/runs\/[^/]+$/)) return [root, "Runs", "Run detail"];
+  if (path === "/runs") return [root, "Runs"];
+  if (path === "/review") return [root, "Review queue"];
+  if (path === "/ambiguous") return [root, "Ambiguous"];
+  if (path === "/labels") return [root, "Label library"];
+  if (path === "/config") return [root, "Config & rules"];
+  if (path === "/audit") return [root, "Audit log"];
+  return [root];
 }
 
 // ---------- Topbar right-side controls ----------
@@ -57,7 +60,7 @@ function TopbarRight() {
     <>
       <div className="search" style={{ width: 260 }}>
         <Icons.search size={14} />
-        <input className="input" placeholder="Search runs, names, ROE ids..." />
+        <input className="input" placeholder="Search runs, names, record ids..." />
       </div>
       <button className="btn"><Icons.refresh size={14} /></button>
       <button className="btn icon" title="Notifications"><Icons.alert size={14} /></button>
@@ -77,7 +80,11 @@ function LatestRunRedirect({ target }) {
         const runs = Array.isArray(data) ? data : data.runs || [];
         const bucket = target === "ambiguous" ? "ambiguous" : "review";
         const exact = runs.find((r) => r.status === "complete" && (r.counts?.[bucket] || 0) > 0);
-        const fallback = runs.find((r) => r.status === "complete");
+        // Fall back only to runs that produced pair counts at all. A run that
+        // only loaded records has no review or ambiguous queue to open.
+        const fallback = runs.find(
+          (r) => r.status === "complete" && hasPairCounts(r.counts)
+        );
         setState({ loading: false, run: exact || fallback || null, error: null });
       })
       .catch((err) => {

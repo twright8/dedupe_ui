@@ -509,11 +509,10 @@ def revert_run_to_splink(db_path: str, run_dir: str, config_dir: str, run_id: st
 # Core execution
 # ---------------------------------------------------------------------------
 
+# The dedupe pipeline replaces the old two-dataset linkage stages one slice at a
+# time. Slice 1 runs stage 0 only; matching stages are added beside it later.
 STAGE_NAMES = {
-    0: "preprocess",
-    1: "exact_match",
-    2: "probabilistic_link",
-    3: "evaluate",
+    0: "load",
 }
 
 
@@ -539,12 +538,10 @@ def start_run(
     db_path: str,
     data_dir: str,
     run_id: str,
-    ocod_path: str,
-    ch_path: str,
+    input_path: str,
     config_version: int,
     threshold_high: float,
     threshold_review: float,
-    cross_jurisdiction_name_matching: bool = True,
 ) -> str:
     """Prepare a run directory and launch the pipeline in a background thread.
 
@@ -562,13 +559,7 @@ def start_run(
     config_row = get_version(db_path, config_version)
     if config_row is None:
         raise ValueError(f"Config version {config_version} not found")
-    _write_config_files(
-        config_row,
-        config_dir,
-        threshold_high,
-        threshold_review,
-        cross_jurisdiction_name_matching=cross_jurisdiction_name_matching,
-    )
+    _write_config_files(config_row, config_dir, threshold_high, threshold_review)
 
     # Update run status
     now = datetime.now(timezone.utc).isoformat()
@@ -590,8 +581,7 @@ def start_run(
             "run_id": run_id,
             "run_dir": str(run_dir),
             "config_dir": str(config_dir),
-            "ocod_path": ocod_path,
-            "ch_path": ch_path,
+            "input_path": input_path,
             "threshold_high": threshold_high,
             "threshold_review": threshold_review,
         },
@@ -608,12 +598,15 @@ def _run_pipeline(
     run_id: str,
     run_dir: str,
     config_dir: str,
-    ocod_path: str,
-    ch_path: str,
+    input_path: str,
     threshold_high: float,
     threshold_review: float,
 ) -> None:
-    """Execute stages 0-3 sequentially in a background thread."""
+    """Execute the dedupe stages sequentially in a background thread.
+
+    Slice 1 has one stage: load the records. Matching, clustering and export
+    stages join it later, each replacing one of the old linkage stages.
+    """
     events_path = Path(run_dir) / "events.jsonl"
 
     def progress_callback(event_type: str, detail: dict) -> None:
@@ -636,92 +629,23 @@ def _run_pipeline(
 
     try:
         with _capture_pipeline_output(Path(run_dir)):
-            from app.pipeline.stage_0_preprocess import run_stage_0
-            from app.pipeline.stage_1_exact_match import run_stage_1
-            from app.pipeline.stage_2_probabilistic_link import run_stage_2
-            from app.pipeline.stage_2_5_gbt import run_stage_2_5_gbt
-            from app.pipeline.stage_3_evaluate import run_stage_3
+            from app.pipeline.dedupe.stage_0_load import run_stage_0_load
 
             # Count active labels before running so we know what was available.
-            # These train only the GBT (Stage 2.5) — Splink (Stage 2) is now a purely
-            # unsupervised candidate generator and never trains from labels.
+            # Nothing consumes them yet — matching arrives in a later slice — but
+            # the figure belongs with the run it was measured against.
             label_rows = query_db(
                 db_path,
                 "SELECT COUNT(*) AS n FROM labels WHERE active = 1",
             )
             labels_in_library = label_rows[0]["n"] if label_rows else 0
 
-            run_stage_0(
+            counts = run_stage_0_load(
                 run_dir=run_dir,
-                config_dir=config_dir,
-                ocod_zip=ocod_path,
-                ch_zip=ch_path,
+                input_path=input_path,
                 progress_callback=progress_callback,
             )
-
-            run_stage_1(
-                run_dir=run_dir,
-                config_dir=config_dir,
-                progress_callback=progress_callback,
-            )
-
-            run_stage_2(
-                run_dir=run_dir,
-                config_dir=config_dir,
-                progress_callback=progress_callback,
-            )
-
-            # Stage 2.5: GBT re-scoring (no-op until a model is trained). Adds a
-            # calibrated, continuous gbt_score column that Stage 3 buckets on when
-            # gbt_score_column is set in linkage_settings. When a model is ACTIVE, score
-            # with that (trusted) version so a fresh run auto-applies it instead of
-            # silently reverting to Splink.
-            active_version = gbt_model.get_active_version()
-            gbt_result = run_stage_2_5_gbt(
-                run_dir=run_dir,
-                progress_callback=progress_callback,
-                version=active_version,
-            )
-
-            # In-band GBT decision: an active model that actually scored this run buckets
-            # Stage 3 on the GBT (same flags/thresholds as apply, set BEFORE Stage 3),
-            # guarded so a collapse falls back to Splink instead of failing the run.
-            gbt_decision = {"decision_model": "splink", "decision_version": None, "warning": None}
-            if active_version is not None and gbt_result.get("model"):
-                gbt_decision = apply_active_gbt_bucketing(
-                    db_path, run_dir, config_dir, run_id, active_version,
-                    progress_callback=progress_callback,
-                )
-            else:
-                run_stage_3(
-                    run_dir=run_dir,
-                    config_dir=config_dir,
-                    progress_callback=progress_callback,
-                )
-
-            # Apply reviewer labels to the merged dataset. Label application is part
-            # of the run's success contract: if it raises, the error propagates to
-            # the outer handler and the run is marked failed — we never silently
-            # ship an export that ignores human labels.
-            # Baseline the model-only result BEFORE labels overlay the export. Both
-            # calls read the same CSVs and apply_labels rewrites merged_dataset.csv in
-            # place, so ordering is the whole mechanism: this must run first.
-            pre_label_counts = _collect_counts(Path(run_dir))
-
-            label_result = apply_labels(db_path, run_dir)
-
-            # Collect counts from output CSVs (post-label — what the export now says)
-            counts = _collect_counts(Path(run_dir))
-            counts["pre_labels"] = pre_label_counts
             counts["labels_in_library"] = labels_in_library
-            counts["labels_applied"] = label_result.get("applied", 0)
-            counts["labels_unmatched"] = label_result.get("unmatched", 0)
-            # Decision provenance in run metadata so the run list/detail can say which
-            # model decided this run without opening diagnostics.
-            counts["decision_model"] = gbt_decision["decision_model"]
-            counts["decision_model_version"] = gbt_decision["decision_version"]
-            if gbt_decision.get("warning"):
-                counts["gbt_warning"] = gbt_decision["warning"]
 
             now = datetime.now(timezone.utc).isoformat()
             started_rows = query_db(
@@ -737,19 +661,14 @@ def _run_pipeline(
                 except Exception:
                     pass
 
-            # Persist the thresholds the run actually bucketed on (GBT-scale after an
-            # in-band apply) so the diagnostics band-split matches the decision score.
-            _, final_settings = _load_run_settings(config_dir)
-            final_high = final_settings.get("match_probability_threshold_high", threshold_high)
-            final_review = final_settings.get("match_probability_threshold_review", threshold_review)
-
             write_db(
                 db_path,
                 """UPDATE runs
                    SET status = ?, finished_at = ?, duration_secs = ?, counts_json = ?,
                        threshold_high = ?, threshold_review = ?, current_stage = NULL
                    WHERE id = ?""",
-                ("complete", now, duration, json.dumps(counts), final_high, final_review, run_id),
+                ("complete", now, duration, json.dumps(counts), threshold_high,
+                 threshold_review, run_id),
             )
 
             progress_callback("complete", {"counts": counts})
@@ -879,24 +798,20 @@ def enqueue_run(
     db_path: str,
     data_dir: str,
     run_id: str,
-    ocod_path: str,
-    ch_path: str,
+    input_path: str,
     config_version: int,
     threshold_high: float,
     threshold_review: float,
-    cross_jurisdiction_name_matching: bool = True,
 ) -> None:
     """If no run is active, start immediately. Otherwise queue for later."""
     kwargs = {
         "db_path": db_path,
         "data_dir": data_dir,
         "run_id": run_id,
-        "ocod_path": ocod_path,
-        "ch_path": ch_path,
+        "input_path": input_path,
         "config_version": config_version,
         "threshold_high": threshold_high,
         "threshold_review": threshold_review,
-        "cross_jurisdiction_name_matching": cross_jurisdiction_name_matching,
     }
 
     with _run_lock:

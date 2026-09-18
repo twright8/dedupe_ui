@@ -155,7 +155,9 @@ def list_users(session: str = Cookie(None)):
 # Middleware — protect /api/* (except /api/auth/login and /api/health)
 # ---------------------------------------------------------------------------
 
-_PUBLIC_PATHS = {"/api/auth/login", "/api/auth/logout", "/api/health"}
+# /api/profile is public like /api/health: the frontend reads the title, base
+# path and column set before the login screen is drawn.
+_PUBLIC_PATHS = {"/api/auth/login", "/api/auth/logout", "/api/health", "/api/profile"}
 
 
 class SessionMiddleware(BaseHTTPMiddleware):

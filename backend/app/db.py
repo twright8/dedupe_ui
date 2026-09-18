@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS runs (
     duration_secs   REAL,
     triggered_by    TEXT,
     config_version  INTEGER,
+    input_filename  TEXT,
+    -- Unused since the run takes one input file. Kept so old rows still read.
     ocod_filename   TEXT,
     ch_filename     TEXT,
     error_message   TEXT,
@@ -126,6 +128,7 @@ CREATE INDEX IF NOT EXISTS idx_upload_sessions_status
 # (table, column, type) — applied only if the column is missing.
 _MIGRATIONS = [
     ("runs", "error_detail_json", "TEXT"),
+    ("runs", "input_filename", "TEXT"),
     ("labels", "provenance", "TEXT"),
     ("labels", "held_out", "INTEGER NOT NULL DEFAULT 0"),
     ("labels", "superseded_by", "INTEGER"),

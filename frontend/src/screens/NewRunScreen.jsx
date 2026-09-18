@@ -1,11 +1,12 @@
 /* ============================================================
-   Screen: New run (upload OCOD + CH, configure, start)
+   Screen: New run (upload the input file, configure, start)
    ============================================================ */
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { Icons } from "../components/Icons";
+import { useProfile } from "../profile";
 
 // ---------- Stat mini-card ----------
 function Stat({ label, value }) {
@@ -121,8 +122,12 @@ function useChunkedUpload() {
 }
 
 // ---------- File upload card ----------
-function UploadCard({ label, tag, uploadState, inputRef }) {
+// `extensions` comes from the profile (e.g. [".xlsx", ".csv"]) and drives both
+// the file picker filter and the hint under the dropzone.
+function UploadCard({ label, tag, help, extensions, uploadState, inputRef }) {
   const { file, progress, status, upload, reset } = uploadState;
+  const accept = (extensions || []).join(",");
+  const extensionHint = (extensions || []).join(" or ") + " accepted";
 
   function handleDrop(e) {
     e.preventDefault();
@@ -157,6 +162,11 @@ function UploadCard({ label, tag, uploadState, inputRef }) {
         )}
       </div>
       <div className="card-b">
+        {help && (
+          <p className="muted" style={{ fontSize: 12, margin: "0 0 10px", lineHeight: 1.5 }}>
+            {help}
+          </p>
+        )}
         {!file ? (
           <div
             className="dropzone"
@@ -170,12 +180,12 @@ function UploadCard({ label, tag, uploadState, inputRef }) {
               Drop a file here or click to browse
             </div>
             <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-              .zip or .csv accepted
+              {extensionHint}
             </div>
             <input
               ref={inputRef}
               type="file"
-              accept=".zip,.csv"
+              accept={accept}
               style={{ display: "none" }}
               onChange={handleChange}
             />
@@ -246,6 +256,8 @@ function UploadCard({ label, tag, uploadState, inputRef }) {
 export default function NewRunScreen() {
   const navigate = useNavigate();
   const location = useLocation();
+  const profile = useProfile();
+  const input = profile.input || {};
 
   // Config versions
   const [configVersions, setConfigVersions] = useState([]);
@@ -270,16 +282,13 @@ export default function NewRunScreen() {
       .catch(() => {});
   }, []);
 
-  // Upload state
-  const ocodUpload = useChunkedUpload();
-  const chUpload = useChunkedUpload();
-  const ocodInputRef = useRef(null);
-  const chInputRef = useRef(null);
+  // Upload state — one input file per run
+  const inputUpload = useChunkedUpload();
+  const inputFileRef = useRef(null);
 
   // Settings
   const [thresh, setThresh] = useState(0.92);
   const [reviewLow, setReviewLow] = useState(0.5);
-  const [crossJurisdiction, setCrossJurisdiction] = useState(true);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -329,12 +338,10 @@ export default function NewRunScreen() {
     setSubmitting(true);
     api
       .createRun({
-        ocod_upload_id: ocodUpload.uploadId,
-        ch_upload_id: chUpload.uploadId,
+        input_upload_id: inputUpload.uploadId,
         config_version: config,
         auto_accept_threshold: thresh,
         review_lower_bound: reviewLow,
-        cross_jurisdiction_name_matching: crossJurisdiction,
       })
       .then((result) => {
         const runId = result.id || result.run_id;
@@ -346,11 +353,7 @@ export default function NewRunScreen() {
       });
   }
 
-  const canStart =
-    ocodUpload.status === "done" &&
-    chUpload.status === "done" &&
-    config &&
-    !submitting;
+  const canStart = inputUpload.status === "done" && config && !submitting;
 
   return (
     <div className="content" style={{ maxWidth: 1100 }}>
@@ -358,10 +361,9 @@ export default function NewRunScreen() {
         <div>
           <h1 className="page-title">New run</h1>
           <p className="page-sub">
-            Upload an OCOD release and a Companies House Basic Company Data
-            snapshot. The pipeline preprocesses, runs Phase&nbsp;1 (exact) and
-            Phase&nbsp;2 (probabilistic, Splink), then writes CSVs and HTML
-            diagnostics.
+            Upload {input.label || "the input file"}. The pipeline preprocesses, runs
+            Phase&nbsp;1 (exact) and Phase&nbsp;2 (probabilistic, Splink), then writes
+            CSVs and HTML diagnostics.
           </p>
         </div>
       </div>
@@ -380,20 +382,14 @@ export default function NewRunScreen() {
             gap: 16,
           }}
         >
-          {/* OCOD upload */}
+          {/* Input upload */}
           <UploadCard
-            label="OCOD dataset"
-            tag="UK Land Registry"
-            uploadState={ocodUpload}
-            inputRef={ocodInputRef}
-          />
-
-          {/* CH upload */}
-          <UploadCard
-            label="Companies House — Basic Company Data"
-            tag="UK CH snapshot"
-            uploadState={chUpload}
-            inputRef={chInputRef}
+            label={input.label || "Input file"}
+            tag={(input.extensions || []).join(" / ")}
+            help={input.help}
+            extensions={input.extensions}
+            uploadState={inputUpload}
+            inputRef={inputFileRef}
           />
 
           {/* Pipeline preview */}
@@ -564,24 +560,6 @@ export default function NewRunScreen() {
               scale) — you don't set those here.
             </div>
 
-            <div className="field" style={{ borderTop: "1px solid var(--line)", paddingTop: 12 }}>
-              <label
-                style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer", fontWeight: 500 }}
-              >
-                <input
-                  type="checkbox"
-                  checked={crossJurisdiction}
-                  onChange={(e) => setCrossJurisdiction(e.target.checked)}
-                  style={{ marginTop: 2 }}
-                />
-                <span>Also compare same-name pairs across different jurisdictions (recommended)</span>
-              </label>
-              <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-                Lets Phase&nbsp;2 match records whose jurisdictions differ or are unknown, when their
-                core name matches. Uncheck to block strictly within a jurisdiction.
-              </div>
-            </div>
-
             <div
               className="muted"
               style={{
@@ -608,7 +586,7 @@ export default function NewRunScreen() {
             >
               {canStart
                 ? "You'll see live progress and can cancel at any stage."
-                : "Upload both files to start."}
+                : "Upload the file to start."}
             </div>
           </div>
         </div>

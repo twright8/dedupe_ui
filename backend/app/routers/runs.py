@@ -15,8 +15,10 @@ from pydantic import BaseModel
 
 from app.auth import current_user
 from app.db import query_db, write_db
+from app.profiles import get_profile
 from app.services.config_manager import get_version
 from app.services import pipeline_runner
+from app.services import records_reader
 from app.services.audit_logger import log_event
 from app.services.label_applier import apply_labels as _apply_labels
 from app.services.match_reader import get_matches as _get_matches
@@ -26,9 +28,10 @@ from app.routers.labels import upsert_label
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
-# Accepted input file types for OCOD / Companies House data. The pipeline reads
-# a .csv directly or the single .csv inside a .zip (see stage_0_preprocess).
-_ALLOWED_INPUT_SUFFIXES = {".zip", ".csv"}
+
+def _allowed_input_suffixes() -> set[str]:
+    """Accepted input file types, declared by the profile — never hard-coded here."""
+    return {e.lower() for e in get_profile().input.extensions}
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +125,7 @@ def _top_jurisdictions_from_outputs(paths: list[Path]) -> list[dict]:
 
 # File descriptions for known output files
 _FILE_DESCRIPTIONS = {
+    "records.parquet": "Loaded records, one row per record",
     "matches_exact.csv": "Phase 1 deterministic exact matches",
     "matches_high_confidence.csv": "All high-confidence matches (exact + probabilistic)",
     "matches_for_review.csv": "Probabilistic matches in the review band",
@@ -147,10 +151,10 @@ _FILE_DESCRIPTIONS = {
 
 
 class CreateRunRequest(BaseModel):
-    ocod_filename: str | None = None
-    ch_filename: str | None = None
-    ocod_upload_id: str | None = None
-    ch_upload_id: str | None = None
+    # One dataset, so one input file: either the id of a completed chunked
+    # upload, or the name of a file already sitting in the uploads directory.
+    input_upload_id: str | None = None
+    input_filename: str | None = None
     config_version: int = 1
     threshold_high: float | None = None
     threshold_review: float | None = None
@@ -158,10 +162,6 @@ class CreateRunRequest(BaseModel):
     review_lower_bound: float | None = None
     render_diagnostics: bool = True
     quick_mode: bool = False
-    # When True (default), Stage 2 also compares same-name records across different
-    # jurisdictions (adds the name_core blocking rule). When False the run's config
-    # snapshot drops that rule, restoring jurisdiction-only blocking.
-    cross_jurisdiction_name_matching: bool = True
 
 
 class MarkUnlabelledRequest(BaseModel):
@@ -205,78 +205,68 @@ def create_run(body: CreateRunRequest, user_name: str = Depends(current_user)):
     t_high = body.threshold_high or body.auto_accept_threshold or default_high
     t_review = body.threshold_review or body.review_lower_bound or default_review
 
-    # Resolve filenames — accept either direct filename or upload_id
+    # Resolve the one input file — accept either a direct filename or an upload_id
     uploads_dir = data_dir / "uploads"
+    allowed = _allowed_input_suffixes()
+    input_label = get_profile().input.label
 
-    def _resolve_file(filename, upload_id, label):
+    def _resolve_file(filename, upload_id):
         if upload_id:
             rows = query_db(db_path, "SELECT * FROM upload_sessions WHERE upload_id = ?", (upload_id,))
             if not rows:
-                raise HTTPException(status_code=400, detail=f"{label} upload session not found")
+                raise HTTPException(status_code=400, detail="Upload session not found")
             upload = rows[0]
             if upload["status"] != "complete":
-                raise HTTPException(status_code=400, detail=f"{label} upload is not complete")
+                raise HTTPException(status_code=400, detail="Upload is not complete")
             stored = upload["stored_filename"] or upload["filename"]
             p = uploads_dir / stored
             if not p.exists():
-                raise HTTPException(status_code=400, detail=f"{label} uploaded file is missing on disk")
+                raise HTTPException(status_code=400, detail="Uploaded file is missing on disk")
             return p, upload["filename"]
         if filename:
             p = uploads_dir / filename
             if p.exists():
                 return p, filename
         # The chunked upload handler saves reassembled files with the original
-        # filename in the uploads dir. List all candidate inputs and find by
-        # recency if we can't match by name. With only 3-5 users and sequential
-        # runs, this is adequate.
+        # filename in the uploads dir. Fall back to the most recent candidate
+        # when we can't match by name. With only 3-5 users and sequential runs,
+        # this is adequate.
         candidates = sorted(
-            [
-                f for f in uploads_dir.iterdir()
-                if f.is_file() and f.suffix.lower() in _ALLOWED_INPUT_SUFFIXES
-            ],
+            [f for f in uploads_dir.iterdir() if f.is_file() and f.suffix.lower() in allowed],
             key=lambda f: f.stat().st_mtime,
             reverse=True,
         )
-        if label == "OCOD":
-            match = [f for f in candidates if "ocod" in f.name.lower()]
-        else:
-            match = [f for f in candidates if "ocod" not in f.name.lower()]
-        if match:
-            return match[0], match[0].name
         if candidates:
             return candidates[0], candidates[0].name
-        raise HTTPException(status_code=400, detail=f"{label} file not found. Upload a file first.")
+        raise HTTPException(
+            status_code=400,
+            detail=f"{input_label} not found. Upload a file first.",
+        )
 
-    def _validate_input(path: Path, label: str) -> None:
-        suffix = path.suffix.lower()
-        if suffix not in _ALLOWED_INPUT_SUFFIXES:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"{label} file '{path.name}' must be a .zip or .csv "
-                    f"(got '{suffix or 'no extension'}'). Re-select the correct file."
-                ),
-            )
-
-    ocod_path, ocod_fname = _resolve_file(body.ocod_filename, body.ocod_upload_id, "OCOD")
-    ch_path, ch_fname = _resolve_file(body.ch_filename, body.ch_upload_id, "CH")
-    _validate_input(ocod_path, "OCOD")
-    _validate_input(ch_path, "CH")
+    input_path, input_fname = _resolve_file(body.input_filename, body.input_upload_id)
+    suffix = input_path.suffix.lower()
+    if suffix not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"'{input_path.name}' must be a {' or '.join(sorted(allowed))} file "
+                f"(got '{suffix or 'no extension'}'). Re-select the correct file."
+            ),
+        )
 
     run_id = _generate_run_id(db_path)
 
     # Insert the run row
     write_db(
         db_path,
-        """INSERT INTO runs (id, status, config_version, ocod_filename, ch_filename,
+        """INSERT INTO runs (id, status, config_version, input_filename,
                              threshold_high, threshold_review, triggered_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             run_id,
             "pending",
             body.config_version,
-            ocod_fname,
-            ch_fname,
+            input_fname,
             t_high,
             t_review,
             user_name,
@@ -291,8 +281,7 @@ def create_run(body: CreateRunRequest, user_name: str = Depends(current_user)):
         metadata={
             "run_id": run_id,
             "config_version": body.config_version,
-            "ocod_filename": ocod_fname,
-            "ch_filename": ch_fname,
+            "input_filename": input_fname,
         },
     )
 
@@ -301,17 +290,22 @@ def create_run(body: CreateRunRequest, user_name: str = Depends(current_user)):
         db_path=db_path,
         data_dir=str(data_dir),
         run_id=run_id,
-        ocod_path=str(ocod_path),
-        ch_path=str(ch_path),
+        input_path=str(input_path),
         config_version=body.config_version,
         threshold_high=t_high,
         threshold_review=t_review,
-        cross_jurisdiction_name_matching=body.cross_jurisdiction_name_matching,
     )
 
     # Return the run row
     rows = query_db(db_path, "SELECT * FROM runs WHERE id = ?", (run_id,))
     return rows[0] if rows else {"id": run_id, "status": "pending"}
+
+
+# counts_json keys written by the matching stages (not by the stage 0 loader).
+_PAIR_COUNT_KEYS = (
+    "matches_exact", "exact", "matches_high_confidence", "high", "high_confidence",
+    "matches_for_review", "review", "matches_ambiguous", "ambiguous",
+)
 
 
 def _normalize_counts(raw):
@@ -373,6 +367,19 @@ def _normalize_counts(raw):
         # export. None on runs made before this was captured. Recurses once — the
         # baseline never carries a baseline of its own.
         "preLabels": _normalize_counts(raw.get("pre_labels")),
+        # Dedupe stage 0 — what the loader read and made of it. Zero on a run
+        # that predates the loader.
+        "inputRows": raw.get("input_rows", 0),
+        "inputRowsDropped": raw.get("input_rows_dropped", 0),
+        "recordsTotal": raw.get("records_total", 0),
+        "recordsPerson": raw.get("records_person", 0),
+        "recordsOrganisation": raw.get("records_organisation", 0),
+        "recordsLabelled": raw.get("records_labelled", 0),
+        "recordsUnreviewed": raw.get("records_unreviewed", 0),
+        # Every key above defaults to 0, so the frontend cannot tell "no pairs yet"
+        # from "zero pairs" by value. These two flags say which stages have run.
+        "hasRecords": "records_total" in raw,
+        "hasPairs": any(k in raw for k in _PAIR_COUNT_KEYS),
     }
 
 
@@ -383,7 +390,7 @@ def list_runs():
     rows = query_db(
         db_path,
         """SELECT id, label, status, started_at, finished_at, duration_secs,
-                  triggered_by, config_version, ocod_filename, ch_filename,
+                  triggered_by, config_version, input_filename,
                   error_message, current_stage, threshold_high, threshold_review,
                   counts_json
            FROM runs ORDER BY started_at DESC""",
@@ -934,6 +941,45 @@ def mark_unlabelled(
         "marked": marked,
         "skipped": skipped,
     }
+
+
+@router.get("/{run_id}/records")
+def get_records(
+    run_id: str,
+    track: str | None = Query(None, description="person | organisation"),
+    state: str | None = Query(None, description="labelled | unreviewed"),
+    q: str | None = Query(None, description="Case-insensitive substring over name, all spellings and record id"),
+    sort: str = Query(records_reader.DEFAULT_SORT, description="Any column key from the profile's records"),
+    order: str = Query("asc", description="asc | desc"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(records_reader.DEFAULT_LIMIT, ge=1, le=records_reader.MAX_LIMIT),
+):
+    """Return one page of a run's loaded records.
+
+    ``total`` reflects the filters; ``counts`` describe the whole run and ignore
+    them, so the track and state tabs stay stable while a search narrows the list.
+    """
+    db_path = _db_path()
+    run_dir = str(_data_dir_from_main() / "runs" / run_id)
+
+    if not query_db(db_path, "SELECT id FROM runs WHERE id = ?", (run_id,)):
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    try:
+        return records_reader.get_records(
+            run_dir=run_dir,
+            track=track,
+            state=state,
+            q=q,
+            sort=sort,
+            order=order,
+            offset=offset,
+            limit=limit,
+        )
+    except records_reader.RecordsNotFound:
+        raise HTTPException(status_code=404, detail="Run has no records yet")
+    except records_reader.InvalidQuery as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/{run_id}/matches")

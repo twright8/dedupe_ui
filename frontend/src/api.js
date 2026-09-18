@@ -1,6 +1,18 @@
 /* ============================================================
    API client — thin fetch wrappers for /api/* endpoints
+   ------------------------------------------------------------
+   One build serves any URL prefix. In production the backend injects
+   window.__BASE__ (e.g. "/donations") into index.html; in dev it is
+   undefined, which means "no prefix". Every request and every URL we
+   hand to the browser goes through apiUrl() so the prefix is applied
+   in exactly one place.
    ============================================================ */
+
+// Root-relative paths get the deploy prefix; anything else is left alone.
+export function apiUrl(path) {
+  const base = (typeof window !== "undefined" && window.__BASE__) || "";
+  return path.startsWith("/") ? base + path : path;
+}
 
 async function request(method, path, body) {
   const opts = {
@@ -11,7 +23,7 @@ async function request(method, path, body) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(path, opts);
+  const res = await fetch(apiUrl(path), opts);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`${method} ${path} ${res.status}: ${text}`);
@@ -34,6 +46,11 @@ function del(path) {
 }
 
 export const api = {
+  // --- Profile (which tool this instance is; no login needed) ---
+  getProfile() {
+    return get("/api/profile");
+  },
+
   // --- Auth ---
   login(credentials) {
     return post("/api/auth/login", credentials);
@@ -64,6 +81,10 @@ export const api = {
   },
   getRunFiles(id) {
     return get(`/api/runs/${id}/files`);
+  },
+  getRunRecords(id, params) {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return get(`/api/runs/${id}/records${qs}`);
   },
   getRunMatches(id, params) {
     const qs = params ? "?" + new URLSearchParams(params).toString() : "";
@@ -102,13 +123,15 @@ export const api = {
     return post(`/api/runs/${id}/mark-unlabelled`, data);
   },
   runFileUrl(id, filename) {
-    return `/api/runs/${encodeURIComponent(id)}/files/${filename
-      .split("/")
-      .map(encodeURIComponent)
-      .join("/")}`;
+    return apiUrl(
+      `/api/runs/${encodeURIComponent(id)}/files/${filename
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/")}`
+    );
   },
   runAllFilesUrl(id) {
-    return `/api/runs/${encodeURIComponent(id)}/files/all`;
+    return apiUrl(`/api/runs/${encodeURIComponent(id)}/files/all`);
   },
 
   // --- Labels ---
@@ -128,7 +151,9 @@ export const api = {
   setLabelsRole(ids, heldOut) {
     return post("/api/labels/role", { ids, held_out: heldOut ? 1 : 0 });
   },
-  labelsExportUrl: "/api/labels/export.csv",
+  labelsExportUrl() {
+    return apiUrl("/api/labels/export.csv");
+  },
   importLabelsCsv(csvText) {
     return post("/api/labels/import-csv", { csv: csvText });
   },
@@ -203,12 +228,12 @@ export const api = {
   },
   auditExportUrl(params) {
     const qs = params ? "?" + new URLSearchParams(params).toString() : "";
-    return `/api/audit/export.jsonl${qs}`;
+    return apiUrl(`/api/audit/export.jsonl${qs}`);
   },
 
   // --- Uploads ---
   uploadChunk(uploadId, formData) {
-    return fetch("/api/uploads", {
+    return fetch(apiUrl("/api/uploads"), {
       method: "POST",
       body: formData,
     }).then((res) => {

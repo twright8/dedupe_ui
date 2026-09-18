@@ -1,14 +1,17 @@
 /* ============================================================
-   Screen: Run detail — summary, diagnostics, files, history
+   Screen: Run detail — summary, records, diagnostics, files, history
    ============================================================ */
 
 import { Component, useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, apiUrl } from "../api";
 import { Icons } from "../components/Icons";
 import { fmtNumber, fmtPct, fmtDateTime, timeAgo } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
 import ModelPanel from "../components/ModelPanel";
+import RecordsTable from "../components/RecordsTable";
+import { useProfile } from "../profile";
+import { hasPairCounts, hasRecordCounts, trackCountKey } from "../counts";
 import { useRunProgress } from "../hooks/useRunProgress";
 
 // ---------- Unmapped-jurisdictions self-serve fix ----------
@@ -173,6 +176,54 @@ function ConfCell({ n, good, warn, note }) {
   );
 }
 
+// ---------- Record KPI strip ----------
+// Track cards come from the profile, so a profile with different tracks gets
+// its own cards without a change here. Count keys come from trackCountKey().
+function RecordKpis({ c }) {
+  const tracks = useProfile().tracks || [];
+  const share = (n) =>
+    fmtPct(c.recordsTotal > 0 ? (n || 0) / c.recordsTotal : 0, 1) + " of records";
+
+  return (
+    <div className="kpi-grid">
+      <div className="kpi">
+        <div className="label">Records</div>
+        <div className="value">{fmtNumber(c.recordsTotal)}</div>
+        <div className="delta muted">{fmtNumber(c.inputRows)} rows in the file</div>
+      </div>
+      {tracks.map((t) => (
+        <div className="kpi" key={t.key}>
+          <div className="label">{t.label}</div>
+          <div className="value">{fmtNumber(c[trackCountKey(t.key)])}</div>
+          <div className="delta muted">{share(c[trackCountKey(t.key)])}</div>
+        </div>
+      ))}
+      <div className="kpi">
+        <div className="label">Already labelled</div>
+        <div className="value">{fmtNumber(c.recordsLabelled)}</div>
+        <div className="delta muted">decided in an earlier round</div>
+      </div>
+      <div className="kpi">
+        <div className="label">Unreviewed</div>
+        <div className="value" style={{ color: "var(--amber)" }}>
+          {fmtNumber(c.recordsUnreviewed)}
+        </div>
+        <div className="delta muted">no decision yet</div>
+      </div>
+      <div className="kpi">
+        <div className="label">Input rows dropped</div>
+        <div
+          className="value"
+          style={c.inputRowsDropped ? { color: "var(--ti-red)" } : undefined}
+        >
+          {fmtNumber(c.inputRowsDropped)}
+        </div>
+        <div className="delta muted">unusable rows in the upload</div>
+      </div>
+    </div>
+  );
+}
+
 function normalizeRun(r) {
   if (!r) return r;
   const dur = r.duration_secs;
@@ -189,10 +240,14 @@ function normalizeRun(r) {
     duration,
     config: r.config_version != null ? `v${r.config_version}` : r.config || "",
     by: r.triggered_by || r.by || "",
-    label: r.label || `${r.ocod_filename || "OCOD"} · ${r.ch_filename || "Companies House"}`,
+    label: r.label || r.input_filename || "Run",
     counts: r.counts || null,
   };
 }
+
+// A run that only loaded records has no pairs yet, so everything the linkage
+// pipeline produced — review queue, ambiguous cases, match exports — is absent.
+// hasPairCounts / hasRecordCounts (../counts) read the flags the API returns.
 
 function formatTimelineEvent(e) {
   const event = e.event || e.type || "";
@@ -259,12 +314,38 @@ function RunSummary({ run, onReview }) {
     }
   }, [run?.id]);
 
-  if (!c) {
+  const pairs = hasPairCounts(c);
+  const records = hasRecordCounts(c);
+
+  if (!c || (!pairs && !records)) {
     return (
       <Empty
         title="No match data"
         sub={run.error || "This run did not produce match results."}
       />
+    );
+  }
+
+  // A run that only loaded records: no pair panels to draw, so say what there
+  // is and point at the Records tab.
+  if (!pairs) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <RecordKpis c={c} />
+        <div className="card">
+          <div className="card-h">
+            <Icons.table size={16} />
+            <h3>Records loaded</h3>
+          </div>
+          <div className="card-b">
+            <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.6 }}>
+              This run read the input file and sorted every record into a track. Open the{" "}
+              <strong>Records</strong> tab to read them. Matching, the review queue and
+              entity IDs are not built yet.
+            </p>
+          </div>
+        </div>
+      </div>
     );
   }
 
@@ -330,6 +411,9 @@ function RunSummary({ run, onReview }) {
     <div
       style={{ display: "flex", flexDirection: "column", gap: 20 }}
     >
+      {/* Record counts, when this run also recorded them */}
+      {records && <RecordKpis c={c} />}
+
       {/* KPI strip */}
       <div className="kpi-grid">
         <div className="kpi">
@@ -1228,7 +1312,7 @@ function RunFiles({ runId }) {
               </td>
               <td>
                 <a
-                  href={f.url || api.runFileUrl(runId, f.name)}
+                  href={f.url ? apiUrl(f.url) : api.runFileUrl(runId, f.name)}
                   download
                   className="btn sm"
                 >
@@ -1369,6 +1453,7 @@ function RunProgress({ runId }) {
 export default function RunDetailScreen() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const profile = useProfile();
   const [run, setRun] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -1430,6 +1515,9 @@ export default function RunDetailScreen() {
   const isRunning =
     run.status === "running" || run.status === "queued";
   const buckets = run.counts;
+  // Match exports and the review queue only exist once the run has produced
+  // pairs. Hide them otherwise rather than send the user to a 404.
+  const pairs = hasPairCounts(run.counts);
 
   return (
     <div className="content">
@@ -1504,23 +1592,27 @@ export default function RunDetailScreen() {
             <Icons.refresh size={14} /> Re-run with{" "}
             {run.config}
           </button>
-          <a
-            className="btn"
-            href={api.runFileUrl(id, "matches_final.csv")}
-            download
-            title="Only the rows that got a match — exact + high-confidence + the ones you confirmed — without the blanks."
-          >
-            <Icons.export size={14} /> Download matches only
-          </a>
-          <a
-            className="btn"
-            href={api.runFileUrl(id, "merged_dataset.csv")}
-            download
-            title="Every OCOD row, with its match where there is one and a blank where there isn't."
-          >
-            <Icons.export size={14} /> Export all rows (full)
-          </a>
-          {buckets && buckets.review > 0 && (
+          {pairs && (
+            <a
+              className="btn"
+              href={api.runFileUrl(id, "matches_final.csv")}
+              download
+              title="Only the rows that got a match — exact + high-confidence + the ones you confirmed — without the blanks."
+            >
+              <Icons.export size={14} /> Download matches only
+            </a>
+          )}
+          {pairs && (
+            <a
+              className="btn"
+              href={api.runFileUrl(id, "merged_dataset.csv")}
+              download
+              title="Every OCOD row, with its match where there is one and a blank where there isn't."
+            >
+              <Icons.export size={14} /> Export all rows (full)
+            </a>
+          )}
+          {pairs && buckets.review > 0 && (
             <button
               className="btn primary"
               onClick={() => navigate(`/runs/${id}/review`)}
@@ -1551,7 +1643,7 @@ export default function RunDetailScreen() {
 
       {/* Tabs */}
       <div className="tabs">
-        {["summary", "diagnostics", "files", "history"].map(
+        {["summary", "records", "diagnostics", "files", "history"].map(
           (t) => (
             <div
               key={t}
@@ -1574,6 +1666,7 @@ export default function RunDetailScreen() {
         />
       )}
       <PanelErrorBoundary resetKey={`${id}:${tab}`}>
+        {tab === "records" && <RecordsTable runId={id} profile={profile} />}
         {tab === "diagnostics" && <RunDiagnostics runId={id} />}
         {tab === "files" && <RunFiles runId={id} />}
         {tab === "history" && <RunHistory runId={id} />}

@@ -8,6 +8,11 @@ import { api } from "../api";
 import { Icons } from "../components/Icons";
 import { fmtNumber, fmtPct, fmtDateTime, timeAgo } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
+import { useProfile } from "../profile";
+import { hasPairCounts, hasRecordCounts, trackCountKey } from "../counts";
+
+// Old linkage runs report pair buckets; a run that only loaded records does not.
+// The list shows whichever set of numbers the runs actually carry.
 
 function normalizeRun(r) {
   const dur = r.duration_secs;
@@ -25,13 +30,15 @@ function normalizeRun(r) {
     config: r.config_version != null ? `v${r.config_version}` : r.config || "",
     by: r.triggered_by || r.by || "",
     byInit: r.triggered_by ? r.triggered_by.split(" ").map(w => w[0] || "").join("").toUpperCase().slice(0, 2) : r.byInit || "",
-    label: r.label || `${r.ocod_filename || ""} · ${r.ch_filename || ""}`,
+    label: r.label || r.input_filename || "",
     counts: r.counts || null,
   };
 }
 
 export default function RunsScreen() {
   const navigate = useNavigate();
+  const profile = useProfile();
+  const tracks = profile.tracks || [];
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -69,9 +76,12 @@ export default function RunsScreen() {
       );
     });
 
+  // Which numbers this list can show at all
+  const anyPairs = runs.some((r) => hasPairCounts(r.counts));
+
   // Sparkline: recent match rates (oldest -> newest, left -> right)
   const recent = [...runs]
-    .filter((r) => r.counts)
+    .filter((r) => hasPairCounts(r.counts))
     .reverse()
     .slice(-8);
   const maxRate = recent.length
@@ -114,9 +124,8 @@ export default function RunsScreen() {
         <div>
           <h1 className="page-title">Runs</h1>
           <p className="page-sub">
-            Each run links one pair of uploads (OCOD + Companies House) into
-            matches, review queue, ambiguous, and unmatched. Labels persist
-            across runs.
+            Each run reads one {profile.input?.label || "input file"} and reconciles
+            the records inside it. Labels persist across runs.
           </p>
         </div>
         <button
@@ -128,8 +137,44 @@ export default function RunsScreen() {
         </button>
       </div>
 
-      {/* KPI strip */}
-      {latest && latest.counts && (
+      {/* KPI strip — record counts when the latest run has no pair buckets */}
+      {latest && !hasPairCounts(latest.counts) && hasRecordCounts(latest.counts) && (
+        <div className="kpi-grid" style={{ marginBottom: 20 }}>
+          <div className="kpi">
+            <div className="label">Records (latest)</div>
+            <div className="value">{fmtNumber(latest.counts.recordsTotal)}</div>
+            <div className="delta muted">
+              {fmtNumber(latest.counts.inputRows)} rows in the file
+            </div>
+          </div>
+          {tracks.map((t) => (
+            <div className="kpi" key={t.key}>
+              <div className="label">{t.label}</div>
+              <div className="value">{fmtNumber(latest.counts[trackCountKey(t.key)])}</div>
+              <div className="delta muted">
+                {fmtPct(
+                  latest.counts.recordsTotal > 0
+                    ? (latest.counts[trackCountKey(t.key)] || 0) / latest.counts.recordsTotal
+                    : 0,
+                  1
+                )}{" "}
+                of records
+              </div>
+            </div>
+          ))}
+          <div className="kpi">
+            <div className="label">Unreviewed</div>
+            <div className="value" style={{ color: "var(--amber)" }}>
+              {fmtNumber(latest.counts.recordsUnreviewed)}
+            </div>
+            <div className="delta muted">
+              {fmtNumber(latest.counts.recordsLabelled)} already labelled
+            </div>
+          </div>
+        </div>
+      )}
+
+      {latest && hasPairCounts(latest.counts) && (
         <div className="kpi-grid" style={{ marginBottom: 20 }}>
           <div className="kpi">
             <div className="label">Latest match rate</div>
@@ -266,22 +311,41 @@ export default function RunsScreen() {
                 <th>Run</th>
                 <th>Started</th>
                 <th>Duration</th>
-                <th className="tnum" style={{ textAlign: "right" }}>
-                  OCOD rows
-                </th>
-                <th className="tnum" style={{ textAlign: "right" }}>
-                  ROE rows
-                </th>
-                <th className="tnum" style={{ textAlign: "right" }}>
-                  Matches
-                </th>
-                <th className="tnum" style={{ textAlign: "right" }}>
-                  Review
-                </th>
-                <th className="tnum" style={{ textAlign: "right" }}>
-                  Ambig.
-                </th>
-                <th>Rate</th>
+                {anyPairs ? (
+                  <>
+                    <th className="tnum" style={{ textAlign: "right" }}>
+                      OCOD rows
+                    </th>
+                    <th className="tnum" style={{ textAlign: "right" }}>
+                      ROE rows
+                    </th>
+                    <th className="tnum" style={{ textAlign: "right" }}>
+                      Matches
+                    </th>
+                    <th className="tnum" style={{ textAlign: "right" }}>
+                      Review
+                    </th>
+                    <th className="tnum" style={{ textAlign: "right" }}>
+                      Ambig.
+                    </th>
+                    <th>Rate</th>
+                  </>
+                ) : (
+                  <>
+                    <th className="tnum" style={{ textAlign: "right" }}>
+                      Records
+                    </th>
+                    {tracks.map((t) => (
+                      <th
+                        key={t.key}
+                        className="tnum"
+                        style={{ textAlign: "right" }}
+                      >
+                        {t.label}
+                      </th>
+                    ))}
+                  </>
+                )}
                 <th>Config</th>
                 <th>By</th>
                 <th style={{ width: 60 }}></th>
@@ -322,81 +386,105 @@ export default function RunsScreen() {
                     </div>
                   </td>
                   <td className="mono">{r.duration}</td>
-                  <td
-                    className="mono"
-                    style={{ textAlign: "right" }}
-                  >
-                    {fmtNumber(r.counts?.ocod)}
-                  </td>
-                  <td
-                    className="mono"
-                    style={{ textAlign: "right" }}
-                  >
-                    {fmtNumber(r.counts?.roe)}
-                  </td>
-                  <td
-                    className="mono"
-                    style={{ textAlign: "right" }}
-                  >
-                    {r.counts
-                      ? fmtNumber(
-                          r.counts.exact + r.counts.probAccept
-                        )
-                      : "—"}
-                  </td>
-                  <td
-                    className="mono"
-                    style={{
-                      textAlign: "right",
-                      color: r.counts?.review
-                        ? "var(--amber)"
-                        : "var(--muted)",
-                    }}
-                  >
-                    {fmtNumber(r.counts?.review)}
-                  </td>
-                  <td
-                    className="mono"
-                    style={{
-                      textAlign: "right",
-                      color: r.counts?.ambiguous
-                        ? "var(--violet)"
-                        : "var(--muted)",
-                    }}
-                  >
-                    {fmtNumber(r.counts?.ambiguous)}
-                  </td>
-                  <td>
-                    {r.counts ? (
-                      <div
+                  {anyPairs ? (
+                    <>
+                      <td
+                        className="mono"
+                        style={{ textAlign: "right" }}
+                      >
+                        {fmtNumber(r.counts?.ocod)}
+                      </td>
+                      <td
+                        className="mono"
+                        style={{ textAlign: "right" }}
+                      >
+                        {fmtNumber(r.counts?.roe)}
+                      </td>
+                      <td
+                        className="mono"
+                        style={{ textAlign: "right" }}
+                      >
+                        {hasPairCounts(r.counts)
+                          ? fmtNumber(
+                              r.counts.exact + r.counts.probAccept
+                            )
+                          : "—"}
+                      </td>
+                      <td
+                        className="mono"
                         style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
+                          textAlign: "right",
+                          color: r.counts?.review
+                            ? "var(--amber)"
+                            : "var(--muted)",
                         }}
                       >
-                        <div
-                          className="probbar"
-                          style={{ width: 40 }}
-                        >
-                          <i
+                        {fmtNumber(r.counts?.review)}
+                      </td>
+                      <td
+                        className="mono"
+                        style={{
+                          textAlign: "right",
+                          color: r.counts?.ambiguous
+                            ? "var(--violet)"
+                            : "var(--muted)",
+                        }}
+                      >
+                        {fmtNumber(r.counts?.ambiguous)}
+                      </td>
+                      <td>
+                        {hasPairCounts(r.counts) ? (
+                          <div
                             style={{
-                              width: `${(r.counts.matchRate / 0.2) * 100}%`,
-                              background: "var(--ti-red)",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 8,
                             }}
-                          />
-                        </div>
-                        <span className="mono">
-                          {fmtPct(r.counts.matchRate, 1)}
-                        </span>
-                      </div>
-                    ) : (
-                      <span className="tag red">
-                        <span className="dot" />
-                        failed
-                      </span>
-                    )}
-                  </td>
+                          >
+                            <div
+                              className="probbar"
+                              style={{ width: 40 }}
+                            >
+                              <i
+                                style={{
+                                  width: `${(r.counts.matchRate / 0.2) * 100}%`,
+                                  background: "var(--ti-red)",
+                                }}
+                              />
+                            </div>
+                            <span className="mono">
+                              {fmtPct(r.counts.matchRate, 1)}
+                            </span>
+                          </div>
+                        ) : r.counts ? (
+                          <span className="muted">—</span>
+                        ) : (
+                          <span className="tag red">
+                            <span className="dot" />
+                            failed
+                          </span>
+                        )}
+                      </td>
+                    </>
+                  ) : (
+                    <>
+                      <td
+                        className="mono"
+                        style={{ textAlign: "right" }}
+                      >
+                        {fmtNumber(r.counts?.recordsTotal)}
+                      </td>
+                      {tracks.map((t) => (
+                        <td
+                          key={t.key}
+                          className="mono"
+                          style={{ textAlign: "right" }}
+                        >
+                          {fmtNumber(r.counts?.[trackCountKey(t.key)])}
+                        </td>
+                      ))}
+                    </>
+                  )}
                   <td>
                     <span className="tag">{r.config}</span>
                   </td>

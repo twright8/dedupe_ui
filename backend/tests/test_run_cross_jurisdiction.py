@@ -1,7 +1,11 @@
-"""The upload-time `cross_jurisdiction_name_matching` toggle must be wired end to
-end (this repo has a history of dead run-creation controls silently dropped by
-Pydantic — CONCERNS_LOG H/I/J). The run's config snapshot must differ when the
-flag is False.
+"""Two things, both about controls that must not go dead.
+
+`_write_config_files` still honours the `cross_jurisdiction_name_matching`
+argument: the run's config snapshot must differ when it is False. The run
+creation API no longer sends it — one dataset has no second jurisdiction side —
+so what the API half now guards is the single input file: it must survive
+Pydantic and reach `enqueue_run` (this repo has a history of dead run-creation
+controls silently dropped by Pydantic — CONCERNS_LOG H/I/J).
 """
 
 import json
@@ -74,7 +78,7 @@ def test_snapshot_differs_between_flag_values(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# API wiring: the flag must survive Pydantic and reach enqueue_run.
+# API wiring: the input file must survive Pydantic and reach enqueue_run.
 # ---------------------------------------------------------------------------
 
 
@@ -101,35 +105,40 @@ def _seed_config(db_path):
     )
 
 
-@pytest.mark.parametrize("flag", [True, False])
-def test_flag_reaches_enqueue_run(client, db_path, monkeypatch, flag):
+def test_input_filename_reaches_enqueue_run(client, db_path, monkeypatch):
     tc, data_dir = client
     _seed_config(db_path)
-    (data_dir / "uploads" / "OCOD.zip").write_bytes(b"fake")
-    (data_dir / "uploads" / "CH.zip").write_bytes(b"fake")
+    (data_dir / "uploads" / "donations.xlsx").write_bytes(b"fake")
+    (data_dir / "uploads" / "other.csv").write_bytes(b"fake")
 
     captured = {}
     monkeypatch.setattr(pipeline_runner, "enqueue_run", lambda **kw: captured.update(kw))
 
     r = tc.post("/api/runs", json={
-        "ocod_filename": "OCOD.zip", "ch_filename": "CH.zip", "config_version": 1,
-        "cross_jurisdiction_name_matching": flag,
+        "input_filename": "donations.xlsx", "config_version": 1,
     })
     assert r.status_code == 200, r.text
-    assert captured["cross_jurisdiction_name_matching"] is flag
+    assert captured["input_path"].endswith("donations.xlsx")
+    assert "ocod_path" not in captured and "ch_path" not in captured
 
 
-def test_flag_defaults_true_when_omitted(client, db_path, monkeypatch):
+def test_input_upload_id_reaches_enqueue_run(client, db_path, monkeypatch):
+    """The upload-session route to the same file must arrive too."""
     tc, data_dir = client
     _seed_config(db_path)
-    (data_dir / "uploads" / "OCOD.zip").write_bytes(b"fake")
-    (data_dir / "uploads" / "CH.zip").write_bytes(b"fake")
+    (data_dir / "uploads" / "stored.xlsx").write_bytes(b"fake")
+    write_db(
+        db_path,
+        """INSERT INTO upload_sessions
+           (upload_id, filename, stored_filename, total_chunks, chunks_received, status)
+           VALUES (?, ?, ?, 1, 1, 'complete')""",
+        ("up-1", "donations.xlsx", "stored.xlsx"),
+    )
 
     captured = {}
     monkeypatch.setattr(pipeline_runner, "enqueue_run", lambda **kw: captured.update(kw))
 
-    r = tc.post("/api/runs", json={
-        "ocod_filename": "OCOD.zip", "ch_filename": "CH.zip", "config_version": 1,
-    })
+    r = tc.post("/api/runs", json={"input_upload_id": "up-1", "config_version": 1})
     assert r.status_code == 200, r.text
-    assert captured["cross_jurisdiction_name_matching"] is True
+    assert captured["input_path"].endswith("stored.xlsx")
+    assert r.json()["input_filename"] == "donations.xlsx"

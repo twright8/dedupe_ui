@@ -4,10 +4,12 @@
 
 import { useState, useEffect } from "react";
 import { api } from "./api";
+import { useProfile } from "./profile";
 
 // ---------- LoginScreen ----------
 
 export function LoginScreen({ onLogin }) {
+  const profile = useProfile();
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -41,9 +43,14 @@ export function LoginScreen({ onLogin }) {
           <div className="brand-mark" style={{ width: 44, height: 44, fontSize: 20 }}>TI</div>
           <div style={{ textAlign: "center" }}>
             <h1 style={{ margin: 0, fontSize: 18, fontWeight: 600, letterSpacing: "-0.01em" }}>
-              OCOD-ROE Linkage
+              {profile.title}
             </h1>
-            <p className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
+            {profile.subtitle && (
+              <p className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
+                {profile.subtitle}
+              </p>
+            )}
+            <p className="muted" style={{ margin: "4px 0 0", fontSize: 12.5 }}>
               Sign in to continue
             </p>
           </div>

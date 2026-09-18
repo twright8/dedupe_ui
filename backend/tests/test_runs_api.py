@@ -128,8 +128,7 @@ class TestPipelineRunnerQueue:
             db_path=db_path,
             data_dir=str(data_dir),
             run_id="run_001",
-            ocod_path="/fake/ocod.zip",
-            ch_path="/fake/ch.zip",
+            input_path="/fake/donations.xlsx",
             config_version=1,
             threshold_high=0.85,
             threshold_review=0.50,
@@ -159,8 +158,7 @@ class TestPipelineRunnerQueue:
             db_path=db_path,
             data_dir=str(data_dir),
             run_id="run_002",
-            ocod_path="/fake/ocod.zip",
-            ch_path="/fake/ch.zip",
+            input_path="/fake/donations.xlsx",
             config_version=1,
             threshold_high=0.85,
             threshold_review=0.50,
@@ -179,12 +177,12 @@ class TestRunsAPI:
     """Test REST endpoints via TestClient."""
 
     def test_create_run_returns_run_object(self, client, db_path, data_dir, monkeypatch):
+        """One dataset means one input file, recorded as input_filename."""
         _seed_config(db_path)
 
-        # Create fake upload files
+        # Create a fake upload file
         uploads = data_dir / "uploads"
-        (uploads / "OCOD_data.zip").write_bytes(b"fake")
-        (uploads / "CH_data.zip").write_bytes(b"fake")
+        (uploads / "donations.xlsx").write_bytes(b"fake")
 
         # Mock start_run so no actual pipeline runs
         monkeypatch.setattr(pipeline_runner, "start_run", lambda **kw: None)
@@ -192,8 +190,7 @@ class TestRunsAPI:
         r = client.post(
             "/api/runs",
             json={
-                "ocod_filename": "OCOD_data.zip",
-                "ch_filename": "CH_data.zip",
+                "input_filename": "donations.xlsx",
                 "config_version": 1,
                 "threshold_high": 0.85,
                 "threshold_review": 0.50,
@@ -202,50 +199,47 @@ class TestRunsAPI:
         assert r.status_code == 200
         body = r.json()
         assert body["status"] == "pending"
-        assert body["ocod_filename"] == "OCOD_data.zip"
-        assert body["ch_filename"] == "CH_data.zip"
+        assert body["input_filename"] == "donations.xlsx"
         assert body["config_version"] == 1
         assert body["id"].startswith("run_")
 
-    def test_create_run_accepts_csv_inputs(self, client, db_path, data_dir, monkeypatch):
-        """A raw .csv is a valid input (not only .zip)."""
+    def test_create_run_accepts_csv_input(self, client, db_path, data_dir, monkeypatch):
+        """A raw .csv is a valid input (not only .xlsx)."""
         _seed_config(db_path)
         uploads = data_dir / "uploads"
-        (uploads / "OCOD_FULL.csv").write_bytes(b"fake")
-        (uploads / "CH_FULL.csv").write_bytes(b"fake")
+        (uploads / "donations.csv").write_bytes(b"fake")
         monkeypatch.setattr(pipeline_runner, "start_run", lambda **kw: None)
         monkeypatch.setattr(pipeline_runner, "enqueue_run", lambda **kw: None)
 
         r = client.post(
             "/api/runs",
-            json={
-                "ocod_filename": "OCOD_FULL.csv",
-                "ch_filename": "CH_FULL.csv",
-                "config_version": 1,
-            },
+            json={"input_filename": "donations.csv", "config_version": 1},
         )
         assert r.status_code == 200, r.text
-        assert r.json()["ocod_filename"] == "OCOD_FULL.csv"
+        assert r.json()["input_filename"] == "donations.csv"
 
     def test_create_run_rejects_unsupported_extension(self, client, db_path, data_dir, monkeypatch):
-        """A non-zip/non-csv input is rejected upfront with a clear message."""
+        """An input the profile does not accept is rejected upfront, with a clear message."""
         _seed_config(db_path)
         uploads = data_dir / "uploads"
-        (uploads / "OCOD_FULL.txt").write_bytes(b"fake")
-        (uploads / "CH_data.zip").write_bytes(b"fake")
+        (uploads / "donations.txt").write_bytes(b"fake")
         monkeypatch.setattr(pipeline_runner, "start_run", lambda **kw: None)
         monkeypatch.setattr(pipeline_runner, "enqueue_run", lambda **kw: None)
 
         r = client.post(
             "/api/runs",
-            json={
-                "ocod_filename": "OCOD_FULL.txt",
-                "ch_filename": "CH_data.zip",
-                "config_version": 1,
-            },
+            json={"input_filename": "donations.txt", "config_version": 1},
         )
         assert r.status_code == 400
-        assert ".zip or .csv" in r.json()["detail"]
+        assert ".csv" in r.json()["detail"] and ".xlsx" in r.json()["detail"]
+
+    def test_create_run_without_any_upload_is_rejected(self, client, db_path, data_dir, monkeypatch):
+        _seed_config(db_path)
+        monkeypatch.setattr(pipeline_runner, "start_run", lambda **kw: None)
+
+        r = client.post("/api/runs", json={"config_version": 1})
+        assert r.status_code == 400
+        assert "Upload a file first" in r.json()["detail"]
 
     def test_list_runs(self, client, db_path):
         write_db(
@@ -539,16 +533,14 @@ class TestRunsAPI:
         """Run ID should follow run_YYYY_MM_DDx format."""
         _seed_config(db_path)
         uploads = data_dir / "uploads"
-        (uploads / "OCOD.zip").write_bytes(b"fake")
-        (uploads / "CH.zip").write_bytes(b"fake")
+        (uploads / "donations.xlsx").write_bytes(b"fake")
 
         monkeypatch.setattr(pipeline_runner, "start_run", lambda **kw: None)
 
         r = client.post(
             "/api/runs",
             json={
-                "ocod_filename": "OCOD.zip",
-                "ch_filename": "CH.zip",
+                "input_filename": "donations.xlsx",
                 "config_version": 1,
                 "threshold_high": 0.85,
                 "threshold_review": 0.50,
@@ -564,8 +556,7 @@ class TestRunsAPI:
         """Multiple runs on the same day should get a, b, c... suffixes."""
         _seed_config(db_path)
         uploads = data_dir / "uploads"
-        (uploads / "OCOD.zip").write_bytes(b"fake")
-        (uploads / "CH.zip").write_bytes(b"fake")
+        (uploads / "donations.xlsx").write_bytes(b"fake")
 
         monkeypatch.setattr(pipeline_runner, "start_run", lambda **kw: None)
 
@@ -574,8 +565,7 @@ class TestRunsAPI:
             r = client.post(
                 "/api/runs",
                 json={
-                    "ocod_filename": "OCOD.zip",
-                    "ch_filename": "CH.zip",
+                    "input_filename": "donations.xlsx",
                     "config_version": 1,
                     "threshold_high": 0.85,
                     "threshold_review": 0.50,

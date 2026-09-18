@@ -270,7 +270,7 @@ export default function LabelsScreen() {
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <a className="btn" href={api.labelsExportUrl}
+          <a className="btn" href={api.labelsExportUrl()}
             title="Download every answer as a CSV — a backup, or to edit in a spreadsheet and re-import">
             <Icons.download size={14} /> Export CSV
           </a>

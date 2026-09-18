@@ -5,6 +5,7 @@
    ============================================================ */
 
 import { Link } from "react-router-dom";
+import { useProfile } from "../profile";
 
 // ---- small building blocks -------------------------------------------------
 
@@ -55,9 +56,17 @@ function JobCard({ tone, n, title, children }) {
 // ---- the page --------------------------------------------------------------
 
 export default function MethodologyScreen() {
+  const profile = useProfile();
   return (
     <div className="content mth">
       <MthStyles />
+
+      {/* Carried over from the ROE–OCOD tool; rewritten in a later slice. */}
+      <Callout accent="var(--amber)" label="Out of date">
+        This page still describes the ROE–OCOD linkage tool, which matches names across two
+        datasets. {profile.title} works within one dataset instead. The text will be rewritten
+        once the matching stages are built.
+      </Callout>
 
       {/* Hero */}
       <header className="mth-hero">
