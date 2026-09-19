@@ -11,9 +11,9 @@ Stage 2 (exact keys) leaves merged groups, held groups, and single records. Stag
 
 A unit's ID is the smallest `record_id` among its members, compared as strings. That is the same record the group ID `X-<id>` names. A single record's unit ID is its own `record_id`.
 
-Each unit gets one representative row. For every cleaned or raw column, the representative takes the most frequent non-null value among the members, with ties broken by the smallest `record_id`. Priority columns are summed. The row also carries `unit_size`, the distinct `existing_entity_id` values of its members, and `held_group_id` when the record sits in a held group.
+Each unit gets one representative row. For every cleaned or raw column, the representative takes the most frequent non-null value among the members, with ties broken by the smallest `record_id`. Every column of the records frame is voted on this way — none is dropped, because the review screen and the exports read columns nothing else touches. A unit of one member is its own representative, so the vote runs only over the pooled units. Priority columns are summed. The row also carries `unit_size`, the distinct `existing_entity_id` values of its members, and `held_group_id` when the record sits in a held group.
 
-The members' entity ids arrive as three columns, because the overlay below has to know when there is exactly one: `existing_entity_ids` is the sorted distinct ids joined with `" | "`, `n_existing_ids` counts them, and `existing_entity_id` is that one id when the count is 1 and null otherwise. A record that sits in more than one held group takes the smallest of those group ids.
+The members' entity ids arrive as three columns, because the overlay below has to know when there is exactly one: `existing_entity_ids` is the sorted distinct ids joined with `" | "`, `n_existing_ids` counts them, and `existing_entity_id` is that one id when the count is 1 and null otherwise. A record that sits in more than one held group takes the smallest of those group ids. A unit takes the smallest `held_group_id` any of its members carries, and null when no member carries one — a merged group and a held group may overlap, so a pooled unit can hold both kinds of member.
 
 Units are scored per track. Two units in different tracks are never compared.
 
@@ -125,4 +125,60 @@ A track with fewer than two units, or with no blocking rules, is skipped with a 
 
 ## Scale guards
 
-DuckDB is capped by the `SPLINK_MEMORY_LIMIT` environment variable, which defaults to `6GB` — the server's budget under D17. The blocking budget check runs before any model is trained, so an exploding rule costs a few counting queries and not a night of swapping.
+DuckDB is capped by the `SPLINK_MEMORY_LIMIT` environment variable, which defaults to `6GB` — the server's budget under D17. The blocking budget check runs before any model is trained, so an exploding rule costs a few counting queries and not a night of swapping. It prices each rule **after** its hot-key control, because a budget that prices the uncontrolled rule is not a budget, and it prices the EM training rules too.
+
+**Nothing in stage 3 holds the pairs.** Splink predicts through DuckDB and the result is copied straight to a parquet, keeping only the two unit ids, the two scores and the gamma columns — the retained comparison values are dropped in SQL and never become Python objects. Everything downstream reads that file in bounded batches:
+
+| knob | default | what it bounds |
+|---|---|---|
+| `PAIR_BATCH_ROWS` | 500,000 | pairs held by any Python step: the buckets, the vetoes, the priority totals, a re-bucket |
+| `MODEL_BATCH_PAIRS` | 2,000,000 | pairs held by a model's feature build and predict (stage 3b) |
+
+`score_eval.evaluate` takes either a frame or a path to `pairs.parquet`. Given a path it reads eleven columns in batches, accumulates every figure as a running total, and gathers the accepted-pair sets as integer-coded edge arrays rather than frames. The two forms are held to identical output by a test. The score-distribution chart is drawn from bin counts computed in DuckDB, not from one row per pair — Altair embeds its data in the page, and one row per pair made a 68 MB HTML file for a picture with fifty bars in it.
+
+Stage 3 also drops the records, units and unit-members frames once the units are written, and reads projections of `units.parquet` after that: four columns for the overlays, the columns a track's rules and comparisons name for Splink, three record columns for the evaluation.
+
+## The hot-key blocking control
+
+A blocking rule puts units into blocks, and a block of n units makes n(n-1)/2 pairs. A handful of very common keys therefore carry most of the work. On the PSC sample, 30 blocks out of 356,138 carry 38% of every pair route pb3 makes. It gets worse with scale, not better: a hot block grows with the data, so its pairs grow with the square, while a selective block's pairs grow in step with the data.
+
+A blocking rule may carry four optional keys that tighten those blocks and leave the rest of the rule alone.
+
+| key | type | means |
+|---|---|---|
+| `max_block_size` | whole number above zero | a block with more units than this is **oversized** |
+| `on_oversize` | `"refine"` or `"drop"` | what to do with an oversized block. Defaults to `"refine"` when `refine_with` is given and `"drop"` when it is not |
+| `refine_with` | list of column names | an oversized block is re-blocked by **also** requiring these columns to be equal |
+| `drop_above` | whole number, optional | after refining, a block still larger than this is dropped and its units are reported as too common to compare on this rule |
+
+```json
+{ "id": "pb3", "sql": "l.name_fingerprint = r.name_fingerprint",
+  "max_block_size": 60, "on_oversize": "refine",
+  "refine_with": ["forename_initial"], "drop_above": 200 }
+```
+
+That rule reads, in the UI: **"Blocks of more than 60 records are compared only when the forename initial also matches; blocks of more than 200 are skipped."** `linkage.control_description(rule)` writes that sentence. A rule with no control has no sentence.
+
+**It is generated SQL, not a filter over pairs.** A pair inside an oversized block is never made. `linkage.controlled_sql(con, units, rule, track)` measures the oversized key values with one `HAVING count(*) > max_block_size` query over that track's units, then writes them into the rule as a literal list:
+
+```sql
+(l.name_fingerprint = r.name_fingerprint)
+AND (coalesce(cast(l.name_fingerprint as varchar), '') NOT IN ('SMITH', ...)
+     OR (l.forename_initial = r.forename_initial))
+AND coalesce(cast(l.name_fingerprint as varchar), '') || chr(31)
+    || coalesce(cast(l.forename_initial as varchar), '') NOT IN ('SMITH\x1fA', ...)
+```
+
+Only the `l.` side is named, because the rule already holds the key equal on both sides. A composite key is its parts joined by the unit separator. The result is a Splink `CustomRule`, so it fits `build_blocking_rule` with nothing new underneath.
+
+The literal list is the cost. A Splink blocking rule is a predicate over `l.` and `r.` columns and has nowhere else to read a set from, so the oversized keys have to be written into the SQL. That is fine while they are few, which is the case the control exists for: 30 values on PSC's pb3, 13 on pb1. `linkage.MAX_INLINE_KEYS` caps it at 5,000 and refuses beyond that with a message saying the rule is too coarse to fix one key at a time.
+
+**Pricing a rule after the control.** `linkage.price_rule(con, units, rule, track)` returns `pairs`, `blocks`, `oversized_blocks`, `pairs_before`, `blocks_before`, `units_dropped`, `units_unrefinable`, `exact` and `residual`. It is DuckDB group arithmetic only — `sum(n * (n - 1) / 2)` per block. No pair is built and Splink is not involved, so a rule that would make a hundred million pairs is priced in one pass over the units.
+
+It reads a rule's SQL into a block key, one-sided filters, `l.x <> r.x` conditions and a residual. Keys and filters are counted exactly. An `l.x <> r.x` is counted exactly too, by subtracting the pairs of its sub-blocks. Anything left over cannot be applied by counting, so `exact` comes back `false`, `residual` names the condition, and every count is an upper bound. PSC's pb6 is the one shipped rule in that position, because of its `(l.dob_year_clean IS NULL OR r.dob_year_clean IS NULL)`.
+
+Three null rules, all of them just SQL's own behaviour. A unit with a null key never blocks, because `l.k = r.k` is false for a null. A unit with a null `refine_with` value cannot be refined and makes no pair once its block is refined; those units are counted in `units_unrefinable`, not in `units_dropped`. A unit with a null on an `l.x <> r.x` column makes no pair on that rule at all.
+
+**Validation** refuses a `max_block_size` that is not a whole number above zero, an `on_oversize` outside `refine` and `drop`, a `refine_with` that is not a non-empty list of strings or that names a column the track does not have, a `drop_above` below `max_block_size`, any of the three other keys with no `max_block_size` beside them, and a control on a rule with no `l.column = r.column` to block on. The errors come back in the same `{path, message}` shape as everything else in `linkage_settings`.
+
+**A rule with none of the four keys is untouched.** Its SQL comes back byte for byte, `price_rule` reports `pairs` equal to `pairs_before`, and `blocking_rules()` returns the same three keys it always did. The shipped donations and PSC settings ask for none of this and block exactly as before.

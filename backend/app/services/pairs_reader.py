@@ -804,13 +804,21 @@ def model_explanation(run_dir: str, left_id: str, right_id: str,
         finally:
             con.close()
 
-        # The units frame stays whole: the organisation feature builder fits its
-        # TF-IDF weights over every unit, and a feature's value must not depend
-        # on how much was asked for. That read is the one still to fix for PSC.
+        # The corpus statistics the run fitted, read back from its folder — or
+        # fitted now and stored, for a run made before they were written down.
+        # This is what lets one pair explained on its own reproduce the number
+        # the scoring run wrote (`app/model/corpus.py`).
+        from app.model import corpus as corpus_lib
+
+        profile = get_profile()
+        fitted = corpus_lib.for_run(run_dir, units_path(run_dir), track, profile)
+        # The units frame is read whole only when a feature builder needs more
+        # than the corpus gives it; the two units themselves are all the rest of
+        # the explanation touches.
         units = pd.read_parquet(units_path(run_dir))
         return explain_lib.explain(row.reset_index(drop=True), units, track,
                                    model.version, events=events,
-                                   profile=get_profile(),
+                                   profile=profile, corpus=fitted,
                                    gamma_levels=comparison_levels(run_dir, track))
     except Exception:  # noqa: BLE001 — an explanation must never break a pair view
         import logging

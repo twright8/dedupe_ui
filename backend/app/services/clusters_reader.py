@@ -99,7 +99,9 @@ def _open(run_dir: str):
     units = Path(run_dir) / UNITS_FILENAME
     if not path.is_file() or not units.is_file():
         raise ClustersNotFound(str(path))
-    return duckdb_conn.connect(), path, units
+    # The run's own temp directory, so anything DuckDB spills belongs to a run
+    # and is bounded by DUCKDB_MAX_TEMP (`docs/PSC_HANDOVER.md` section 11).
+    return duckdb_conn.connect(Path(run_dir) / "duckdb_tmp"), path, units
 
 
 def _priority_columns(unit_columns: list[str]) -> list[str]:
@@ -213,23 +215,32 @@ def _item(row: dict, priority: list[str], decisions: dict, ties: set) -> dict:
     }
 
 
-def attribute_tie_clusters(run_dir: str) -> set:
-    """The clusters whose consensus column could not be settled."""
+def _attribute_tie_clusters(con, run_dir: str) -> set:
+    """The clusters whose consensus column could not be settled.
+
+    A tie is rare — 0 on the PSC sample — so the set itself is small whatever
+    the run's size, and the query behind it is a filtered scan, not a read.
+    """
     path = Path(run_dir) / ENTITIES_FILENAME
     if not path.is_file():
         return set()
-    con = duckdb_conn.connect()
+    columns = _column_names(con, path)
+    basis = [c for c in columns if c.endswith("_entity_basis")]
+    if not basis or "cluster_id" not in columns:
+        return set()
+    clause = " OR ".join(f'"{c}" = \'tie\'' for c in basis)
+    rows = con.execute(
+        f"SELECT DISTINCT cluster_id FROM read_parquet(?) WHERE {clause}",
+        [str(path)],
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
+def attribute_tie_clusters(run_dir: str) -> set:
+    """The same, on a connection of its own."""
+    con = duckdb_conn.connect(Path(run_dir) / "duckdb_tmp")
     try:
-        columns = _column_names(con, path)
-        basis = [c for c in columns if c.endswith("_entity_basis")]
-        if not basis or "cluster_id" not in columns:
-            return set()
-        clause = " OR ".join(f'"{c}" = \'tie\'' for c in basis)
-        rows = con.execute(
-            f"SELECT DISTINCT cluster_id FROM read_parquet(?) WHERE {clause}",
-            [str(path)],
-        ).fetchall()
-        return {row[0] for row in rows}
+        return _attribute_tie_clusters(con, run_dir)
     finally:
         con.close()
 
@@ -271,23 +282,32 @@ def get_clusters(
         unit_columns = _column_names(con, units)
         priority = _priority_columns(unit_columns)
         base, params = _base_sql(run_dir, unit_columns, priority)
-        ties = attribute_tie_clusters(run_dir)
+        # One pass over the parquet files into a table the six queries below
+        # then read. A PSC run has 458,000 clusters and the old code built a
+        # Python dict for every one of them before showing fifty.
+        con.execute(f"CREATE OR REPLACE TEMP TABLE cr_base AS {base}", params)
+        ties = _attribute_tie_clusters(con, run_dir)
+        con.execute("CREATE OR REPLACE TEMP TABLE cr_ties(cluster_id VARCHAR)")
+        if ties:
+            con.execute("INSERT INTO cr_ties SELECT UNNEST(?)", [sorted(ties)])
+        decided_ids = sorted(decisions)
+        con.execute("CREATE OR REPLACE TEMP TABLE cr_decided(cluster_id VARCHAR)")
+        if decided_ids:
+            con.execute("INSERT INTO cr_decided SELECT UNNEST(?)", [decided_ids])
 
-        decided_ids = set(decisions)
         counts_row = con.execute(
-            f"""SELECT count(*),
-                       count(*) FILTER (WHERE withheld OR status = 'held_key'),
-                       count(*) FILTER (WHERE withheld),
-                       count(*) FILTER (WHERE status = 'ok'),
-                       count(*) FILTER (WHERE status = 'conflict'),
-                       count(*) FILTER (WHERE status = 'too_large'),
-                       count(*) FILTER (WHERE status = 'weak_link'),
-                       count(*) FILTER (WHERE status = 'mixed_ids'),
-                       count(*) FILTER (WHERE status = 'held_key'),
-                       count(*) FILTER (WHERE track = 'person'),
-                       count(*) FILTER (WHERE track = 'organisation')
-                FROM ({base})""",
-            params,
+            """SELECT count(*),
+                      count(*) FILTER (WHERE withheld OR status = 'held_key'),
+                      count(*) FILTER (WHERE withheld),
+                      count(*) FILTER (WHERE status = 'ok'),
+                      count(*) FILTER (WHERE status = 'conflict'),
+                      count(*) FILTER (WHERE status = 'too_large'),
+                      count(*) FILTER (WHERE status = 'weak_link'),
+                      count(*) FILTER (WHERE status = 'mixed_ids'),
+                      count(*) FILTER (WHERE status = 'held_key'),
+                      count(*) FILTER (WHERE track = 'person'),
+                      count(*) FILTER (WHERE track = 'organisation')
+               FROM cr_base"""
         ).fetchone()
         counts = dict(zip(
             ("all", "reviewable", "withheld", "ok", "conflict", "too_large",
@@ -297,25 +317,18 @@ def get_clusters(
         counts["attribute_tie"] = len(ties)
         # The queue counts what is still open: a decided item is done with, and
         # a total that never fell however much work was done would be useless.
-        open_rows = con.execute(
-            f"""SELECT count(*) FROM ({base})
-                WHERE (withheld OR status = 'held_key')""",
-            params,
-        ).fetchone()[0]
-        # A decided item leaves the queue. It may also have stopped being
-        # withheld — a merge stands the gate down — so "decided" counts the
-        # decisions this run has, not what is left flagged.
-        decided_here = con.execute(
-            f"""SELECT count(*) FROM ({base})
-                WHERE cluster_id IN (SELECT UNNEST(?))""",
-            [*params, list(decided_ids)],
-        ).fetchone()[0] if decided_ids else 0
-        still_open = con.execute(
-            f"""SELECT count(*) FROM ({base})
-                WHERE (withheld OR status = 'held_key')
-                  AND cluster_id IN (SELECT UNNEST(?))""",
-            [*params, list(decided_ids)],
-        ).fetchone()[0] if decided_ids else 0
+        # A decided item may also have stopped being withheld — a merge stands
+        # the gate down — so "decided" counts the decisions this run has, not
+        # what is left flagged.
+        open_rows, decided_here, still_open = con.execute(
+            """SELECT count(*) FILTER (WHERE withheld OR status = 'held_key'),
+                      count(*) FILTER (WHERE decided),
+                      count(*) FILTER (WHERE decided
+                                         AND (withheld OR status = 'held_key'))
+               FROM (SELECT withheld, status,
+                            cluster_id IN (SELECT cluster_id FROM cr_decided) AS decided
+                     FROM cr_base)"""
+        ).fetchone()
         counts["reviewable"] = int(open_rows) - int(still_open)
         counts["decided"] = int(decided_here)
         counts["decisions"] = len(decisions)
@@ -327,10 +340,18 @@ def get_clusters(
         if status is not None and status != "attribute_tie":
             where.append("status = ?")
             binds.append(status)
+        if status == "attribute_tie":
+            # `_item` adds the status to any cluster the proposal could not
+            # settle, so the filter is that same set.
+            where.append("cluster_id IN (SELECT cluster_id FROM cr_ties)")
         if withheld == "yes":
             where.append("(withheld OR status = 'held_key')")
         elif withheld == "no":
             where.append("NOT withheld AND status <> 'held_key'")
+        if decided == "yes":
+            where.append("cluster_id IN (SELECT cluster_id FROM cr_decided)")
+        elif decided == "no":
+            where.append("cluster_id NOT IN (SELECT cluster_id FROM cr_decided)")
         if min_units is not None:
             where.append("n_units >= ?")
             binds.append(int(min_units))
@@ -351,28 +372,23 @@ def get_clusters(
             ) or "n_units",
         }[sort_key]
 
+        total = int(con.execute(
+            f"SELECT count(*) FROM cr_base{where_sql}", binds
+        ).fetchone()[0])
         rows = _rows(con.execute(
-            f"""SELECT * FROM ({base}){where_sql}
-                ORDER BY {sort_sql} {order_sql} NULLS LAST, cluster_id ASC""",
-            [*params, *binds],
+            f"""SELECT * FROM cr_base{where_sql}
+                ORDER BY {sort_sql} {order_sql} NULLS LAST, cluster_id ASC
+                LIMIT ? OFFSET ?""",
+            [*binds, limit, offset],
         ))
     finally:
         con.close()
 
-    items = [_item(row, priority, decisions, ties) for row in rows]
-    if status == "attribute_tie":
-        items = [item for item in items if "attribute_tie" in item["statuses"]]
-    if decided == "yes":
-        items = [item for item in items if item["decision"]]
-    elif decided == "no":
-        items = [item for item in items if not item["decision"]]
-
-    total = len(items)
     return {
         "total": total,
         "offset": offset,
         "limit": limit,
-        "items": items[offset:offset + limit],
+        "items": [_item(row, priority, decisions, ties) for row in rows],
         "counts": counts,
         "columns": describe_columns(unit_columns),
         "priority_columns": priority,

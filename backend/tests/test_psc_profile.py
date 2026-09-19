@@ -24,6 +24,7 @@ from app.profiles.psc import (
     mint_entity_ids,
     stable_psc_id,
 )
+from app.profiles import psc as psc_module
 from app.rules import engine, keys, linkage
 
 DEFAULTS = os.path.join(os.path.dirname(__file__), "..", "app", "profiles", "defaults", "psc")
@@ -264,6 +265,53 @@ def test_quick_mode_reads_only_the_first_rows(snapshot, tmp_path):
     full = extract_to_parquet(snapshot, tmp_path / "full.parquet", LoadOptions())
     assert full["input_rows"] == len(LINES)
     assert full["quick_mode"] is False
+
+
+def test_a_chunked_read_gives_the_same_records(snapshot, tmp_path, monkeypatch):
+    """One line per chunk must produce exactly what one chunk for the lot does.
+
+    The loader decompresses the member a chunk at a time and extracts each chunk
+    on its own, so the chunk size is the one knob that could silently change
+    what is loaded — a boundary in the wrong place, a part file missed, a row
+    counted twice.
+    """
+    whole = extract_to_parquet(snapshot, tmp_path / "whole.parquet", LoadOptions())
+    monkeypatch.setenv(psc_module.CHUNK_LINES_ENV, "1")
+    chunked = extract_to_parquet(snapshot, tmp_path / "chunked.parquet", LoadOptions())
+    assert chunked == whole
+    left = pd.read_parquet(tmp_path / "whole.parquet")
+    right = pd.read_parquet(tmp_path / "chunked.parquet")
+    assert left.sort_values("record_id").reset_index(drop=True).equals(
+        right.sort_values("record_id").reset_index(drop=True)
+    )
+
+
+def test_quick_mode_stops_inside_a_chunk(snapshot, tmp_path, monkeypatch):
+    """A row limit smaller than the chunk must still stop at the limit."""
+    monkeypatch.setenv(psc_module.CHUNK_LINES_ENV, "2")
+    stats = extract_to_parquet(snapshot, tmp_path / "quick.parquet",
+                               LoadOptions(quick_mode=True, quick_rows=3))
+    assert stats["input_rows"] == 3
+
+
+def test_the_staging_files_are_cleaned_up(snapshot, tmp_path):
+    """Nothing of the extract survives the call.
+
+    A 16-million-row load stages about a gigabyte, and a loader that leaves it
+    behind fills the disk one run at a time.
+    """
+    out = tmp_path / "records.parquet"
+    extract_to_parquet(snapshot, out, LoadOptions())
+    assert not (out.parent / psc_module.STAGING_DIRNAME).exists()
+
+
+def test_the_chunk_size_falls_back_on_nonsense(monkeypatch):
+    monkeypatch.setenv(psc_module.CHUNK_LINES_ENV, "not a number")
+    assert psc_module.chunk_size() == psc_module.DEFAULT_CHUNK_LINES
+    monkeypatch.setenv(psc_module.CHUNK_LINES_ENV, "0")
+    assert psc_module.chunk_size() == psc_module.DEFAULT_CHUNK_LINES
+    monkeypatch.setenv(psc_module.CHUNK_LINES_ENV, "250")
+    assert psc_module.chunk_size() == 250
 
 
 def test_a_file_that_is_not_a_snapshot_is_refused(tmp_path):

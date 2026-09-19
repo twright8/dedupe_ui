@@ -10,15 +10,24 @@ hand, by someone who has looked at the table first.
 The snapshot is not given back the way the donations sheet is: it is 13 GB, the
 user already has it, and re-parsing it to add two columns would cost more than
 the run did. The export is written from the run's own parquet instead.
+
+**Out of core (B5).** The decision table is a DuckDB join of ``records.parquet``
+to the entity proposal, projected to six columns and sorted in SQL. The parquet
+form is written by ``COPY ... TO``; the CSV and the bulk file are written from
+**batches** of that join, never from a frame of sixteen million rows. The batch
+size comes from ``EXPORT_BATCH_ROWS``.
 """
 
 import csv
 import json
+import os
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+
+from app import duckdb_conn
 
 # The index the PSC ids are keyed on (D16). The record_id IS the document id,
 # which is why stable_psc_id may never change.
@@ -29,39 +38,99 @@ COLUMNS = ["record_id", "entity_id", "entity_basis", "track", "company_number", 
 
 BULK_FILENAME = "elasticsearch_bulk.jsonl"
 
+#: How many rows leave DuckDB at a time when a file has to be written a line at
+#: a time. Writing JSON and writing a byte-order mark are the two steps that
+#: cannot be SQL, so they are the two that are batched. Small enough that the
+#: batch is never the memory ceiling, large enough that the per-batch cost
+#: disappears.
+BATCH_ROWS_ENV = "EXPORT_BATCH_ROWS"
+DEFAULT_BATCH_ROWS = 200_000
 
-def _decision_frame(run_dir: Path, entities: pd.DataFrame) -> pd.DataFrame:
-    """One row per PSC record: who it is, and what the run decided."""
-    records = pd.read_parquet(
-        run_dir / "records.parquet",
-        columns=[c for c in ("record_id", "track", "company_number", "name")],
+
+def batch_rows() -> int:
+    """The export's batch size, from ``EXPORT_BATCH_ROWS``."""
+    try:
+        value = int(os.environ.get(BATCH_ROWS_ENV, DEFAULT_BATCH_ROWS))
+    except ValueError:
+        return DEFAULT_BATCH_ROWS
+    return value if value > 0 else DEFAULT_BATCH_ROWS
+
+
+def _literal(path) -> str:
+    """A path as a SQL string literal. A view cannot carry a bound parameter."""
+    return "'" + str(path).replace("'", "''") + "'"
+
+
+def _decision_sql(con, run_dir: Path, entities) -> str:
+    """One row per PSC record: who it is, and what the run decided.
+
+    *entities* is the proposal — a frame, or the path of ``entities.parquet``.
+    """
+    if isinstance(entities, pd.DataFrame):
+        con.register("psc_entities_in", entities)
+        con.execute("CREATE OR REPLACE VIEW psc_decided AS SELECT * FROM psc_entities_in")
+    else:
+        con.execute(
+            "CREATE OR REPLACE VIEW psc_decided AS "
+            f"SELECT * FROM read_parquet({_literal(entities)})"
+        )
+    con.execute(
+        "CREATE OR REPLACE VIEW psc_records AS "
+        f"SELECT * FROM read_parquet({_literal(run_dir / 'records.parquet')})"
     )
-    records["record_id"] = records["record_id"].astype(str)
+    record_columns = {d[0] for d in
+                      con.execute("SELECT * FROM psc_records LIMIT 0").description}
+    decided_columns = {d[0] for d in
+                       con.execute("SELECT * FROM psc_decided LIMIT 0").description}
 
-    decided = entities.copy()
-    decided["record_id"] = decided["record_id"].astype(str)
-    keep = [c for c in ("record_id", "entity_id", "entity_basis") if c in decided.columns]
-    merged = records.merge(decided[keep], on="record_id", how="left")
+    def _from(source: str, available: set, name: str) -> str:
+        if name not in available:
+            return f'CAST(NULL AS VARCHAR) AS "{name}"'
+        return f'{source}."{name}"'
 
-    for column in COLUMNS:
-        if column not in merged.columns:
-            merged[column] = None
-    return merged[COLUMNS].sort_values("record_id", kind="mergesort")
+    select = ", ".join([
+        "CAST(r.record_id AS VARCHAR) AS record_id",
+        _from("e", decided_columns, "entity_id"),
+        _from("e", decided_columns, "entity_basis"),
+        _from("r", record_columns, "track"),
+        _from("r", record_columns, "company_number"),
+        _from("r", record_columns, "name"),
+    ])
+    return f"""
+        SELECT {select}
+        FROM psc_records r
+        LEFT JOIN psc_decided e
+               ON CAST(e.record_id AS VARCHAR) = CAST(r.record_id AS VARCHAR)
+        ORDER BY CAST(r.record_id AS VARCHAR)
+    """
 
 
-def _write_table(frame: pd.DataFrame, path: Path, fmt: str) -> None:
+def _batches(con, sql: str):
+    """Yield the query's rows as tuples, ``batch_rows()`` at a time."""
+    cursor = con.execute(sql)
+    size = batch_rows()
+    while True:
+        rows = cursor.fetchmany(size)
+        if not rows:
+            return
+        yield rows
+
+
+def _write_table(con, sql: str, path: Path, fmt: str) -> None:
     if fmt == "parquet":
-        frame.to_parquet(path, index=False)
+        con.execute(f"COPY ({sql}) TO {_literal(path)} (FORMAT PARQUET)")
         return
-    # Streamed from the numpy columns rather than built as Python objects
-    # first: 16 million rows would otherwise be a second copy of the run.
+    # Streamed out of DuckDB in batches rather than built as one frame first:
+    # sixteen million rows would otherwise be a second copy of the run. The
+    # file keeps its byte-order mark, which is why it is not a plain COPY.
     with open(path, "w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.writer(handle)
         writer.writerow(COLUMNS)
-        writer.writerows(zip(*(frame[c].to_numpy() for c in COLUMNS)))
+        for rows in _batches(con, sql):
+            writer.writerows(rows)
 
 
-def _write_bulk(frame: pd.DataFrame, path: Path) -> int:
+def _write_bulk(con, sql: str, path: Path) -> int:
     """The Elasticsearch bulk-update body. Returns how many records it updates.
 
     Two lines per record, the action then the document, which is what the bulk
@@ -71,24 +140,23 @@ def _write_bulk(frame: pd.DataFrame, path: Path) -> int:
     """
     written = 0
     with open(path, "w", encoding="utf-8") as handle:
-        ids = frame["record_id"].to_numpy()
-        entities = frame["entity_id"].to_numpy()
-        bases = frame["entity_basis"].to_numpy()
-        for record_id, entity_id, basis in zip(ids, entities, bases):
-            if not isinstance(entity_id, str) or not entity_id:
-                continue
-            handle.write(json.dumps(
-                {"update": {"_id": str(record_id), "_index": ES_INDEX}}
-            ) + "\n")
-            doc = {ES_FIELD: entity_id}
-            if isinstance(basis, str) and basis:
-                doc[f"{ES_FIELD}_basis"] = basis
-            handle.write(json.dumps({"doc": doc}) + "\n")
-            written += 1
+        for rows in _batches(con, sql):
+            for row in rows:
+                record_id, entity_id, basis = row[0], row[1], row[2]
+                if not isinstance(entity_id, str) or not entity_id:
+                    continue
+                handle.write(json.dumps(
+                    {"update": {"_id": str(record_id), "_index": ES_INDEX}}
+                ) + "\n")
+                doc = {ES_FIELD: entity_id}
+                if isinstance(basis, str) and basis:
+                    doc[f"{ES_FIELD}_basis"] = basis
+                handle.write(json.dumps({"doc": doc}) + "\n")
+                written += 1
     return written
 
 
-def _readme(context: dict, frame: pd.DataFrame, updates: int) -> str:
+def _readme(context: dict, n_records: int, updates: int) -> str:
     counts = context.get("counts") or {}
     return "\n".join([
         f"PSC reconciliation export — run {context.get('run_id')}",
@@ -96,7 +164,7 @@ def _readme(context: dict, frame: pd.DataFrame, updates: int) -> str:
         f"Config version {context.get('config_version')}",
         f"Scope: {context.get('scope')}",
         "",
-        f"psc_entities.csv      {len(frame):,} PSC records, with the entity ID each was given",
+        f"psc_entities.csv      {n_records:,} PSC records, with the entity ID each was given",
         f"{BULK_FILENAME}  {updates:,} bulk updates for the {ES_INDEX} index",
         "aliases.csv           entity IDs that retired into another",
         "",
@@ -118,15 +186,23 @@ def export(run_dir: Path, scope: str, fmt: str, context: dict) -> Path:
     run_dir = Path(run_dir)
     entities = context.get("entities")
     if entities is None:
-        raise ValueError("The PSC export needs the run's entities frame")
+        entities = run_dir / "entities.parquet"
+        if not entities.is_file():
+            raise ValueError("The PSC export needs the run's entities frame")
 
-    frame = _decision_frame(run_dir, entities)
-    table_name = "psc_entities.parquet" if fmt == "parquet" else "psc_entities.csv"
-    table_path = run_dir / table_name
-    _write_table(frame, table_path, fmt)
+    temp_dir = run_dir / "duckdb_tmp"
+    con = duckdb_conn.connect(temp_dir)
+    try:
+        sql = _decision_sql(con, run_dir, entities)
+        table_name = "psc_entities.parquet" if fmt == "parquet" else "psc_entities.csv"
+        table_path = run_dir / table_name
+        _write_table(con, sql, table_path, fmt)
 
-    bulk_path = run_dir / BULK_FILENAME
-    updates = _write_bulk(frame, bulk_path)
+        bulk_path = run_dir / BULK_FILENAME
+        updates = _write_bulk(con, sql, bulk_path)
+        n_records = int(con.execute(f"SELECT count(*) FROM ({sql})").fetchone()[0])
+    finally:
+        con.close()
 
     aliases = context.get("aliases") or []
     alias_path = run_dir / "aliases.csv"
@@ -145,5 +221,5 @@ def export(run_dir: Path, scope: str, fmt: str, context: dict) -> Path:
         archive.write(table_path, table_name)
         archive.write(bulk_path, BULK_FILENAME)
         archive.write(alias_path, "aliases.csv")
-        archive.writestr("README.txt", _readme(context, frame, updates))
+        archive.writestr("README.txt", _readme(context, n_records, updates))
     return bundle

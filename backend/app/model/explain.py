@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from app.model import features as feature_lib
+from app.model import corpus as corpus_lib
 from app.model import references as reference_lib
 from app.model import store
 # The sentence that travels with every explanation, so it is read beside the
@@ -32,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 def explain(pair: pd.DataFrame, units: pd.DataFrame, track: str, version: int,
             events: pd.DataFrame | None = None, profile=None,
-            gamma_levels: dict | None = None) -> dict | None:
+            gamma_levels: dict | None = None,
+            corpus: dict | None = None) -> dict | None:
     """The signed contribution of every feature to one pair's score.
 
     *pair* is a one-row frame with `unit_id_l` and `unit_id_r`, plus whatever
@@ -49,7 +51,10 @@ def explain(pair: pd.DataFrame, units: pd.DataFrame, track: str, version: int,
     if booster is None or not stored or not len(pair):
         return None
 
-    references = reference_lib.load(profile)
+    # The corpus statistics are the run's own, read back from the run folder.
+    # Without them this screen would fit a TF-IDF over a corpus of two names and
+    # print numbers the scoring run never produced (`app/model/corpus.py`).
+    references = corpus_lib.attach(reference_lib.load(profile), corpus or {})
     built, _meta = feature_lib.build(pair, units, track, events=events,
                                      references=references, profile=profile)
     columns = [f["name"] for f in stored]

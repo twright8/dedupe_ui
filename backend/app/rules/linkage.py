@@ -60,6 +60,21 @@ DEFAULT_MAX_EXISTING_IDS = 1
 BUCKETS = ("accept", "review", "reject")
 DECIDED_BY = ("score", "import", "human")
 
+# The hot-key blocking control (docs/LINKAGE.md). A blocking rule may carry
+# these four optional keys; a rule without them blocks exactly as it always did.
+BLOCK_CONTROL_KEYS = ("max_block_size", "on_oversize", "refine_with", "drop_above")
+ON_OVERSIZE = ("refine", "drop")
+
+# The oversized key values are inlined into the generated SQL as a literal list,
+# so the list has to stay short. A rule that puts more keys than this over the
+# limit does not have a hot-key problem; it is a coarse rule, and refining a few
+# thousand separate key values one by one is not what this control is for.
+MAX_INLINE_KEYS = 5000
+
+# Joins the parts of a composite blocking key into one string. Unit separator:
+# it cannot appear in a cleaned value, so two different keys cannot collide.
+_KEY_SEPARATOR = "\x1f"
+
 _SIMPLE_EQ_RE = re.compile(r"^l\.(\w+)\s*=\s*r\.(\w+)$")
 _SIDE_COLUMN_RE = re.compile(r"\b[lr]\.(\w+)")
 
@@ -89,11 +104,17 @@ def blocking_rules(track_config: dict) -> list[dict]:
         if isinstance(rule, str):
             out.append({"id": f"b{index + 1}", "description": "", "sql": rule})
         elif isinstance(rule, dict) and rule.get("sql"):
-            out.append({
+            normalised = {
                 "id": rule.get("id") or f"b{index + 1}",
                 "description": rule.get("description") or "",
                 "sql": str(rule["sql"]),
-            })
+            }
+            # The hot-key control's keys ride along untouched when the rule has
+            # them. A rule without them keeps exactly the shape it always had.
+            for key in BLOCK_CONTROL_KEYS:
+                if key in rule:
+                    normalised[key] = rule[key]
+            out.append(normalised)
     return out
 
 
@@ -151,6 +172,567 @@ def build_blocking_rule(sql: str):
     if match and match.group(1) == match.group(2):
         return block_on(match.group(1))
     return CustomRule(sql)
+
+
+# ---------------------------------------------------------------------------
+# The hot-key blocking control
+#
+# A blocking rule puts units into blocks, and a block of n units makes
+# n(n-1)/2 pairs, so a handful of very common keys can carry most of the
+# workload. On the PSC sample, 30 blocks out of 356,138 carry 38% of every pair
+# route pb3 makes. It gets worse with scale, because a hot block's pairs grow
+# with the square of the data while a selective block's grow linearly.
+#
+# The control refines an oversized block by also requiring extra columns to
+# agree, and drops one that is still too big. Everything here works on counts
+# and on SQL text. No pair is ever made in order to be thrown away.
+# ---------------------------------------------------------------------------
+
+
+_L_REF_RE = re.compile(r"\bl\.(\w+)", re.IGNORECASE)
+_R_REF_RE = re.compile(r"\br\.(\w+)", re.IGNORECASE)
+
+
+def _norm(text: str) -> str:
+    """One SQL fragment flattened so two spellings of it compare equal."""
+    return " ".join((text or "").split()).lower()
+
+
+def _retarget(expr: str, prefix: str) -> str:
+    """An ``l.``-side fragment rewritten to another side, or to no side at all.
+
+    ``prefix`` is ``"r."`` for the right-hand side and ``""`` for a query over
+    the units table itself, where the columns carry no alias.
+    """
+    return _L_REF_RE.sub(lambda m: f"{prefix}{m.group(1)}", expr)
+
+
+def _scan(text: str):
+    """Walk *text* yielding ``(index, char, depth)`` outside string literals."""
+    depth, quote, index = 0, None, 0
+    while index < len(text):
+        char = text[index]
+        if quote is not None:
+            if char == quote:
+                if index + 1 < len(text) and text[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        yield index, char, depth
+        index += 1
+
+
+def _word_at(text: str, index: int, word: str) -> bool:
+    """True when *word* starts at *index* and is not part of a longer word."""
+    end = index + len(word)
+    if text[index:end].upper() != word:
+        return False
+    before = text[index - 1] if index else " "
+    after = text[end] if end < len(text) else " "
+    return not (before.isalnum() or before == "_") and \
+        not (after.isalnum() or after == "_")
+
+
+def _split_conjuncts(sql: str) -> list[str] | None:
+    """The top-level ``AND`` parts of *sql*, or None when a top-level ``OR`` runs.
+
+    A rule mixing ``AND`` and ``OR`` at the top level does not have one blocking
+    key, so it is not taken apart at all.
+    """
+    text = sql or ""
+    parts, start, skip_to = [], 0, 0
+    for index, char, depth in _scan(text):
+        if index < skip_to or depth != 0 or not char.isalpha():
+            continue
+        if _word_at(text, index, "OR"):
+            return None
+        if _word_at(text, index, "AND"):
+            parts.append(text[start:index])
+            start = index + 3
+            skip_to = start
+    parts.append(text[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _split_on(text: str, operator: str) -> tuple[str, str] | None:
+    """*text* cut at its first top-level *operator*, or None when it has none."""
+    for index, char, depth in _scan(text):
+        if depth != 0 or not text.startswith(operator, index):
+            continue
+        if operator == "=":
+            if index and text[index - 1] in "<>!=":
+                continue
+            if index + 1 < len(text) and text[index + 1] == "=":
+                continue
+        return text[:index].strip(), text[index + len(operator):].strip()
+    return None
+
+
+def _sides(text: str) -> str:
+    """Which of ``l.`` and ``r.`` a fragment names: ``l``, ``r``, ``both``, ``none``."""
+    left = bool(_L_REF_RE.search(text))
+    right = bool(_R_REF_RE.search(text))
+    if left and right:
+        return "both"
+    if left:
+        return "l"
+    if right:
+        return "r"
+    return "none"
+
+
+def block_shape(sql: str) -> dict:
+    """What a blocking rule blocks on, read out of its SQL.
+
+    Returns ``{"keys", "filters", "not_equal", "residual"}``. All four hold
+    ``l.``-side SQL fragments.
+
+    - ``keys`` — the expressions the rule forces to agree, such as
+      ``l.surname_metaphone`` or ``substr(l.surname_clean, 1, 3)``. Together
+      they are the block's key.
+    - ``filters`` — the conditions that name one side only, such as
+      ``l.name_fingerprint <> ''``. Both units of a pair satisfy them, so they
+      are a filter on the units.
+    - ``not_equal`` — the expressions the rule forces to *differ*, written
+      ``l.x <> r.x``.
+    - ``residual`` — anything else, verbatim. Counting cannot apply these, so a
+      rule that has any is priced as an upper bound.
+    """
+    shape = {"keys": [], "filters": [], "not_equal": [], "residual": []}
+    conjuncts = _split_conjuncts(sql)
+    if conjuncts is None:
+        shape["residual"].append((sql or "").strip())
+        return shape
+    for conjunct in conjuncts:
+        body = conjunct
+        while body.startswith("(") and body.endswith(")") and \
+                _split_conjuncts(body[1:-1]) is not None and \
+                len(_split_conjuncts(body[1:-1]) or []) == 1:
+            body = body[1:-1].strip()
+        where = _sides(body)
+        if where in ("l", "r"):
+            shape["filters"].append(_R_REF_RE.sub(lambda m: f"l.{m.group(1)}", body))
+            continue
+        equality = _split_on(body, "=")
+        if equality and where == "both":
+            left, right = equality
+            if _norm(_retarget(left, "r.")) == _norm(right):
+                shape["keys"].append(left)
+                continue
+        unequal = _split_on(body, "<>")
+        if unequal and where == "both":
+            left, right = unequal
+            if _norm(_retarget(left, "r.")) == _norm(right):
+                shape["not_equal"].append(left)
+                continue
+        shape["residual"].append(body)
+    return shape
+
+
+def block_control(rule) -> dict | None:
+    """The hot-key control on one blocking rule, or None when it has none.
+
+    Returns ``{"max_block_size", "on_oversize", "refine_with", "drop_above"}``
+    with the defaults filled in: ``on_oversize`` is ``"refine"`` when
+    ``refine_with`` names columns and ``"drop"`` when it does not, and
+    ``drop_above`` is None when the rule does not set one.
+
+    Bad values are read as leniently as the rest of this module reads user
+    data — validation is what refuses them, not this.
+    """
+    if isinstance(rule, str) or not isinstance(rule, dict):
+        return None
+    size = rule.get("max_block_size")
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        return None
+    refine = rule.get("refine_with")
+    columns = [c for c in refine if isinstance(c, str) and c] \
+        if isinstance(refine, list) else []
+    mode = rule.get("on_oversize")
+    if mode not in ON_OVERSIZE:
+        mode = "refine" if columns else "drop"
+    if mode == "refine" and not columns:
+        mode = "drop"
+    above = rule.get("drop_above")
+    if isinstance(above, bool) or not isinstance(above, int) or above <= 0 \
+            or mode == "drop":
+        # In drop mode every oversized block already goes, so there is nothing
+        # left for drop_above to decide.
+        above = None
+    return {
+        "max_block_size": size,
+        "on_oversize": mode,
+        "refine_with": columns if mode == "refine" else [],
+        "drop_above": above,
+    }
+
+
+def _column_words(column: str) -> str:
+    """A column name as plain words: ``dob_year_clean`` reads "dob year"."""
+    name = column[:-6] if column.endswith("_clean") else column
+    return name.replace("_", " ").strip() or column
+
+
+def _join_words(words: list[str]) -> str:
+    if len(words) == 1:
+        return words[0]
+    return ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def control_description(rule) -> str:
+    """One plain sentence saying what the control does, for the UI.
+
+    "Blocks of more than 60 records are compared only when the forename initial
+    also matches; blocks of more than 200 are skipped."
+    """
+    control = block_control(rule)
+    if control is None:
+        return ""
+    size = control["max_block_size"]
+    if control["on_oversize"] == "drop":
+        return f"Blocks of more than {size:,} records are skipped."
+    columns = [f"the {_column_words(c)}" for c in control["refine_with"]]
+    verb = "also matches" if len(columns) == 1 else "also match"
+    sentence = (
+        f"Blocks of more than {size:,} records are compared only when "
+        f"{_join_words(columns)} {verb}"
+    )
+    if control["drop_above"]:
+        return (f"{sentence}; blocks of more than "
+                f"{control['drop_above']:,} are skipped.")
+    return f"{sentence}."
+
+
+# ---------------------------------------------------------------------------
+# Counting and generating SQL — DuckDB group arithmetic, never a pair
+# ---------------------------------------------------------------------------
+
+
+def as_rule(rule) -> dict:
+    """One blocking rule as a dict, whether it arrived as SQL text or a dict."""
+    if isinstance(rule, str):
+        return {"id": "", "description": "", "sql": rule}
+    return rule if isinstance(rule, dict) else {"id": "", "description": "", "sql": ""}
+
+
+def _units_source(con, units) -> str:
+    """*units* as something a ``FROM`` clause can name.
+
+    Takes a path to a parquet file, the name of a table or view already in
+    *con*, a pandas frame, or a DuckDB relation. A frame or a relation is
+    registered on *con* under a fixed name, which is replaced on each call.
+    """
+    if isinstance(units, str):
+        lowered = units.lower()
+        if lowered.endswith((".parquet", ".pq")) or "*" in units:
+            return "read_parquet('" + units.replace("'", "''") + "')"
+        return units
+    con.register("_linkage_units", units)
+    return "_linkage_units"
+
+
+def _has_column(con, source: str, column: str) -> bool:
+    cursor = con.execute(f"select * from {source} limit 0")
+    return column in [d[0] for d in cursor.description]
+
+
+def _key_expr(parts: list[str], prefix: str) -> str:
+    """The block key of one side as a single string expression.
+
+    Every part is cast to text and a null becomes the empty string, so the value
+    this builds is the same value the literal list holds. A null key never
+    blocks anyway — ``l.k = r.k`` is false when either side is null — so the
+    substitution cannot invent a pair.
+    """
+    pieces = [f"coalesce(cast({_retarget(part, prefix)} as varchar), '')"
+              for part in parts]
+    joiner = f" || chr({ord(_KEY_SEPARATOR)}) || "
+    return pieces[0] if len(pieces) == 1 else joiner.join(pieces)
+
+
+def _literal(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _where(shape: dict, track: str | None, has_track: bool, extra=()) -> str:
+    """The rows of the units table this rule could ever block.
+
+    A null key is left out because ``l.k = r.k`` is false when either side is
+    null, so a unit with a null key never blocks with anything. The same is true
+    of a null ``refine_with`` value, which is why *extra* is filtered the same
+    way: a unit in an oversized block with nothing to refine on makes no pair.
+    """
+    clauses = []
+    if track and has_track:
+        clauses.append(f"track = {_literal(track)}")
+    # `l.x <> r.x` is null, not true, when either side is null, so a unit with a
+    # null there makes no pair on this rule either and is left out the same way.
+    for part in list(shape["keys"]) + list(extra) + list(shape["not_equal"]):
+        clauses.append(f"({_retarget(part, '')}) is not null")
+    for part in shape["filters"]:
+        clauses.append(f"({_retarget(part, '')})")
+    return " and ".join(clauses) if clauses else "true"
+
+
+def _block_sql(shape: dict, source: str, track: str | None, has_track: bool,
+               extra=(), tag: str = "") -> tuple[str, list[str]]:
+    """``(CTEs, key names)`` for a chain ending in ``blk<tag>(key..., n, c)``.
+
+    ``n`` is the units in the block. ``c`` is the pairs an ``l.x <> r.x``
+    condition removes from it, which is the pairs of its sub-blocks by ``x``.
+    Both come from ``count(*)``. No pair is ever built.
+
+    *extra* adds columns to the key, which is how a refined block is counted.
+    """
+    parts = list(shape["keys"]) + list(extra)
+    group = [f"({_retarget(part, '')}) as k{i}" for i, part in enumerate(parts)]
+    names = [f"k{i}" for i in range(len(group))]
+    if not names:                       # a rule with no key is one big block
+        group, names = ["true as k0"], ["k0"]
+    where = _where(shape, track, has_track, extra)
+    # Prefixed names, because the units may themselves be a table or view the
+    # caller named, and a CTE that shadows it would silently read the wrong one.
+    units, sub, blk = f"_hk_u{tag}", f"_hk_sub{tag}", f"_hk_blk{tag}"
+    if shape["not_equal"]:
+        unequal = [f"({_retarget(part, '')}) as x{i}"
+                   for i, part in enumerate(shape["not_equal"])]
+        keys_and_x = ", ".join(names + [f"x{i}" for i in range(len(unequal))])
+        ctes = (
+            f"{units} as (select {', '.join(group + unequal)} "
+            f"from {source} where {where}), "
+            f"{sub} as (select {keys_and_x}, count(*) as m "
+            f"from {units} group by all), "
+            f"{blk} as (select {', '.join(names)}, sum(m) as n, "
+            f"sum(m * (m - 1) // 2) as c from {sub} group by all)"
+        )
+    else:
+        ctes = (
+            f"{units} as (select {', '.join(group)} from {source} where {where}), "
+            f"{blk} as (select {', '.join(names)}, count(*) as n, 0 as c "
+            f"from {units} group by all)"
+        )
+    return ctes, names
+
+
+def _one(con, sql: str) -> tuple:
+    row = con.execute(sql).fetchone()
+    return tuple(0 if value is None else int(value) for value in row)
+
+
+def price_rule(con, units, rule, track: str | None = None) -> dict:
+    """What one blocking rule costs after its hot-key control, by counting only.
+
+    *con* is a DuckDB connection. *units* is a parquet path, the name of a table
+    or view on *con*, a pandas frame or a DuckDB relation — one row per unit.
+    *rule* is a blocking rule: SQL text, or the dict ``blocking_rules()``
+    returns, which may carry ``max_block_size``, ``on_oversize``,
+    ``refine_with`` and ``drop_above``. *track* filters the units when they
+    carry a ``track`` column.
+
+    Returns::
+
+        {"pairs":            pairs the rule makes after the control,
+         "blocks":           blocks it makes after the control,
+         "oversized_blocks": blocks over max_block_size, before the control,
+         "pairs_before":     pairs it would make with no control,
+         "units_dropped":    units in blocks the control drops entirely,
+         "units_unrefinable": units in an oversized block whose refine_with
+                             value is null, which make no pair either,
+         "blocks_before":    blocks it makes with no control,
+         "exact":            False when the SQL holds a condition counting
+                             cannot apply, which makes every count an upper
+                             bound,
+         "residual":         those conditions, as text}
+
+    Nothing here builds a pair and nothing here touches Splink. Every number is
+    ``sum(n * (n - 1) / 2)`` over a ``GROUP BY``, so a rule that would make a
+    hundred million pairs is priced in one pass over the units.
+    """
+    rule = as_rule(rule)
+    shape = block_shape(rule.get("sql") or "")
+    control = block_control(rule)
+    if control is not None and not shape["keys"]:
+        # Nothing to be oversized about: the rule has no block key. Validation
+        # refuses this shape; pricing simply reports the rule as it stands.
+        control = None
+    source = _units_source(con, units)
+    has_track = bool(track) and _has_column(con, source, "track")
+    base, keys = _block_sql(shape, source, track, has_track)
+
+    limit = control["max_block_size"] if control else None
+    filter_kept = "" if limit is None else f" filter (where n <= {limit})"
+    filter_big = "false" if limit is None else f"n > {limit}"
+    totals = _one(con, f"""
+        with {base}
+        select count(*),
+               coalesce(sum(n * (n - 1) // 2 - c), 0),
+               count(*){filter_kept},
+               coalesce(sum(n * (n - 1) // 2 - c){filter_kept}, 0),
+               count(*) filter (where {filter_big}),
+               coalesce(sum(n) filter (where {filter_big}), 0)
+        from _hk_blk
+    """)
+    blocks_before, pairs_before, kept_blocks, kept_pairs, oversized, big_units = totals
+
+    result = {
+        "pairs": pairs_before,
+        "blocks": blocks_before,
+        "oversized_blocks": oversized,
+        "pairs_before": pairs_before,
+        "blocks_before": blocks_before,
+        "units_dropped": 0,
+        "units_unrefinable": 0,
+        "exact": not shape["residual"],
+        "residual": list(shape["residual"]),
+    }
+    if control is None:
+        return result
+
+    if control["on_oversize"] == "drop":
+        result.update({"pairs": kept_pairs, "blocks": kept_blocks,
+                       "units_dropped": big_units})
+        return result
+
+    # Refine: every oversized block is re-blocked on the extra columns, and what
+    # is still too big after that goes. `blk2` groups by key plus refine_with,
+    # so a refined block is just another GROUP BY — still no pair.
+    refined, _ = _block_sql(shape, source, track, has_track,
+                            extra=[f"l.{c}" for c in control["refine_with"]],
+                            tag="2")
+    above = control["drop_above"]
+    keep = "true" if above is None else f"n <= {above}"
+    drop = "false" if above is None else f"n > {above}"
+    joined = " and ".join(f"_hk_blk2.{key} is not distinct from _hk_big.{key}"
+                          for key in keys)
+    refined_blocks, refined_pairs, dropped_units, refined_units = _one(con, f"""
+        with {base}, {refined},
+             _hk_big as (select {', '.join(keys)} from _hk_blk where {filter_big})
+        select count(*) filter (where {keep}),
+               coalesce(sum(n * (n - 1) // 2 - c) filter (where {keep}), 0),
+               coalesce(sum(n) filter (where {drop}), 0),
+               coalesce(sum(n), 0)
+        from _hk_blk2 join _hk_big on {joined}
+    """)
+    result.update({
+        "pairs": kept_pairs + refined_pairs,
+        "blocks": kept_blocks + refined_blocks,
+        "units_dropped": dropped_units,
+        # A unit in an oversized block with a null refine_with value has nothing
+        # to be refined on, so it makes no pair on this rule either.
+        "units_unrefinable": big_units - refined_units,
+    })
+    return result
+
+
+def oversized_keys(con, units, rule, track: str | None = None) -> dict:
+    """The key values the control acts on: ``{"oversized": [...], "dropped": [...]}``.
+
+    ``oversized`` holds every block key with more units than ``max_block_size``.
+    ``dropped`` holds the refined keys — key plus ``refine_with`` — that are
+    still over ``drop_above`` after refining, and is empty without one. Both are
+    strings: a composite key is its parts joined by the unit separator, which is
+    exactly what the generated SQL compares against.
+    """
+    rule = as_rule(rule)
+    control = block_control(rule)
+    if control is None:
+        return {"oversized": [], "dropped": []}
+    shape = block_shape(rule.get("sql") or "")
+    if not shape["keys"]:
+        return {"oversized": [], "dropped": []}
+    source = _units_source(con, units)
+    has_track = bool(track) and _has_column(con, source, "track")
+    where = _where(shape, track, has_track)
+    key = _key_expr(shape["keys"], "")
+    size = control["max_block_size"]
+
+    big = [row[0] for row in con.execute(
+        f"select {key} as k from {source} where {where} "
+        f"group by 1 having count(*) > {size}"
+    ).fetchall()]
+    dropped = []
+    if control["on_oversize"] == "refine" and control["drop_above"]:
+        extra = [f"l.{c}" for c in control["refine_with"]]
+        combined = _key_expr(list(shape["keys"]) + extra, "")
+        # A block is oversized on its whole size, but a null refine value never
+        # agrees with itself, so those units make no pair and must not swell the
+        # refined group that drop_above then measures.
+        refinable = _where(shape, track, has_track, extra)
+        dropped = [row[0] for row in con.execute(
+            f"with _hk_big as (select {key} as k from {source} where {where} "
+            f"group by 1 having count(*) > {size}), "
+            f"_hk_u as (select {key} as k, {combined} as ck from {source} "
+            f"where {refinable}) "
+            f"select ck from _hk_u where k in (select k from _hk_big) "
+            f"group by 1 having count(*) > {control['drop_above']}"
+        ).fetchall()]
+    return {"oversized": big, "dropped": dropped}
+
+
+def controlled_sql(con, units, rule, track: str | None = None) -> str:
+    """The rule's SQL with its hot-key control built in, ready for Splink.
+
+    The control is generated SQL, not a filter over pairs: a pair inside an
+    oversized block is never made unless the ``refine_with`` columns agree, and
+    is never made at all when the refined block is still over ``drop_above``.
+
+    The shape is the rule's own SQL with two extra conditions on the ``l.``
+    side, which is enough because the rule already holds the key equal::
+
+        <the rule> AND (<key> NOT IN (<the oversized keys>)
+                        OR (l.forename_initial = r.forename_initial))
+                   AND <key || refine> NOT IN (<the keys still too big>)
+
+    The oversized keys are inlined as literals because a Splink blocking rule is
+    a predicate over ``l.`` and ``r.`` columns and has nowhere else to read a set
+    from. They are measured from *units*, so pass the same frame Splink will
+    score. A rule with no control, or one whose blocks are all inside the limit,
+    comes back untouched.
+    """
+    rule = as_rule(rule)
+    sql = rule.get("sql") or ""
+    control = block_control(rule)
+    if control is None:
+        return sql
+    shape = block_shape(sql)
+    if not shape["keys"]:
+        return sql
+    sets = oversized_keys(con, units, rule, track)
+    if not sets["oversized"]:
+        return sql
+    if len(sets["oversized"]) > MAX_INLINE_KEYS:
+        raise ValueError(
+            f"Blocking rule '{rule.get('id') or sql}' has "
+            f"{len(sets['oversized']):,} blocks over max_block_size "
+            f"({control['max_block_size']:,}), more than the {MAX_INLINE_KEYS:,} "
+            "this control can carry. The rule is too coarse to fix one key at a "
+            "time — tighten the rule itself, or raise max_block_size."
+        )
+
+    key = _key_expr(shape["keys"], "l.")
+    values = ", ".join(_literal(v) for v in sorted(sets["oversized"]))
+    clauses = [f"({sql})"]
+    if control["on_oversize"] == "drop":
+        clauses.append(f"{key} NOT IN ({values})")
+    else:
+        agree = " AND ".join(f"l.{c} = r.{c}" for c in control["refine_with"])
+        clauses.append(f"({key} NOT IN ({values}) OR ({agree}))")
+        if sets["dropped"]:
+            combined = _key_expr(
+                list(shape["keys"]) + [f"l.{c}" for c in control["refine_with"]],
+                "l.",
+            )
+            gone = ", ".join(_literal(v) for v in sorted(sets["dropped"]))
+            clauses.append(f"{combined} NOT IN ({gone})")
+    return " AND ".join(clauses)
 
 
 def numeric_thresholds(spec: dict) -> list:
@@ -316,6 +898,71 @@ def _check_numeric_difference(spec: dict, path: str, errors: list[dict]) -> None
                "its levels are gaps between numbers, not values")
 
 
+def _check_block_control(rule: dict, sql: str, path: str, track: str,
+                         known: set[str], errors: list[dict]) -> None:
+    """The four hot-key keys on one blocking rule (docs/LINKAGE.md).
+
+    A rule carrying none of them is left alone, which is the whole point: the
+    control is opt-in and a settings document written before it existed is
+    still valid and still blocks the same way.
+    """
+    present = [key for key in BLOCK_CONTROL_KEYS if key in rule]
+    if not present:
+        return
+
+    size = rule.get("max_block_size")
+    has_size = "max_block_size" in rule
+    if has_size:
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            _error(errors, f"{path}.max_block_size",
+                   "max_block_size must be a whole number above zero")
+            size = None
+    else:
+        size = None
+        _error(errors, f"{path}.{present[0]}",
+               f"'{present[0]}' needs a max_block_size to say which blocks are "
+               "oversized")
+
+    mode = rule.get("on_oversize")
+    if "on_oversize" in rule and mode not in ON_OVERSIZE:
+        _error(errors, f"{path}.on_oversize",
+               f"on_oversize must be one of {', '.join(ON_OVERSIZE)}")
+        mode = None
+
+    refine = rule.get("refine_with")
+    columns = None
+    if "refine_with" in rule:
+        if not isinstance(refine, list) or not refine \
+                or not all(isinstance(c, str) and c for c in refine):
+            _error(errors, f"{path}.refine_with",
+                   "refine_with must be a non-empty list of column names")
+        else:
+            columns = refine
+            for column in refine:
+                if column not in known:
+                    _error(errors, f"{path}.refine_with",
+                           f"'{column}' is not a column of the {track} track")
+    if mode == "refine" and columns is None and "refine_with" not in rule:
+        _error(errors, f"{path}.refine_with",
+               "on_oversize 'refine' needs refine_with to say which columns an "
+               "oversized block is refined by")
+
+    if "drop_above" in rule:
+        above = rule.get("drop_above")
+        if isinstance(above, bool) or not isinstance(above, int) or above <= 0:
+            _error(errors, f"{path}.drop_above",
+                   "drop_above must be a whole number above zero")
+        elif size is not None and above < size:
+            _error(errors, f"{path}.drop_above",
+                   f"drop_above ({above:,}) must be at or above max_block_size "
+                   f"({size:,}): a block is refined first and only then dropped")
+
+    if size is not None and not block_shape(sql)["keys"]:
+        _error(errors, f"{path}.max_block_size",
+               "A rule with no 'l.column = r.column' has no blocks to size, so "
+               "it cannot take a hot-key control")
+
+
 def _check_track(track: str, config: dict, known: set[str], errors: list[dict]) -> None:
     base = f"linkage_settings.tracks.{track}"
     if not isinstance(config, dict):
@@ -342,6 +989,8 @@ def _check_track(track: str, config: dict, known: set[str], errors: list[dict]) 
                 if column not in known:
                     _error(errors, f"{path}.sql",
                            f"'{column}' is not a column of the {track} track")
+            if isinstance(rule, dict):
+                _check_block_control(rule, sql, path, track, known, errors)
 
     raw_comparisons = config.get("comparisons")
     if raw_comparisons is not None and not isinstance(raw_comparisons, list):

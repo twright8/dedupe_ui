@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from app.model import corpus as corpus_lib
 from app.model import features as feature_lib
 from app.model import references as reference_lib
 from app.model import store
@@ -104,7 +105,8 @@ def active_models(tracks=("person", "organisation")) -> dict[str, TrackModel]:
 
 
 def score_track(pairs: pd.DataFrame, units: pd.DataFrame, track: str, version: int,
-                events: pd.DataFrame | None = None, profile=None) -> np.ndarray:
+                events: pd.DataFrame | None = None, profile=None,
+                corpus: dict | None = None) -> np.ndarray:
     """Calibrated model scores for one track's pairs, in the frame's own order.
 
     The feature frame is rebuilt from the stored feature list rather than from
@@ -120,7 +122,12 @@ def score_track(pairs: pd.DataFrame, units: pd.DataFrame, track: str, version: i
     if not len(pairs):
         return np.zeros(0, dtype="float64")
 
-    references = reference_lib.load(profile)
+    # The corpus statistics ride in on the references, because that is the one
+    # channel every feature builder is already handed. They were fitted once,
+    # over every unit, and written into the run folder, so a batch of two
+    # million pairs and a single pair being explained get the same numbers
+    # (`app/model/corpus.py`).
+    references = corpus_lib.attach(reference_lib.load(profile), corpus or {})
     built, _meta = feature_lib.build(pairs, units, track, events=events,
                                      references=references, profile=profile)
     columns = [f["name"] for f in stored]
@@ -131,7 +138,8 @@ def score_track(pairs: pd.DataFrame, units: pd.DataFrame, track: str, version: i
 
 def score_pairs(pairs: pd.DataFrame, units: pd.DataFrame,
                 models: dict[str, TrackModel], events: pd.DataFrame | None = None,
-                profile=None) -> tuple[pd.DataFrame, dict[str, TrackModel]]:
+                profile=None,
+                corpus: dict | None = None) -> tuple[pd.DataFrame, dict[str, TrackModel]]:
     """Add `gbt_score` for every track that has an active model.
 
     Returns the pairs and the models that actually scored something — a track
@@ -152,7 +160,8 @@ def score_pairs(pairs: pd.DataFrame, units: pd.DataFrame,
         subset = pairs[mask].reset_index(drop=True)
         try:
             scores = score_track(subset, units, track, model.version,
-                                 events=events, profile=profile)
+                                 events=events, profile=profile,
+                                 corpus=(corpus or {}).get(track))
         except Exception:  # noqa: BLE001 — a broken version must not fail the run
             logger.exception("Could not score the %s track with model v%s",
                              track, model.version)

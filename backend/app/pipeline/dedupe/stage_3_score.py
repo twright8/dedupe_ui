@@ -42,6 +42,7 @@ from app.pipeline.dedupe.stage_3b_model import MODEL_SCORE_COLUMN
 from app.pipeline.dedupe.stage_0_load import EVENTS_FILENAME
 from app.pipeline.dedupe.stage_1_clean import RECORDS_FILENAME
 from app.pipeline.dedupe.stage_2_exact import EXACT_GROUPS_FILENAME
+from app.model import corpus as corpus_lib
 from app.profiles import get_profile
 from app.rules import linkage, vetoes
 
@@ -51,6 +52,9 @@ logging.getLogger("splink").setLevel(logging.INFO)
 DECIDED_BY_VETO = "veto"
 
 PAIRS_FILENAME = "pairs.parquet"
+# Splink's raw predictions, one file per track, narrowed to the columns the
+# pairs file keeps. Deleted once the overlays have been laid over them.
+PREDICTIONS_FILENAME = "predictions_{track}.parquet"
 # The units Splink saw, so a later recluster can say exactly which ones are new.
 SCORED_UNITS_FILENAME = "scored_units.parquet"
 BLOCKING_REPORT_FILENAME = "blocking_report.json"
@@ -68,6 +72,39 @@ DEFAULT_MEMORY_LIMIT = "6GB"
 # Pairs sampled to estimate u. Splink's own default is a million; five million
 # steadies the estimate without costing much on a dataset this size.
 U_SAMPLE_PAIRS = 5e6
+
+# How many pairs a Python step may hold at once. Bucketing, the vetoes and the
+# priority totals are all row-independent, so they run over the pairs a batch at
+# a time and the memory they need is this number, not the run's pair count.
+# PSC's full snapshot makes something over a hundred million pairs; nothing may
+# size itself on that.
+PAIR_BATCH_ENV = "PAIR_BATCH_ROWS"
+DEFAULT_PAIR_BATCH = 500_000
+
+# The same idea for stage 3b. A model's feature build is the most expensive
+# per-pair work in the pipeline — DuckDB joins, a TF-IDF lookup, a LightGBM
+# predict — so it gets a knob of its own and a larger default: the batch is a
+# fixed cost per call, and too small a one pays it too often.
+MODEL_BATCH_ENV = "MODEL_BATCH_PAIRS"
+DEFAULT_MODEL_BATCH = 2_000_000
+
+
+def _positive_int(name: str, fallback: int) -> int:
+    try:
+        value = int(os.environ.get(name, fallback))
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
+
+
+def pair_batch_rows() -> int:
+    """Pairs per Python batch, from ``PAIR_BATCH_ROWS``."""
+    return _positive_int(PAIR_BATCH_ENV, DEFAULT_PAIR_BATCH)
+
+
+def model_batch_pairs() -> int:
+    """Pairs per model-scoring batch, from ``MODEL_BATCH_PAIRS``."""
+    return _positive_int(MODEL_BATCH_ENV, DEFAULT_MODEL_BATCH)
 
 
 class BlockingBudgetError(RuntimeError):
@@ -157,6 +194,150 @@ clear_duckdb_tmp = duckdb_conn.clear_spill
 
 
 # ---------------------------------------------------------------------------
+# Reading only what is needed: unit projections and pair batches
+# ---------------------------------------------------------------------------
+
+
+def overlay_columns(ruleset: dict | None = None, profile=None) -> list[str]:
+    """Every unit column ``apply_overlays`` and ``finalise_pairs`` read.
+
+    The import overlay needs the single existing id, the held-group flag needs
+    ``held_group_id``, the vetoes need whatever columns they name, and the
+    priority totals need the profile's priority columns. That is four or five
+    columns out of the sixty-odd a PSC unit carries, and reading the other
+    fifty-five is the difference between a projection that fits and a frame that
+    does not.
+    """
+    if profile is None:
+        profile = get_profile()
+    wanted = ["unit_id", "track", "existing_entity_id", "held_group_id"]
+    wanted += list(profile.priority_columns or [])
+    wanted += vetoes.columns_needed(ruleset or {})
+    return list(dict.fromkeys(wanted))
+
+
+def budget_columns(config: dict) -> list[str]:
+    """The unit columns the blocking budget has to count on, for one track."""
+    wanted = {"unit_id"}
+    for rule in linkage.blocking_rules(config):
+        wanted |= set(linkage.sql_columns(rule["sql"]))
+        # A hot-key control re-blocks on columns the rule itself never names,
+        # so the projection has to carry them or the control cannot run.
+        control = linkage.block_control(rule)
+        if control:
+            wanted |= {c for c in (control.get("refine_with") or [])
+                       if isinstance(c, str)}
+    for rule in linkage.em_rules(config):
+        wanted |= set(linkage.sql_columns(rule))
+    return sorted(wanted)
+
+
+def splink_columns(config: dict, ruleset: dict, track: str) -> list[str]:
+    """The unit columns one track's Splink model touches, and no others.
+
+    ``_splink_frame`` already narrows what Splink is handed. This narrows what
+    is read off the disk in the first place, which is the part that used to cost
+    a full-width copy of every unit in the track.
+    """
+    wanted = set(budget_columns(config))
+    for rule in _deterministic_rules(ruleset, track):
+        wanted |= set(linkage.sql_columns(rule))
+    wanted |= set(_comparison_columns(config))
+    wanted.add("track")
+    return sorted(wanted)
+
+
+def read_projection(path, columns) -> pd.DataFrame:
+    """*columns* of a parquet file, narrowed to the ones the file has.
+
+    A ruleset may legally name a column the data does not carry, and asking
+    parquet for a column that is not there is a hard failure — the same trap
+    stage 2's projection hit (`PSC_HANDOVER.md`, section 12). A test fixture
+    does it too, with a records file that has no ``existing_entity_id``.
+    """
+    import pyarrow.parquet as pq
+
+    path = Path(path)
+    available = set(pq.ParquetFile(path).schema_arrow.names)
+    keep = [c for c in dict.fromkeys(columns) if c in available]
+    return pd.read_parquet(path, columns=keep)
+
+
+#: The units projection is the common case and reads better with its own name.
+read_unit_projection = read_projection
+
+
+def iter_pair_batches(path, batch_rows: int | None = None, columns=None):
+    """``pairs.parquet`` (or a predictions file) a bounded batch at a time."""
+    import pyarrow.parquet as pq
+
+    rows = batch_rows or pair_batch_rows()
+    handle = pq.ParquetFile(path)
+    for batch in handle.iter_batches(batch_size=rows, columns=columns):
+        yield batch.to_pandas()
+
+
+class PairWriter:
+    """One parquet writer for the pairs file, with a schema fixed by batch one.
+
+    Stage 1 learnt this lesson on the records file and it holds here too: a
+    parquet written batch by batch must be written against ONE schema, or a
+    batch where every veto reason happens to be null writes a different type
+    from the batch before it and the file cannot be read back. The schema comes
+    from the first finished batch, with any column arrow could only call "null"
+    promoted to text, since those are the overlay's own object columns.
+    """
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self._writer = None
+        self.schema = None
+        self.rows = 0
+
+    def write(self, frame: pd.DataFrame) -> None:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        if not len(frame):
+            return
+        table = pa.Table.from_pandas(frame, preserve_index=False) \
+            if self.schema is None else \
+            pa.Table.from_pandas(frame, schema=self.schema, preserve_index=False)
+        if self.schema is None:
+            fields = [
+                pa.field(f.name, pa.string()) if pa.types.is_null(f.type) else f
+                for f in table.schema
+            ]
+            self.schema = pa.schema(fields)
+            table = table.cast(self.schema)
+            self._writer = pq.ParquetWriter(str(self.path), self.schema)
+        self._writer.write_table(table)
+        self.rows += len(frame)
+
+    def close(self, empty: pd.DataFrame | None = None) -> int:
+        """Finish the file. *empty* is written when no batch ever was."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        if self._writer is None:
+            frame = empty if empty is not None else pd.DataFrame(columns=PAIR_HEAD)
+            table = pa.Table.from_pandas(frame, preserve_index=False)
+            pq.write_table(table, str(self.path))
+        else:
+            self._writer.close()
+            self._writer = None
+        return self.rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+
+
+# ---------------------------------------------------------------------------
 # The blocking budget — run before Splink, never after
 # ---------------------------------------------------------------------------
 
@@ -175,8 +356,54 @@ def count_blocking_pairs(track_units: pd.DataFrame, sql: str, db_api) -> int:
     return int(counts["number_of_comparisons_to_be_scored_post_filter_conditions"])
 
 
+def controlled_rules(rows: pd.DataFrame, rules: list[dict], track: str,
+                     temp_dir=None, progress_callback=None) -> list[dict]:
+    """The blocking rules with their hot-key controls built into the SQL.
+
+    A rule with no ``max_block_size`` comes back exactly as it went in, which is
+    what keeps donations and every route that has no control unchanged. A rule
+    with one comes back with the control generated into it, so the pairs inside
+    a hot block are never made rather than made and then thrown away
+    (`docs/LINKAGE.md`).
+
+    The oversized key values are measured from *rows*, so this has to be handed
+    the same units Splink is about to score.
+    """
+    if not any(linkage.block_control(rule) for rule in rules):
+        return rules
+    con = duckdb_conn.connect(temp_dir)
+    try:
+        out = []
+        for rule in rules:
+            if linkage.block_control(rule) is None:
+                out.append(rule)
+                continue
+            out.append({**rule, "sql": linkage.controlled_sql(con, rows, rule, track)})
+            _step(f"  {track}/{rule['id']}: {linkage.control_description(rule)}",
+                  progress_callback)
+        return out
+    finally:
+        con.close()
+
+
+def _budget_rows(units, track: str, config: dict) -> pd.DataFrame:
+    """One track's units, narrowed to the columns its rules block on.
+
+    *units* is the frame or the path to ``units.parquet``. A path is read one
+    track's projection at a time, so pricing sixteen million units costs the
+    half-dozen columns the rules name rather than all sixty.
+    """
+    columns = budget_columns(config)
+    if isinstance(units, (str, Path)):
+        frame = read_unit_projection(units, columns + ["track"])
+        return units_module.track_units(frame, track)
+    rows = units_module.track_units(units, track)
+    keep = [c for c in columns if c in rows.columns]
+    return rows[keep] if keep else rows
+
+
 def blocking_budget_report(
-    units: pd.DataFrame,
+    units,
     settings: dict,
     db_api,
     progress_callback=None,
@@ -193,19 +420,34 @@ def blocking_budget_report(
 
     for track in linkage.TRACK_KEYS:
         config = linkage.track_settings(settings, track)
-        rows = units_module.track_units(units, track)
+        rows = _budget_rows(units, track, config)
         rules = linkage.blocking_rules(config)
         budget = linkage.max_pairs(config)
 
+        # The budget is priced on what the rules will ACTUALLY do, so a rule
+        # with a hot-key control is counted after the control, not before it.
+        # A budget that prices the uncontrolled rule is not a budget.
+        priced = controlled_rules(rows, rules, track,
+                                  progress_callback=progress_callback) \
+            if len(rows) > 1 else rules
         counted = []
-        for rule in rules:
-            pairs = count_blocking_pairs(rows, rule["sql"], db_api) if len(rows) > 1 else 0
-            counted.append({
+        for rule, controlled in zip(rules, priced):
+            pairs = count_blocking_pairs(rows, controlled["sql"], db_api) \
+                if len(rows) > 1 else 0
+            entry = {
                 "id": rule["id"],
                 "description": rule["description"],
                 "sql": rule["sql"],
                 "pairs": pairs,
-            })
+            }
+            if linkage.block_control(rule) is not None:
+                entry["control"] = linkage.block_control(rule)
+                entry["control_description"] = linkage.control_description(rule)
+                entry["sql_after_control"] = controlled["sql"]
+                if len(rows) > 1:
+                    entry["pairs_before_control"] = count_blocking_pairs(
+                        rows, rule["sql"], db_api)
+            counted.append(entry)
             _step(
                 f"  {track}/{rule['id']}: {pairs:,} pairs — {rule['sql']}",
                 progress_callback,
@@ -346,7 +588,10 @@ def train_track(
         unique_id_column_name="unit_id",
         comparisons=[linkage.build_comparison(c) for c in linkage.comparisons(config)],
         blocking_rules_to_generate_predictions=[
-            linkage.build_blocking_rule(r["sql"]) for r in linkage.blocking_rules(config)
+            linkage.build_blocking_rule(r["sql"])
+            for r in controlled_rules(rows, linkage.blocking_rules(config), track,
+                                      temp_dir=Path(run_dir) / "duckdb_tmp",
+                                      progress_callback=progress_callback)
         ],
         max_iterations=int(settings.get("em_iterations", linkage.DEFAULT_EM_ITERATIONS)),
         # Splink only emits the gamma columns — which agreement level each
@@ -407,10 +652,70 @@ def train_track(
     _step(f"  Predicting down to {candidate}...", progress_callback)
     t0 = time.time()
     predictions = linker.inference.predict(threshold_match_probability=candidate)
-    pairs = predictions.as_pandas_dataframe()
-    _step(f"  {len(pairs):,} candidate pairs ({time.time() - t0:.1f}s)",
+    path = Path(run_dir) / PREDICTIONS_FILENAME.format(track=track)
+    n_pairs = write_predictions(linker, predictions, path)
+    _step(f"  {n_pairs:,} candidate pairs ({time.time() - t0:.1f}s)",
           progress_callback)
-    return linker, pairs
+    return linker, path, n_pairs
+
+
+#: Everything the pairs file keeps out of a prediction, besides the gammas.
+PREDICTION_COLUMNS = ("unit_id_l", "unit_id_r", "match_probability", "match_weight")
+
+
+def prediction_columns(names) -> list[str]:
+    """The prediction columns worth carrying, out of everything Splink emits.
+
+    Splink is asked to retain the matching columns and the intermediate
+    calculations, because the per-pair explanation needs the gammas. That also
+    makes it hand back both sides' **values** for every compared column, plus a
+    Bayes factor and a term-frequency adjustment each. On the PSC sample that is
+    a frame of about 3.2 KB per pair, and pulling 1.07 million of them into
+    pandas was the single biggest thing stage 3 did: 3.3 GB of a 7.4 GB peak.
+    ``finalise_pairs`` threw every one of those columns away again, because the
+    units file already holds the values.
+
+    So they are dropped in SQL, on the way out of DuckDB, and never become
+    Python objects at all.
+    """
+    keep = [c for c in PREDICTION_COLUMNS if c in names]
+    keep += sorted(c for c in names if c.startswith("gamma_"))
+    return keep
+
+
+def release_linker(linker) -> None:
+    """Close a linker's DuckDB connection and let the memory go.
+
+    Splink has no ``close``. The tables it made live in its own in-memory
+    database, and that database is only freed when the connection is closed and
+    the Python objects holding it are collected — which by default happens some
+    time after the next track has already asked for its own gigabyte.
+    """
+    import gc
+
+    try:
+        linker._db_api._con.close()
+    except Exception:  # noqa: BLE001 — a failure to tidy up must not fail a run
+        pass
+    gc.collect()
+
+
+def write_predictions(linker, predictions, path) -> int:
+    """Splink's prediction table straight to parquet, without touching pandas.
+
+    Splink predicts through DuckDB and already has the answer in a table, so the
+    honest thing to do with it is copy that table to a file. ``as_pandas_dataframe``
+    materialises every row in this process instead, which is what stops the
+    stage scaling past a few million pairs.
+    """
+    con = linker._db_api._con
+    table = predictions.physical_name
+    names = [row[0] for row in con.execute(f'SELECT * FROM "{table}" LIMIT 0').description]
+    columns = ", ".join(f'"{c}"' for c in prediction_columns(names))
+    con.execute(
+        f'COPY (SELECT {columns} FROM "{table}") TO \'{path}\' (FORMAT PARQUET)'
+    )
+    return int(con.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0])
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +840,68 @@ def apply_overlays(
     return pairs
 
 
+def union_prediction_columns(paths) -> list[str]:
+    """The union of the tracks' prediction columns, in first-appearance order.
+
+    This is exactly what ``pd.concat`` used to leave behind: every track's
+    gammas side by side, with a null wherever a track has no such comparison.
+    Working it out up front is what lets the overlays stream — a parquet written
+    batch by batch has to know its columns before the first batch, and the
+    person track's gammas are not the organisation track's.
+    """
+    import pyarrow.parquet as pq
+
+    out: list[str] = []
+    for path in paths:
+        for name in pq.ParquetFile(path).schema_arrow.names:
+            if name not in out:
+                out.append(name)
+    return out
+
+
+def overlay_predictions(
+    prediction_paths: dict,
+    units: pd.DataFrame,
+    review: float,
+    high: float,
+    out_path,
+    ruleset: dict | None = None,
+    model_lines: dict | None = None,
+    batch_rows: int | None = None,
+    progress_callback=None,
+) -> int:
+    """Bucket, veto and finalise every prediction, a batch at a time.
+
+    *prediction_paths* is ``{track: parquet path}`` in track order. Each file is
+    read in batches, laid out on the union of every track's columns so the
+    output has one schema, overlaid, and appended to *out_path*. Nothing here
+    holds more than one batch, so the memory this costs is ``PAIR_BATCH_ROWS``
+    and not the run's pair count.
+    """
+    union = union_prediction_columns(prediction_paths.values())
+    # A run where every track was skipped still writes a pairs file, and it has
+    # to have the columns the readers expect rather than no columns at all.
+    for column in (*PREDICTION_COLUMNS, "track"):
+        if column not in union:
+            union.append(column)
+    rows = batch_rows or pair_batch_rows()
+
+    writer = PairWriter(out_path)
+    for track, path in prediction_paths.items():
+        for batch in iter_pair_batches(path, rows):
+            batch = batch.reindex(columns=union)
+            batch["track"] = track
+            frame = apply_overlays(batch, units, review, high,
+                                   model_lines=model_lines, ruleset=ruleset)
+            writer.write(finalise_pairs(frame, units))
+    empty = finalise_pairs(
+        apply_overlays(pd.DataFrame(columns=union), units, review, high,
+                       model_lines=model_lines, ruleset=ruleset),
+        units,
+    )
+    return writer.close(empty=empty)
+
+
 def _priority_totals(pairs: pd.DataFrame, units: pd.DataFrame) -> pd.DataFrame:
     """The pair's summed priority columns — what the review table sorts on."""
     lookup = units.set_index(units["unit_id"].astype(str))
@@ -568,9 +935,13 @@ def finalise_pairs(pairs: pd.DataFrame, units: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def render_track_diagnostics(linker, pairs: pd.DataFrame, track: str, diag_dir: Path,
-                             review: float, high: float, progress_callback=None) -> None:
-    """Splink's match-weight and m/u charts plus a score histogram, per track."""
+#: Bins in the score-distribution chart. The same 50 ``score_eval`` uses.
+HISTOGRAM_BINS = 50
+
+
+def render_model_charts(linker, track: str, diag_dir: Path,
+                        progress_callback=None) -> None:
+    """Splink's match-weight and m/u charts. They read the model, not the pairs."""
     diag_dir.mkdir(parents=True, exist_ok=True)
     for name, builder in (
         ("match_weights", lambda l: l.visualisations.match_weights_chart()),
@@ -580,32 +951,72 @@ def render_track_diagnostics(linker, pairs: pd.DataFrame, track: str, diag_dir: 
             builder(linker).save(str(diag_dir / f"{name}_{track}.html"))
         except Exception as exc:
             _step(f"  WARNING: no {name} chart for {track}: {exc}", progress_callback)
+
+
+def histogram_counts(pairs_path, track: str, temp_dir=None) -> pd.DataFrame:
+    """``bucket, bin, pairs`` for one track, counted in DuckDB.
+
+    Fifty rows per bucket, whatever the run's size.
+    """
+    con = duckdb_conn.connect(temp_dir)
     try:
-        _score_histogram(pairs, track, review, high).save(
+        return con.execute(f"""
+            SELECT bucket,
+                   least({HISTOGRAM_BINS - 1},
+                         greatest(0, CAST(floor(match_probability * {HISTOGRAM_BINS})
+                                          AS INTEGER))) AS bin,
+                   count(*) AS pairs
+            FROM read_parquet('{pairs_path}')
+            WHERE track = ? AND match_probability IS NOT NULL
+            GROUP BY ALL
+            ORDER BY bucket, bin
+        """, [track]).df()
+    finally:
+        con.close()
+
+
+def render_score_histogram(pairs_path, track: str, diag_dir: Path, review: float,
+                           high: float, temp_dir=None, progress_callback=None) -> None:
+    """The score-distribution chart, drawn from counted bins rather than rows.
+
+    This used to hand Altair one row per pair. Altair embeds its data in the
+    page, so the PSC sample's person chart came out as a **68 MB HTML file** for
+    1.07 million pairs, and the full snapshot would have written gigabytes —
+    for a picture with fifty bars in it. The bins are counted in DuckDB and the
+    chart is drawn from fifty rows per bucket. It shows the same thing and the
+    file is a few kilobytes.
+    """
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        counts = histogram_counts(pairs_path, track, temp_dir)
+        _score_histogram(counts, track, review, high).save(
             str(diag_dir / f"score_distribution_{track}.html")
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — a chart must not lose a run
         _step(f"  WARNING: no score histogram for {track}: {exc}", progress_callback)
 
 
-def _score_histogram(pairs: pd.DataFrame, track: str, review: float, high: float):
+def _score_histogram(counts: pd.DataFrame, track: str, review: float, high: float):
     import altair as alt
 
-    frame = pairs[["match_probability", "bucket"]].copy()
-    frame["match_probability"] = pd.to_numeric(frame["match_probability"], errors="coerce")
-    frame = frame.dropna(subset=["match_probability"])
+    width = 1.0 / HISTOGRAM_BINS
+    frame = counts.copy()
+    frame["start"] = frame["bin"].astype("float64") * width
+    frame["end"] = frame["start"] + width
+    total = int(frame["pairs"].sum()) if len(frame) else 0
     scale = alt.Scale(domain=["reject", "review", "accept"],
                       range=["#bbbbbb", "#fd7e14", "#28a745"])
     bars = alt.Chart(frame).mark_bar(stroke="white", strokeWidth=0.5).encode(
-        x=alt.X("match_probability:Q", bin=alt.Bin(maxbins=50),
-                title="Splink match probability"),
-        y=alt.Y("count():Q", title="Pairs in this score range"),
+        x=alt.X("start:Q", title="Splink match probability",
+                scale=alt.Scale(domain=[0, 1])),
+        x2=alt.X2("end:Q"),
+        y=alt.Y("pairs:Q", title="Pairs in this score range"),
         color=alt.Color("bucket:N", scale=scale,
                         legend=alt.Legend(title="Bucket", orient="bottom")),
     ).properties(
         width=820, height=340,
         title={"text": f"{track}: scored pairs by match probability",
-               "subtitle": [f"{len(frame):,} pairs down to the candidate floor. "
+               "subtitle": [f"{total:,} pairs down to the candidate floor. "
                             f"Review from {review}, accept from {high}."],
                "anchor": "start"},
     )
@@ -636,69 +1047,174 @@ def events_by_unit(events: pd.DataFrame | None,
     return joined.merge(keys, on="record_id", how="inner")
 
 
+def label_outcomes_from_files(labels, members_path, groups: pd.DataFrame) -> dict:
+    """``label_outcomes``, reading the members only when there are labels.
+
+    A run with no labels — every PSC run, for now — never touches the members
+    file, which at sixteen million rows is worth not touching.
+    """
+    if labels is None or not len(labels):
+        return label_outcomes(labels, pd.DataFrame(columns=["record_id", "unit_id"]),
+                              groups)
+    return label_outcomes(labels, pd.read_parquet(members_path), groups)
+
+
+def forced_pairs(applied: pd.DataFrame, pairs_path, units_path) -> pd.DataFrame:
+    """Labelled pairs the scorer never produced, found without reading the file.
+
+    The labels are few and the pairs file is not, so the question is asked the
+    other way round: which of these handful of pairs does the file already hold?
+    One DuckDB anti-join over two columns answers it.
+    """
+    if applied is None or not len(applied):
+        return pd.DataFrame(columns=["unit_id_l", "unit_id_r", "match_probability",
+                                     "match_weight", "track"])
+    wanted = label_overlay.decisions(applied)[["unit_id_l", "unit_id_r"]].copy()
+    wanted["unit_id_l"] = wanted["unit_id_l"].astype(str)
+    wanted["unit_id_r"] = wanted["unit_id_r"].astype(str)
+    con = duckdb_conn.connect(Path(pairs_path).parent / "duckdb_tmp")
+    try:
+        con.register("wanted", wanted)
+        missing = con.execute(f"""
+            SELECT w.unit_id_l, w.unit_id_r FROM wanted w
+            ANTI JOIN read_parquet('{pairs_path}') p
+              ON CAST(p.unit_id_l AS VARCHAR) = w.unit_id_l
+             AND CAST(p.unit_id_r AS VARCHAR) = w.unit_id_r
+        """).df()
+    finally:
+        con.close()
+    if not len(missing):
+        return missing.assign(match_probability=np.nan, match_weight=np.nan,
+                              track=None)
+    tracks = read_unit_projection(units_path, ("unit_id", "track"))
+    lookup = pd.Series(tracks["track"].to_numpy(),
+                       index=tracks["unit_id"].astype(str).to_numpy())
+    lookup = lookup[~lookup.index.duplicated(keep="first")]
+    missing["match_probability"] = np.nan
+    missing["match_weight"] = np.nan
+    missing["track"] = missing["unit_id_l"].map(lookup)
+    return missing.reset_index(drop=True)
+
+
 def apply_active_models(
     run_dir,
-    pairs: pd.DataFrame,
-    units: pd.DataFrame,
-    members: pd.DataFrame,
-    events: pd.DataFrame | None,
+    pairs_path,
+    units_path,
+    members_path,
+    events_path,
     review: float,
     high: float,
     progress_callback=None,
     ruleset: dict | None = None,
-) -> tuple[pd.DataFrame, dict]:
+    overlay_units: pd.DataFrame | None = None,
+) -> dict:
     """Stage 3b: score the pairs with each track's active model and re-bucket.
 
-    Returns the pairs and the state that was written. With no active model
-    nothing changes and the run's model state is cleared, so a run that was
-    scored by a model and then re-run without one does not keep claiming it.
+    The pairs are read, scored and written a batch at a time, so a model run
+    costs ``MODEL_BATCH_PAIRS`` rows of features and not the run's pair count.
+    Returns the state that was written. With no active model nothing changes and
+    the run's model state is cleared, so a run that was scored by a model and
+    then re-run without one does not keep claiming it.
     """
     models = stage_3b_model.active_models()
-    if not models or not len(pairs):
+    if not models:
         stage_3b_model.clear_state(run_dir)
-        return pairs, stage_3b_model.read_state(run_dir)
+        return stage_3b_model.read_state(run_dir)
 
-    review_before = int((pairs["bucket"] == "review").sum())
-    _step(f"Scoring with the active model(s): "
+    _step("Scoring with the active model(s): "
           + ", ".join(f"{t} v{m.version}" for t, m in models.items()) + "...",
           progress_callback)
-    pairs, used = stage_3b_model.score_pairs(
-        pairs, units, models, events=events_by_unit(events, members),
-        profile=get_profile(),
+    # The feature builders read whatever unit columns they please, so this is
+    # the one place stage 3 still needs the units frame. It is read once.
+    units = pd.read_parquet(units_path)
+    if overlay_units is None:
+        overlay_units = units
+    events = pd.read_parquet(events_path) if Path(events_path).is_file() else None
+    members = pd.read_parquet(members_path) if Path(members_path).is_file() else None
+    unit_events = events_by_unit(events, members)
+    del events, members
+
+    # Fitted once, over every unit, and written into the run folder, so batched
+    # scoring, a later apply-model and a one-pair explanation all read the same
+    # vocabulary and IDF (`app/model/corpus.py`).
+    fitted = {track: corpus_lib.for_run(run_dir, units, track, get_profile())
+              for track in models}
+
+    scored_path = Path(pairs_path).with_suffix(".scored.parquet")
+    used, review_before, review_after, distinct = _score_pairs_file(
+        pairs_path, scored_path, units, overlay_units, models, unit_events,
+        review, high, ruleset, fitted,
     )
-    lines = stage_3b_model.deciding_lines(used)
     warning = None
+    lines = stage_3b_model.deciding_lines(used)
     if lines:
-        rebucketed = finalise_pairs(
-            apply_overlays(_strip_overlays(pairs), units, review, high,
-                           model_lines=lines, ruleset=ruleset), units
-        )
-        review_after = int((rebucketed["bucket"] == "review").sum())
-        warning = stage_3b_model.collapse_reason(
-            review_before, review_after, stage_3b_model.distinct_scores(rebucketed)
-        )
-        if warning is None:
-            pairs = rebucketed
+        warning = stage_3b_model.collapse_reason(review_before, review_after, distinct)
+    if used and (warning is None):
+        scored_path.replace(Path(pairs_path))
+        if lines:
             _step(f"  buckets now follow the model ({review_after:,} in review)",
                   progress_callback)
         else:
-            lines = {}
+            _step("  the model is not graded, so it re-orders the queue and "
+                  "decides nothing", progress_callback)
+    else:
+        scored_path.unlink(missing_ok=True)
+        if warning is not None:
             _step(f"  WARNING: the model was not applied — {warning}. "
                   "Buckets stay on the Splink score.", progress_callback)
             if progress_callback:
                 progress_callback("warning", {"stage": 3, "message": warning})
-    elif used:
-        _step("  the model is not graded, so it re-orders the queue and decides "
-              "nothing", progress_callback)
 
-    state = stage_3b_model.write_state(
+    return stage_3b_model.write_state(
         run_dir,
         {t: m for t, m in used.items()} if warning is None else
         {t: stage_3b_model.TrackModel(t, m.version, False, None, None)
          for t, m in used.items()},
         warning=warning, applied=bool(used),
     )
-    return pairs, state
+
+
+def _score_pairs_file(pairs_path, out_path, units, overlay_units, models,
+                      unit_events, review, high, ruleset, corpus=None):
+    """One batched pass: model scores on, buckets redone, written to *out_path*.
+
+    Both the scored-and-rebucketed file and the numbers the collapse guard needs
+    come out of the same pass, because reading a hundred million pairs twice to
+    answer "did the review band survive" is not a thing worth doing. The guard
+    can still refuse the result afterwards — the file is simply not swapped in.
+    """
+    lines_by_track: dict = {}
+    used: dict = {}
+    review_before = review_after = 0
+    values: set = set()
+
+    writer = PairWriter(out_path)
+    empty = None
+    for batch in iter_pair_batches(pairs_path, model_batch_pairs()):
+        if not len(batch):
+            continue
+        review_before += int((batch["bucket"] == "review").sum())
+        scored, batch_used = stage_3b_model.score_pairs(
+            batch, units, models, events=unit_events, profile=get_profile(),
+            corpus=corpus,
+        )
+        used.update(batch_used)
+        lines_by_track = stage_3b_model.deciding_lines(used)
+        rebucketed = finalise_pairs(
+            apply_overlays(_strip_overlays(scored), overlay_units, review, high,
+                           model_lines=lines_by_track, ruleset=ruleset),
+            overlay_units,
+        )
+        review_after += int((rebucketed["bucket"] == "review").sum())
+        numbers = pd.to_numeric(rebucketed.get(MODEL_SCORE_COLUMN),
+                                errors="coerce").dropna()
+        if len(numbers) and len(values) < stage_3b_model.MIN_DISTINCT_SCORES * 4:
+            values.update(numbers.round(6).unique().tolist())
+        writer.write(rebucketed)
+        if empty is None:
+            empty = rebucketed.iloc[0:0]
+    writer.close(empty=empty)
+    return used, review_before, review_after, len(values)
 
 
 def _strip_overlays(pairs: pd.DataFrame) -> pd.DataFrame:
@@ -712,7 +1228,154 @@ def _strip_overlays(pairs: pd.DataFrame) -> pd.DataFrame:
     return pairs[[c for c in pairs.columns if c not in dropped]]
 
 
-def counts_from(units: pd.DataFrame, pairs: pd.DataFrame, evaluation: dict,
+#: What ``pair_counts`` works out, and what each one counts, so a missing
+#: column reads as zero rather than failing an old run's file.
+_PAIR_COUNT_SQL = {
+    "pairs_scored": "count(*)",
+    "pairs_decided_by_import": "count(*) FILTER (WHERE decided_by = 'import')",
+    "pairs_import_disagrees":
+        "count(*) FILTER (WHERE coalesce(import_disagrees, false))",
+    "pairs_vetoed": "count(*) FILTER (WHERE vetoed_by IS NOT NULL)",
+    "pairs_vetoed_from_accept":
+        "count(*) FILTER (WHERE vetoed_by IS NOT NULL AND (CASE WHEN "
+        "decided_by = 'import' OR coalesce(veto_conflicts_import, false) "
+        "THEN 'accept' ELSE score_bucket END) = 'accept')",
+    "veto_conflicts_import":
+        "count(*) FILTER (WHERE coalesce(veto_conflicts_import, false))",
+}
+
+#: Which columns each count needs. A file without them counts zero.
+_PAIR_COUNT_NEEDS = {
+    "pairs_scored": (),
+    "pairs_decided_by_import": ("decided_by",),
+    "pairs_import_disagrees": ("import_disagrees",),
+    "pairs_vetoed": ("vetoed_by",),
+    "pairs_vetoed_from_accept": ("vetoed_by", "decided_by", "score_bucket",
+                                 "veto_conflicts_import"),
+    "veto_conflicts_import": ("veto_conflicts_import",),
+}
+
+
+def pair_counts(pairs_path, temp_dir=None) -> dict:
+    """The run counts that are sums over the pairs file, counted in DuckDB.
+
+    Every one of these used to be a boolean array the length of the pairs frame.
+    They are aggregates, so they belong in SQL, and there they cost one scan and
+    no memory at all.
+    """
+    import pyarrow.parquet as pq
+
+    available = set(pq.ParquetFile(str(pairs_path)).schema_arrow.names)
+    parts = []
+    for name, expression in _PAIR_COUNT_SQL.items():
+        usable = all(c in available for c in _PAIR_COUNT_NEEDS[name])
+        parts.append(f"{expression if usable else '0'} AS {name}")
+    con = duckdb_conn.connect(temp_dir)
+    try:
+        row = con.execute(
+            f"SELECT {', '.join(parts)} FROM read_parquet('{pairs_path}')"
+        ).fetchone()
+    finally:
+        con.close()
+    return {name: int(value) for name, value in zip(_PAIR_COUNT_SQL, row)}
+
+
+def unit_counts_of(units_path, temp_dir=None) -> dict:
+    """``units_total`` and one count per track, straight out of DuckDB."""
+    con = duckdb_conn.connect(temp_dir)
+    try:
+        rows = con.execute(
+            f"SELECT track, count(*) FROM read_parquet('{units_path}') GROUP BY track"
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — a file with no track column still counts
+        rows = []
+        total = con.execute(
+            f"SELECT count(*) FROM read_parquet('{units_path}')").fetchone()[0]
+        con.close()
+        return {"units_total": int(total)}
+    finally:
+        con.close()
+    counts = {"units_total": int(sum(n for _track, n in rows))}
+    for track, n in rows:
+        if track is not None:
+            counts[f"units_{track}"] = int(n)
+    return counts
+
+
+def rewrite_pairs(pairs_path, units: pd.DataFrame, review: float, high: float,
+                  ruleset: dict | None = None, model_lines: dict | None = None,
+                  batch_rows: int | None = None) -> int:
+    """Apply the buckets and the overlays again, in place, a batch at a time.
+
+    This is what a threshold move costs, and what reverting a model costs. It
+    used to read the whole pairs file, rewrite it in memory and write it back,
+    which is three copies of a file that will one day hold a hundred million
+    rows. Now it streams through one writer and swaps the result in.
+    """
+    pairs_path = Path(pairs_path)
+    temporary = pairs_path.with_suffix(".rewrite.parquet")
+    writer = PairWriter(temporary)
+    empty = None
+    for batch in iter_pair_batches(pairs_path, batch_rows or pair_batch_rows()):
+        if not len(batch):
+            continue
+        frame = finalise_pairs(
+            apply_overlays(_strip_overlays(batch), units, review, high,
+                           model_lines=model_lines, ruleset=ruleset),
+            units,
+        )
+        writer.write(frame)
+        if empty is None:
+            empty = frame.iloc[0:0]
+    rows = writer.close(empty=empty)
+    temporary.replace(pairs_path)
+    return rows
+
+
+def append_pairs(pairs_path, extra: pd.DataFrame, batch_rows: int | None = None) -> None:
+    """Add *extra* rows to the pairs file without reading it whole.
+
+    Parquet cannot be appended to in place, so the file is rewritten a batch at
+    a time through one writer and swapped in. The forced label rows are a
+    handful even on a big run, but the file they join may not be.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    pairs_path = Path(pairs_path)
+    if not len(extra):
+        return
+    temporary = pairs_path.with_suffix(".rewrite.parquet")
+    schema = pq.ParquetFile(str(pairs_path)).schema_arrow
+    # A pairs file written from an empty frame (nothing was scored, only forced
+    # label rows follow) has null-typed columns, and a string cannot be cast to
+    # null. Take those columns' types from the rows being added instead.
+    if any(pa.types.is_null(f.type) for f in schema):
+        inferred = pa.Table.from_pandas(extra.reindex(columns=schema.names),
+                                        preserve_index=False).schema
+        fields = []
+        for f in schema:
+            if pa.types.is_null(f.type):
+                found = inferred.field(f.name).type
+                fields.append(pa.field(f.name, pa.string() if pa.types.is_null(found) else found))
+            else:
+                fields.append(f)
+        schema = pa.schema(fields)
+    writer = pq.ParquetWriter(str(temporary), schema)
+    try:
+        handle = pq.ParquetFile(str(pairs_path))
+        for batch in handle.iter_batches(batch_size=batch_rows or pair_batch_rows()):
+            writer.write_table(pa.Table.from_batches([batch]).cast(schema))
+        writer.write_table(
+            pa.Table.from_pandas(extra.reindex(columns=schema.names),
+                                 schema=schema, preserve_index=False)
+        )
+    finally:
+        writer.close()
+    temporary.replace(pairs_path)
+
+
+def counts_from(units, pairs, evaluation: dict,
                 outcome: dict | None = None, run_dir=None,
                 untrained: list[dict] | None = None) -> dict:
     """The run counts stage 3 contributes, in the pipeline's snake_case.
@@ -720,29 +1383,40 @@ def counts_from(units: pd.DataFrame, pairs: pd.DataFrame, evaluation: dict,
     The bucket counts are the ones a reviewer sees, so they carry the human
     overlay: ``pairs.parquet`` holds the score and the import overlay, and the
     evaluation has already laid the decisions on top of it.
+
+    *units* is either the units frame or the unit counts already worked out from
+    it, and *pairs* is either the pairs frame or the pair counts. A run at PSC
+    scale has neither frame in memory by the time it gets here, and asking for
+    one would undo the whole point of the stage.
     """
+    unit_counts = units if isinstance(units, dict) else units_module.counts_from(units)
+    if isinstance(pairs, dict):
+        pair_totals = dict(pairs)
+    else:
+        pair_totals = {
+            "pairs_scored": int(len(pairs)),
+            "pairs_decided_by_import": int(
+                (pairs["decided_by"] == "import").sum()) if len(pairs) else 0,
+            "pairs_import_disagrees": int(
+                pairs["import_disagrees"].fillna(False).sum()) if len(pairs) else 0,
+            **vetoes.counts_from(pairs),
+        }
+
     with_human = evaluation.get("with_human") or {}
     mine = (outcome or {}).get("mine")
     verdicts = mine["is_match"].astype(str).str.upper() if mine is not None and len(mine) \
         else pd.Series(dtype="object")
-    buckets = with_human.get("by_bucket") or (
-        pairs["bucket"].value_counts().to_dict() if len(pairs) else {}
-    )
+    buckets = with_human.get("by_bucket") or {}
     contradictions = (outcome or {}).get("contradictions") or []
     applied = (outcome or {}).get("applied")
     satisfied = (outcome or {}).get("satisfied")
     counts = {
-        **units_module.counts_from(units),
+        **unit_counts,
         "untrained_comparisons": len(untrained or []),
-        "pairs_scored": int(len(pairs)),
         "pairs_accept": int(buckets.get("accept", 0)),
         "pairs_review": int(buckets.get("review", 0)),
         "pairs_reject": int(buckets.get("reject", 0)),
-        "pairs_decided_by_import": int(
-            (pairs["decided_by"] == "import").sum()) if len(pairs) else 0,
-        "pairs_import_disagrees": int(
-            pairs["import_disagrees"].fillna(False).sum()) if len(pairs) else 0,
-        **vetoes.counts_from(pairs),
+        **pair_totals,
         "entities_after_score": evaluation["entities_after"],
         "score_pair_precision": evaluation["pair_precision"],
         "score_pair_recall": evaluation["pair_recall"],
@@ -994,28 +1668,41 @@ def run_stage_3_score(
     review = float(threshold_review) if threshold_review is not None else settings_review
     high = float(threshold_high) if threshold_high is not None else settings_high
 
-    records = pd.read_parquet(run_dir / RECORDS_FILENAME)
+    temp_dir = run_dir / "duckdb_tmp"
+    units_path = run_dir / units_module.UNITS_FILENAME
+    members_path = run_dir / units_module.UNIT_MEMBERS_FILENAME
+    pairs_path = run_dir / PAIRS_FILENAME
     groups = pd.read_parquet(run_dir / EXACT_GROUPS_FILENAME)
     events_path = run_dir / EVENTS_FILENAME
-    events = pd.read_parquet(events_path) if events_path.is_file() else None
 
+    records = pd.read_parquet(run_dir / RECORDS_FILENAME)
+    events = pd.read_parquet(events_path) if events_path.is_file() else None
     with _phase(f"Building units from {len(records):,} records", progress_callback):
         units, members = units_module.build_units(
-            records, groups, events, temp_dir=run_dir / "duckdb_tmp")
-        units.to_parquet(run_dir / units_module.UNITS_FILENAME, index=False)
-        members.to_parquet(run_dir / units_module.UNIT_MEMBERS_FILENAME, index=False)
+            records, groups, events, temp_dir=temp_dir)
+        units.to_parquet(units_path, index=False)
+        members.to_parquet(members_path, index=False)
         write_scored_units(run_dir, units)
-    _step(f"  {len(units):,} units", progress_callback)
+        unit_counts = units_module.counts_from(units)
+    _step(f"  {unit_counts['units_total']:,} units", progress_callback)
 
-    freed = clear_duckdb_tmp(run_dir / "duckdb_tmp")
+    # Everything after this reads projections off the two files just written.
+    # The whole records frame is sixty-odd columns and the whole units frame is
+    # the same again; holding either of them through the rest of the stage is
+    # what stopped this scaling. Stage 3 needs four unit columns for the
+    # overlays and three record columns for the evaluation.
+    del records, units, members, events
+    overlay_units = read_unit_projection(units_path, overlay_columns(ruleset))
+
+    freed = clear_duckdb_tmp(temp_dir)
     if freed:
         _step(f"  Cleared {freed / 2**30:.1f} GB of spill left by an earlier run",
               progress_callback)
 
     with _phase(f"Checking the blocking budget (DuckDB capped at {memory_limit()})",
                 progress_callback):
-        budget_api = _db_api(run_dir / "duckdb_tmp")
-        report, failure = blocking_budget_report(units, settings, budget_api,
+        budget_api = _db_api(temp_dir)
+        report, failure = blocking_budget_report(units_path, settings, budget_api,
                                                  progress_callback)
     (run_dir / BLOCKING_REPORT_FILENAME).write_text(
         json.dumps(report, indent=2), encoding="utf-8"
@@ -1023,11 +1710,12 @@ def run_stage_3_score(
     if failure is not None:
         raise failure
 
-    scored: list[pd.DataFrame] = []
+    predictions: dict[str, Path] = {}
     untrained: list[dict] = []
     for track in linkage.TRACK_KEYS:
         config = linkage.track_settings(settings, track)
-        rows = units_module.track_units(units, track)
+        rows = read_unit_projection(units_path, splink_columns(config, ruleset, track))
+        rows = units_module.track_units(rows, track)
         if len(rows) < 2:
             _step(f"Skipping {track}: {len(rows)} unit(s), nothing to compare.",
                   progress_callback)
@@ -1038,55 +1726,56 @@ def run_stage_3_score(
             continue
 
         with _phase(f"Scoring {track} ({len(rows):,} units)", progress_callback):
-            linker, pairs = train_track(rows, config, settings, ruleset, track,
-                                        run_dir, progress_callback)
+            linker, path, n_pairs = train_track(rows, config, settings, ruleset,
+                                                track, run_dir, progress_callback)
+        predictions[track] = path
         model_path = run_dir / MODEL_FILENAME.format(track=track)
         linker.misc.save_model_to_json(str(model_path), overwrite=True)
         untrained.extend(inspect_trained_model(model_path, track, progress_callback))
-        pairs["track"] = track
-        with _phase(f"Applying the {track} overlays to {len(pairs):,} pairs",
-                    progress_callback):
-            pairs = apply_overlays(pairs, units, review, high, ruleset=ruleset)
-        vetoed = int(pairs["vetoed_by"].notna().sum()) if len(pairs) else 0
-        if vetoed:
-            _step(f"  {vetoed:,} {track} pair(s) vetoed", progress_callback)
-        scored.append(pairs)
-
         if render_diagnostics:
-            # Splink's score histogram is drawn from every pair, so this grows
-            # with the pair count rather than the unit count and is a plausible
-            # suspect whenever a big run stalls after the model is trained.
-            with _phase(f"Rendering {track} diagnostics", progress_callback):
-                render_track_diagnostics(linker, pairs, track,
-                                         run_dir / "diagnostics",
-                                         review, high, progress_callback)
+            with _phase(f"Rendering the {track} model charts", progress_callback):
+                render_model_charts(linker, track, run_dir / "diagnostics",
+                                    progress_callback)
+        # Splink keeps the units it was handed, and every intermediate table it
+        # made, inside its own DuckDB connection. On the person track that is
+        # about a gigabyte, and the organisation track is about to ask for its
+        # own. Let it go before the next track starts, not after both.
+        release_linker(linker)
+        del linker, rows
 
-    pairs = (
-        pd.concat(scored, ignore_index=True) if scored
-        else pd.DataFrame(columns=PAIR_HEAD)
-    )
-    pairs = finalise_pairs(pairs, units)
+    with _phase("Applying the overlays and writing the pairs", progress_callback):
+        n_written = overlay_predictions(
+            predictions, overlay_units, review, high, pairs_path,
+            ruleset=ruleset, progress_callback=progress_callback,
+        )
+    _step(f"  {n_written:,} pairs written", progress_callback)
+    for path in predictions.values():
+        path.unlink(missing_ok=True)
 
-    outcome = label_outcomes(labels, members, groups)
-    forced = label_overlay.forced_rows(outcome["applied"], pairs, units)
+    if render_diagnostics:
+        with _phase("Rendering the score distributions", progress_callback):
+            for track in predictions:
+                render_score_histogram(pairs_path, track, run_dir / "diagnostics",
+                                       review, high, temp_dir, progress_callback)
+
+    outcome = label_outcomes_from_files(labels, members_path, groups)
+    forced = forced_pairs(outcome["applied"], pairs_path, units_path)
     outcome["forced"] = int(len(forced))
     if len(forced):
         # A human decided these; blocking or the candidate floor never offered
         # them. They join the file with no score rather than being lost.
-        forced = finalise_pairs(
-            apply_overlays(forced, units, review, high, ruleset=ruleset), units)
-        pairs = pd.concat([pairs, forced], ignore_index=True)
+        append_pairs(pairs_path, finalise_pairs(
+            apply_overlays(forced, overlay_units, review, high, ruleset=ruleset),
+            overlay_units))
         _step(f"  {len(forced):,} labelled pair(s) added that scoring never produced",
               progress_callback)
 
     # Stage 3b: the track's own model, when one is active (docs/MODEL.md).
     with _phase("Applying the active track models", progress_callback):
-        pairs, model_state = apply_active_models(
-            run_dir, pairs, units, members, events, review, high, progress_callback,
-            ruleset=ruleset,
+        model_state = apply_active_models(
+            run_dir, pairs_path, units_path, members_path, events_path, review, high,
+            progress_callback, ruleset=ruleset, overlay_units=overlay_units,
         )
-    with _phase(f"Writing {len(pairs):,} pairs", progress_callback):
-        pairs.to_parquet(run_dir / PAIRS_FILENAME, index=False)
 
     write_contradictions(run_dir, outcome["contradictions"])
     if outcome["contradictions"]:
@@ -1096,7 +1785,12 @@ def run_stage_3_score(
     with _phase("Evaluating the accepted pairs against the existing labels",
                 progress_callback):
         evaluation = score_eval.evaluate(
-            records, groups, units, members, pairs,
+            read_projection(run_dir / RECORDS_FILENAME, score_eval.RECORD_COLUMNS),
+            groups,
+            read_unit_projection(units_path, ("unit_id", "track",
+                                              "existing_entity_id")),
+            pd.read_parquet(members_path),
+            pairs_path,
             thresholds={"candidate": candidate, "review": review, "high": high},
             applied=outcome["applied"],
             model_lines=stage_3b_model.deciding_lines(
@@ -1104,8 +1798,8 @@ def run_stage_3_score(
         )
         _write_evaluation(run_dir, evaluation)
 
-    counts = counts_from(units, pairs, evaluation, outcome, run_dir=run_dir,
-                         untrained=untrained)
+    counts = counts_from(unit_counts, pair_counts(pairs_path, temp_dir), evaluation,
+                         outcome, run_dir=run_dir, untrained=untrained)
     if untrained:
         # Beside the pairs, so a reader of the report sees it without opening
         # the model, and the UI has something to show on the run.
@@ -1163,21 +1857,20 @@ def rebucket(
     snapshotted ruleset.
     """
     run_dir = Path(run_dir)
-    units = pd.read_parquet(run_dir / units_module.UNITS_FILENAME)
-    members = pd.read_parquet(run_dir / units_module.UNIT_MEMBERS_FILENAME)
-    records = pd.read_parquet(run_dir / RECORDS_FILENAME)
+    units_path = run_dir / units_module.UNITS_FILENAME
+    members_path = run_dir / units_module.UNIT_MEMBERS_FILENAME
+    pairs_path = run_dir / PAIRS_FILENAME
+    temp_dir = run_dir / "duckdb_tmp"
     groups = pd.read_parquet(run_dir / EXACT_GROUPS_FILENAME)
-    pairs = pd.read_parquet(run_dir / PAIRS_FILENAME)
     ruleset = run_ruleset(run_dir)
+    overlay_units = read_unit_projection(units_path, overlay_columns(ruleset))
 
     # A threshold move must not un-apply the model: the lines being moved are
     # Splink's, and a graded model keeps deciding whichever tracks it decided.
     lines = stage_3b_model.deciding_lines(stage_3b_model.models_from_state(run_dir))
-    pairs = apply_overlays(_strip_overlays(pairs), units, float(threshold_review),
-                           float(threshold_high), model_lines=lines, ruleset=ruleset)
-    pairs = finalise_pairs(pairs, units)
-    pairs.to_parquet(run_dir / PAIRS_FILENAME, index=False)
-    outcome = label_outcomes(labels, members, groups)
+    rewrite_pairs(pairs_path, overlay_units, float(threshold_review),
+                  float(threshold_high), ruleset=ruleset, model_lines=lines)
+    outcome = label_outcomes_from_files(labels, members_path, groups)
     write_contradictions(run_dir, outcome["contradictions"])
 
     settings_path = run_dir / "config" / "linkage_settings.json"
@@ -1188,13 +1881,19 @@ def rebucket(
         )[0]
 
     evaluation = score_eval.evaluate(
-        records, groups, units, members, pairs,
+        read_projection(run_dir / RECORDS_FILENAME, score_eval.RECORD_COLUMNS),
+        groups,
+        read_unit_projection(units_path, ("unit_id", "track", "existing_entity_id")),
+        pd.read_parquet(members_path),
+        pairs_path,
         thresholds={"candidate": candidate, "review": float(threshold_review),
                     "high": float(threshold_high)},
         applied=outcome["applied"], model_lines=lines,
     )
     _write_evaluation(run_dir, evaluation)
-    return counts_from(units, pairs, evaluation, outcome, run_dir=run_dir)
+    return counts_from(unit_counts_of(units_path, temp_dir),
+                       pair_counts(pairs_path, temp_dir), evaluation, outcome,
+                       run_dir=run_dir)
 
 
 def refresh_after_labels(run_dir: str, labels: pd.DataFrame | None) -> dict:
@@ -1205,11 +1904,11 @@ def refresh_after_labels(run_dir: str, labels: pd.DataFrame | None) -> dict:
     itself is applied where the pairs are read.
     """
     run_dir = Path(run_dir)
-    units = pd.read_parquet(run_dir / units_module.UNITS_FILENAME)
-    members = pd.read_parquet(run_dir / units_module.UNIT_MEMBERS_FILENAME)
-    records = pd.read_parquet(run_dir / RECORDS_FILENAME)
+    units_path = run_dir / units_module.UNITS_FILENAME
+    members_path = run_dir / units_module.UNIT_MEMBERS_FILENAME
+    pairs_path = run_dir / PAIRS_FILENAME
+    temp_dir = run_dir / "duckdb_tmp"
     groups = pd.read_parquet(run_dir / EXACT_GROUPS_FILENAME)
-    pairs = pd.read_parquet(run_dir / PAIRS_FILENAME)
 
     settings_path = run_dir / "config" / "linkage_settings.json"
     candidate, review, high = linkage.DEFAULT_CANDIDATE, None, None
@@ -1218,17 +1917,23 @@ def refresh_after_labels(run_dir: str, labels: pd.DataFrame | None) -> dict:
             json.loads(settings_path.read_text(encoding="utf-8"))
         )
 
-    outcome = label_outcomes(labels, members, groups)
+    outcome = label_outcomes_from_files(labels, members_path, groups)
     write_contradictions(run_dir, outcome["contradictions"])
     evaluation = score_eval.evaluate(
-        records, groups, units, members, pairs,
+        read_projection(run_dir / RECORDS_FILENAME, score_eval.RECORD_COLUMNS),
+        groups,
+        read_unit_projection(units_path, ("unit_id", "track", "existing_entity_id")),
+        pd.read_parquet(members_path),
+        pairs_path,
         thresholds={"candidate": candidate, "review": review, "high": high},
         applied=outcome["applied"],
         model_lines=stage_3b_model.deciding_lines(
             stage_3b_model.models_from_state(run_dir)),
     )
     _write_evaluation(run_dir, evaluation)
-    return counts_from(units, pairs, evaluation, outcome, run_dir=run_dir)
+    return counts_from(unit_counts_of(units_path, temp_dir),
+                       pair_counts(pairs_path, temp_dir), evaluation, outcome,
+                       run_dir=run_dir)
 
 
 def _write_evaluation(run_dir: Path, evaluation: dict) -> None:

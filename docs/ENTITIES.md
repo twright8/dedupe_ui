@@ -35,6 +35,12 @@ The file is one row per **unit**, so it holds the real clusters only. A held exa
 - `weak_link` ignores a pair a human has already decided. A reviewer who merges two units that scored 0.01 should not see the cluster come straight back.
 - A human TRUE label is an edge whether or not the scorer ever made that pair, so a whole-cluster merge takes effect at the next recluster instead of waiting for a full rerun.
 
+**Nothing in stage 4 reads a whole file.** The units, the unit members and the pairs are named to DuckDB and every edge, every group-by and `clusters.parquet` itself are SQL. `run_stage_4_cluster` binds the run's parquet files; `build_clusters` binds three frames. They run the same SQL, so the frame form is the readable description of the contract and not a second implementation.
+
+The connected components are the one step DuckDB does not do, because SciPy owns that walk. It is given **integer unit codes**, never strings: `DENSE_RANK`-style coding in SQL turns each `unit_id` into a position in `0 .. n-1`, and `components(n_units, rows, cols)` refuses an array that is not an integer one. Two int32 arrays per edge is 8 bytes; two Python strings is about 150.
+
+Only four columns of `units.parquet` are read — `unit_id`, `unit_size`, `track`, `existing_entity_id`. The PSC units file carries sixty-odd.
+
 ## Entity IDs and the registry
 
 The registry is durable across runs. Tables:
@@ -53,6 +59,10 @@ How a proposed entity gets its ID, in order:
 3. If they belong to none, the profile mints the ID.
 
 Profile hook `mint_entity_id(members) -> str`. Donations (D15): if members carry one `existing_entity_id`, use it. If they carry several, use the lowest. If none, use the smallest `record_id`, which already has the `TR` prefix for trusts. IDs compare as numbers after any `TR` prefix is removed, and a `TR` ID sorts after a plain one. The default hook for other profiles mints `E` plus a zero-padded counter.
+
+**The mint hook is handed a projection.** Stage 5 no longer reads `records.parquet` whole. It reads `record_id`, `track`, `existing_entity_id`, the consensus columns with their `_rule` twins, and `stage_5_entities.MINT_COLUMNS`, which is what the two shipped mint hooks look at. A profile whose hook reads any other record column **must declare `mint_columns`** on itself, or that column will not be in the frame it is given and it will mint different IDs. On PSC this is six columns of sixty-four.
+
+The frame the hook receives is still `proposed.merge(records, on="record_id")`, suffixes and all: a column both sides carry becomes `<name>_x` (the proposal) and `<name>_y` (the record). `track` is the one that collides today, which is why the PSC hook finds no `track` column and mints every ID with the person prefix. That is a defect, recorded here so it is not mistaken for a change; fixing it changes every PSC organisation ID.
 
 `entity_basis` says how the record reached its entity: `single` (no merge), `exact_key`, `import`, `score`, `human`, in rising order of precedence. The strongest edge on the record's path applies.
 
@@ -100,9 +110,20 @@ A reviewer decides a whole cluster or a whole held group at once. The decision i
 | `GET /api/registry/entities/{entity_id}` | follows aliases to the active entity. `GET /api/registry/aliases.csv` lists every retired ID and its survivor |
 | `GET /api/runs/{id}/export?format=xlsx\|csv&scope=proposal\|published` | the profile's export |
 
+## Reading these files at scale
+
+Every read here is a query, not a load. The rules the code follows:
+
+- A connection comes from `app/duckdb_conn.connect(temp_dir)`, never a bare `duckdb.connect()`, so it carries the memory cap, the run's own temp directory and `max_temp_directory_size`. Stages 4 and 5 clear their spill on the way in and on the way out.
+- The clusters list and the entities list filter, count, sort and page **in SQL**. Building one Python dict per cluster and then showing fifty is what they used to do; a PSC run has 458,000 clusters on the 500,000-record sample and about 15 million on the full snapshot.
+- `entities.parquet` carries `id_status`, so the entities list reads it from the file. The caller's `statuses` map is a fallback for a run written before that column existed.
+- `GET /api/runs/{id}/entities/{entity_id}` looks the one entity up directly. It used to page the whole list first and then search it.
+
 ## Export
 
 Profile hook `export(run, scope) -> file`. Donations: the original input sheet, row for row and column for column, plus appended columns: `EntityID`, `EntityBasis`, `DonorStatusStandardNew`, `DonorStatusBasis`, `RecordID`. `EntityID` follows D15, so it lines up with the existing `DonorIDStandardTR`. A second sheet lists aliases. A third lists the run, the config version, and the counts.
+
+PSC: the decision table is a DuckDB join of `records.parquet` to the proposal, projected to six columns and sorted in SQL. The parquet form is written by `COPY ... TO`. The CSV and the Elasticsearch bulk file are written from **batches** of that join, because a byte-order mark and a JSON line are the two things SQL cannot write. The batch size is `EXPORT_BATCH_ROWS`, default 200,000; it is a memory ceiling and never part of the answer, and a test holds the files identical across three batch sizes. `context["entities"]` may be the proposal frame or left out, in which case the run's own `entities.parquet` is read.
 
 ## Run counts
 

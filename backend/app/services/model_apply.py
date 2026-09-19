@@ -24,6 +24,7 @@ from app.pipeline.dedupe import label_overlay, score_eval, stage_3b_model
 from app.pipeline.dedupe import units as units_module
 from app.pipeline.dedupe.stage_1_clean import RECORDS_FILENAME
 from app.pipeline.dedupe.stage_2_exact import EXACT_GROUPS_FILENAME
+from app.model import corpus as corpus_lib
 from app.pipeline.dedupe.stage_0_load import EVENTS_FILENAME
 from app.pipeline.dedupe.stage_3_score import (
     PAIRS_FILENAME, _strip_overlays, _write_evaluation, apply_overlays,
@@ -154,10 +155,15 @@ def apply_model(run_dir, labels: pd.DataFrame | None = None,
     candidate, review, high = _thresholds(run_dir)
     review_before = int((data["pairs"]["bucket"] == "review").sum())
 
+    # The corpus statistics the run fitted, read back from its folder — the
+    # same vocabulary and IDF the scoring run used, so applying a model to a
+    # finished run cannot quietly move a feature value (`app/model/corpus.py`).
+    fitted = {track: corpus_lib.for_run(run_dir, data["units"], track, get_profile())
+              for track in models}
     pairs, used = stage_3b_model.score_pairs(
         data["pairs"], data["units"], models,
         events=events_by_unit(data["events"], data["members"]),
-        profile=get_profile(),
+        profile=get_profile(), corpus=fitted,
     )
     if not used:
         raise ModelApplyError(

@@ -9,8 +9,21 @@ would merge groups the earlier manual work kept apart, is not proposed as one
 entity. It is **withheld** — rebuilt from the trusted edges alone, which are the
 import and human ones — and sent to a review queue.
 
-Nothing here walks a pair of records. The components come from SciPy, and the
-gate's tests are groupbys over ``pairs.parquet``.
+**Out of core (B5).** Nothing here reads a whole parquet file. The units, the
+unit members and the pairs are named to DuckDB and every edge, every group-by
+and the output file itself are SQL. The full PSC snapshot is about 15 million
+units and 100 million pairs, and neither fits in the server's RAM as a pandas
+frame.
+
+The one step that cannot be SQL is the connected components, because SciPy owns
+that walk. It is given **integer unit codes**, never strings: the unit ids are
+dense-coded in DuckDB (``row_number() OVER (ORDER BY unit_id)``) and SciPy gets
+two int32 arrays. A Python dict of 15 million strings, which is what the old
+``pd.Series(..., index=unit_ids).map()`` built, is the thing that had to go.
+
+``build_clusters`` takes frames and ``run_stage_4_cluster`` takes files, but
+both run the same SQL against the same view names, so there is one
+implementation and the two cannot drift apart.
 
 Output ``clusters.parquet``: one row per unit.
 """
@@ -22,6 +35,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from app import duckdb_conn
 from app.pipeline.dedupe import label_overlay
 from app.pipeline.dedupe import units as units_module
 from app.pipeline.dedupe.stage_1_clean import RECORDS_FILENAME
@@ -42,6 +56,14 @@ HELD_KEY = "held_key"
 ATTRIBUTE_TIE = "attribute_tie"
 
 TRUSTED_SOURCES = ("human", "import")
+
+BASIS_ORDER = {"single": 0, "exact_key": 1, "import": 2, "score": 3, "human": 4}
+
+# The view names the SQL uses. Both entry points bind the same three names —
+# to registered frames, or to read_parquet over the run's files.
+UNITS_VIEW = "s4_units"
+MEMBERS_VIEW = "s4_members"
+PAIRS_VIEW = "s4_pairs"
 
 
 def _step(label, progress_callback=None):
@@ -65,144 +87,261 @@ def gate_settings(settings: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Naming the inputs to DuckDB
+# ---------------------------------------------------------------------------
+
+
+def _literal(path) -> str:
+    """A path as a SQL string literal. Views cannot carry bound parameters."""
+    return "'" + str(path).replace("'", "''") + "'"
+
+
+def _bind(con, name: str, source) -> None:
+    """Name *source* on the connection — a frame is registered, a path is a view."""
+    if isinstance(source, pd.DataFrame):
+        con.register(f"{name}_frame", source)
+        con.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {name}_frame")
+        return
+    con.execute(
+        f"CREATE OR REPLACE VIEW {name} AS "
+        f"SELECT * FROM read_parquet({_literal(source)})"
+    )
+
+
+def _columns(con, name: str) -> set:
+    return {d[0] for d in con.execute(f"SELECT * FROM {name} LIMIT 0").description}
+
+
+# ---------------------------------------------------------------------------
+# Components — the one step SciPy owns, and it gets integers
+# ---------------------------------------------------------------------------
+
+
+def components(n_units: int, rows, cols) -> np.ndarray:
+    """A component label per unit **code**. SciPy does the walking, not Python.
+
+    *rows* and *cols* are integer codes into ``0 .. n_units - 1``, which is what
+    the dense-coding in DuckDB produces. Strings are refused outright: at PSC
+    scale a string graph means a Python dict of 15 million keys, which is the
+    memory this stage exists to stop spending.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    if n_units == 0:
+        return np.empty(0, dtype="int32")
+    rows = np.asarray(rows)
+    cols = np.asarray(cols)
+    for name, array in (("rows", rows), ("cols", cols)):
+        if array.dtype.kind not in "iu":
+            raise TypeError(
+                f"components() needs integer unit codes; {name} is {array.dtype}. "
+                "Dense-code the unit ids in DuckDB first."
+            )
+    graph = coo_matrix(
+        (np.ones(rows.size, dtype="int8"), (rows, cols)),
+        shape=(n_units, n_units),
+    )
+    _count, labels = connected_components(graph, directed=False)
+    return labels
+
+
+def _component_codes(con, sql: str, n_units: int) -> pd.DataFrame:
+    """``(code, component)`` for every unit, from an edge query in integer codes."""
+    arrays = con.execute(sql).fetchnumpy()
+    rows = np.asarray(arrays.get("l", np.empty(0, dtype="int32")))
+    cols = np.asarray(arrays.get("r", np.empty(0, dtype="int32")))
+    labels = components(n_units, rows, cols)
+    return pd.DataFrame({
+        "code": np.arange(n_units, dtype="int32"),
+        "component": np.asarray(labels, dtype="int32"),
+    })
+
+
+# ---------------------------------------------------------------------------
 # Edges
 # ---------------------------------------------------------------------------
+
+
+def _verdict_table(con, applied: pd.DataFrame | None) -> None:
+    """``s4_verdicts``: one row per unit pair a human has decided.
+
+    Always a real table with declared types, because an empty frame gives DuckDB
+    nothing to infer from.
+    """
+    con.execute(
+        "CREATE OR REPLACE TABLE s4_verdicts"
+        "(unit_id_l VARCHAR, unit_id_r VARCHAR, is_match VARCHAR)"
+    )
+    con.execute(
+        "CREATE OR REPLACE TABLE s4_applied"
+        "(unit_id_l VARCHAR, unit_id_r VARCHAR, is_match VARCHAR)"
+    )
+    if applied is None or not len(applied):
+        return
+    con.register("s4_applied_in", applied[["unit_id_l", "unit_id_r", "is_match"]])
+    con.execute(
+        "INSERT INTO s4_applied SELECT CAST(unit_id_l AS VARCHAR), "
+        "CAST(unit_id_r AS VARCHAR), upper(CAST(is_match AS VARCHAR)) FROM s4_applied_in"
+    )
+    # The overlay is one verdict per pair, the last label written winning.
+    verdicts = label_overlay.decisions(applied)
+    if not len(verdicts):
+        return
+    con.register("s4_verdicts_in", verdicts[["unit_id_l", "unit_id_r", "is_match"]])
+    con.execute(
+        "INSERT INTO s4_verdicts SELECT CAST(unit_id_l AS VARCHAR), "
+        "CAST(unit_id_r AS VARCHAR), upper(CAST(is_match AS VARCHAR)) FROM s4_verdicts_in"
+    )
+
+
+def _import_edges_sql(unit_columns: set) -> str:
+    """The star that joins the units an earlier review already gave one id (D11).
+
+    A real group in ``existing_entity_id`` is a trusted merge — a human
+    decision, only an older one — so it joins its units whether or not blocking
+    happened to produce the pair. A unit whose members carry two or more
+    distinct ids says nothing here; its cluster is flagged ``mixed_ids``.
+
+    A star from the smallest unit id, never a clique: some of these groups hold
+    over a thousand units, and n-1 edges connect them just as well as n(n-1)/2.
+    Within a track, because the tool never merges a person into an organisation.
+    """
+    label = units_module.LABEL_COLUMN
+    if label not in unit_columns:
+        return "SELECT NULL AS l, NULL AS r, 'import' AS source, 2 AS ord WHERE FALSE"
+    track = "CAST(track AS VARCHAR)" if "track" in unit_columns else "''"
+    return f"""
+        SELECT l, r, 'import' AS source, 2 AS ord FROM (
+            SELECT min(unit_id) OVER (PARTITION BY trk, lbl) AS l, unit_id AS r
+            FROM (
+                SELECT CAST(unit_id AS VARCHAR) AS unit_id,
+                       {track} AS trk,
+                       CAST("{label}" AS VARCHAR) AS lbl
+                FROM {UNITS_VIEW}
+            )
+            WHERE lbl IS NOT NULL AND trim(lbl) <> ''
+        ) WHERE l <> r
+    """
+
+
+def _scored_edges_sql(pair_columns: set) -> str:
+    """The pairs the score, the import overlay and the human labels accepted.
+
+    The human overlay is applied here rather than read off the file, because
+    ``pairs.parquet`` holds the score and the import overlay only (slice 3b).
+    """
+    if not {"bucket", "decided_by"} <= pair_columns:
+        return ("SELECT CAST(NULL AS VARCHAR) AS l, CAST(NULL AS VARCHAR) AS r, "
+                "CAST(NULL AS VARCHAR) AS source, 0 AS ord WHERE FALSE")
+    return f"""
+        SELECT l, r, source, 0 AS ord FROM (
+            SELECT CAST(p.unit_id_l AS VARCHAR) AS l,
+                   CAST(p.unit_id_r AS VARCHAR) AS r,
+                   CASE WHEN v.is_match = 'TRUE' THEN 'accept'
+                        WHEN v.is_match = 'FALSE' THEN 'reject'
+                        ELSE CAST(p.bucket AS VARCHAR) END AS bucket,
+                   CASE WHEN v.is_match IS NOT NULL THEN 'human'
+                        ELSE CAST(p.decided_by AS VARCHAR) END AS source
+            FROM {PAIRS_VIEW} p
+            LEFT JOIN s4_verdicts v
+                   ON v.unit_id_l = CAST(p.unit_id_l AS VARCHAR)
+                  AND v.unit_id_r = CAST(p.unit_id_r AS VARCHAR)
+        ) WHERE bucket = 'accept'
+    """
+
+
+# A whole-cluster decision writes a star, and the scorer may never have made
+# some of those pairs. The decision is still an accept, so the edge exists
+# whatever pairs.parquet holds — otherwise a merge would not take effect until
+# the next full run.
+_EXTRA_HUMAN_SQL = """
+    SELECT v.unit_id_l AS l, v.unit_id_r AS r, 'human' AS source, 1 AS ord
+    FROM s4_verdicts v
+    WHERE v.is_match = 'TRUE'
+      AND NOT EXISTS (SELECT 1 FROM scored s
+                      WHERE s.l = v.unit_id_l AND s.r = v.unit_id_r)
+"""
 
 
 def accepted_edges(pairs: pd.DataFrame, applied: pd.DataFrame | None) -> pd.DataFrame:
     """``unit_id_l``, ``unit_id_r``, ``source`` for every pair that joins two units.
 
-    The human overlay is applied here rather than read off the file, because
-    ``pairs.parquet`` holds the score and the import overlay only (slice 3b).
+    The same SQL the stage runs, over a frame instead of a file. The import
+    stars and the human FALSE deletions are not here; they join in
+    ``_edge_table``, which is what ``build_clusters`` uses.
     """
-    if not len(pairs):
-        return pd.DataFrame(columns=["unit_id_l", "unit_id_r", "source"])
-    overlaid = label_overlay.apply_to_pairs(pairs, applied) if applied is not None \
-        else pairs
-    accepted = overlaid[overlaid["bucket"] == "accept"]
-    edges = pd.DataFrame({
-        "unit_id_l": accepted["unit_id_l"].astype(str).to_numpy(),
-        "unit_id_r": accepted["unit_id_r"].astype(str).to_numpy(),
-        "source": accepted["decided_by"].astype(str).to_numpy(),
-    })
-    if applied is None or not len(applied):
-        return edges
+    con = duckdb_conn.connect()
+    try:
+        _bind(con, PAIRS_VIEW, pairs)
+        _verdict_table(con, applied)
+        return con.execute(f"""
+            WITH scored AS ({_scored_edges_sql(_columns(con, PAIRS_VIEW))}),
+                 extra AS ({_EXTRA_HUMAN_SQL})
+            SELECT l AS unit_id_l, r AS unit_id_r, source FROM (
+                SELECT * FROM scored UNION ALL SELECT * FROM extra
+            ) ORDER BY ord, l, r
+        """).df()
+    finally:
+        con.close()
 
-    # A whole-cluster decision writes a star, and the scorer may never have made
-    # some of those pairs. The decision is still an accept, so the edge exists
-    # whatever pairs.parquet holds — otherwise a merge would not take effect
-    # until the next full run.
-    verdicts = label_overlay.decisions(applied)
-    true_pairs = verdicts[verdicts["is_match"].astype(str).str.upper() == "TRUE"]
-    if not len(true_pairs):
-        return edges
-    have = set(zip(edges["unit_id_l"], edges["unit_id_r"])) if len(edges) else set()
-    extra = true_pairs[[
-        (left, right) not in have
-        for left, right in zip(true_pairs["unit_id_l"].astype(str),
-                               true_pairs["unit_id_r"].astype(str))
-    ]]
-    if not len(extra):
-        return edges
-    return pd.concat([edges, pd.DataFrame({
-        "unit_id_l": extra["unit_id_l"].astype(str).to_numpy(),
-        "unit_id_r": extra["unit_id_r"].astype(str).to_numpy(),
-        "source": "human",
-    })], ignore_index=True)
+
+def _edge_table(con, unit_columns: set, pair_columns: set) -> None:
+    """``s4_edge``: every edge that joins two units, with the source that made it.
+
+    Three sources, in the order that decides a duplicate:
+
+    1. a pair the score, the import overlay and then the human labels accepted;
+    2. a human TRUE label the scorer never made a pair for;
+    3. an earlier manual group.
+
+    Then every edge a human has said is not a match is deleted, whatever made
+    it: a new decision beats an older imported one.
+    """
+    con.execute(f"""
+        CREATE OR REPLACE TABLE s4_edge AS
+        WITH scored AS ({_scored_edges_sql(pair_columns)}),
+             extra AS ({_EXTRA_HUMAN_SQL}),
+             imported AS ({_import_edges_sql(unit_columns)}),
+             every_edge AS (
+                SELECT * FROM scored
+                UNION ALL SELECT * FROM extra
+                UNION ALL SELECT * FROM imported
+             )
+        -- One row per unit pair. The tie-break on `source` never fires in
+        -- practice: pairs.parquet holds one row per unit pair, so a repeat can
+        -- only come from a different `ord`.
+        SELECT l AS unit_id_l, r AS unit_id_r, source FROM (
+            SELECT l, r, source,
+                   row_number() OVER (PARTITION BY l, r ORDER BY ord, source) AS rn
+            FROM every_edge
+        ) WHERE rn = 1
+    """)
+    con.execute("""
+        DELETE FROM s4_edge WHERE EXISTS (
+            SELECT 1 FROM s4_verdicts v
+            WHERE v.is_match = 'FALSE'
+              AND v.unit_id_l = s4_edge.unit_id_l
+              AND v.unit_id_r = s4_edge.unit_id_r
+        )
+    """)
 
 
 def import_edges(units: pd.DataFrame) -> pd.DataFrame:
-    """Join the units an earlier review already gave one entity id (D11).
+    """``unit_id_l``, ``unit_id_r``, ``source`` for the earlier manual groups.
 
-    A real group in ``DonorIDStandardTR`` is a trusted merge — a human decision,
-    only an older one — so it joins its units whether or not blocking happened
-    to produce the pair. Without this a run "keeps apart" thousands of records
-    the earlier work had settled, and then mints new ids for them.
-
-    A unit whose members carry **two or more** distinct earlier ids says nothing
-    here: it is ambiguous, and its cluster is flagged ``mixed_ids`` for a human.
-
-    A star from the smallest unit id, never a clique: some of these groups hold
-    over a thousand units, and n-1 edges connect them just as well as n(n-1)/2.
+    The same SQL the stage runs, over a frame instead of a file.
     """
-    label = units_module.LABEL_COLUMN
-    if label not in units.columns:
-        return pd.DataFrame(columns=["unit_id_l", "unit_id_r", "source"])
-    frame = pd.DataFrame({
-        "unit_id": units["unit_id"].astype(str).to_numpy(),
-        "label": units[label].to_numpy(),
-        "track": units["track"].to_numpy() if "track" in units.columns else "",
-    }).dropna(subset=["label"])
-    frame = frame[frame["label"].astype(str).str.strip() != ""]
-    if not len(frame):
-        return pd.DataFrame(columns=["unit_id_l", "unit_id_r", "source"])
-
-    # Within a track. The tool never merges a person into an organisation (D5),
-    # and an entity id that spanned both would be ambiguous in the registry,
-    # which keys on the id alone. An earlier group that crosses the two stays
-    # split, and the two halves collide on the id, which is counted and shown.
-    frame = frame.sort_values(["track", "label", "unit_id"], kind="mergesort")
-    head = frame.groupby(["track", "label"], sort=False)["unit_id"].transform("first")
-    star = frame[head.to_numpy() != frame["unit_id"].to_numpy()]
-    if not len(star):
-        return pd.DataFrame(columns=["unit_id_l", "unit_id_r", "source"])
-    left = head[star.index].to_numpy()
-    right = star["unit_id"].to_numpy()
-    return pd.DataFrame({
-        "unit_id_l": np.where(left <= right, left, right),
-        "unit_id_r": np.where(left <= right, right, left),
-        "source": "import",
-    })
-
-
-def drop_human_false(edges: pd.DataFrame, applied: pd.DataFrame | None) -> pd.DataFrame:
-    """Take out every edge a human has said is not a match.
-
-    A new decision from the UI beats an old imported one, so this runs after the
-    import edges are added and before anything is clustered.
-    """
-    if applied is None or not len(applied) or not len(edges):
-        return edges
-    verdicts = label_overlay.decisions(applied)
-    refused = {
-        (str(left), str(right)) for left, right, verdict
-        in zip(verdicts["unit_id_l"], verdicts["unit_id_r"], verdicts["is_match"])
-        if str(verdict).upper() == "FALSE"
-    }
-    if not refused:
-        return edges
-    keep = [
-        (left, right) not in refused
-        for left, right in zip(edges["unit_id_l"], edges["unit_id_r"])
-    ]
-    return edges[keep].reset_index(drop=True)
-
-
-def components(unit_ids: np.ndarray, edges: pd.DataFrame) -> pd.Series:
-    """A component label per unit. SciPy does the walking, not Python."""
-    from scipy.sparse import coo_matrix
-    from scipy.sparse.csgraph import connected_components
-
-    position = pd.Series(np.arange(len(unit_ids)), index=unit_ids)
-    n = len(unit_ids)
-    if n == 0:
-        return pd.Series(dtype="int64")
-    if len(edges):
-        left = edges["unit_id_l"].map(position)
-        right = edges["unit_id_r"].map(position)
-        keep = left.notna() & right.notna()
-        rows = left[keep].to_numpy(dtype="int64")
-        cols = right[keep].to_numpy(dtype="int64")
-    else:
-        rows = cols = np.empty(0, dtype="int64")
-    graph = coo_matrix((np.ones(len(rows), dtype="int8"), (rows, cols)), shape=(n, n))
-    _count, labels = connected_components(graph, directed=False)
-    return pd.Series(labels, index=unit_ids, name="component")
-
-
-def _smallest_per_group(frame: pd.DataFrame, group: str, value: str) -> pd.Series:
-    """The smallest *value* in each group, compared as text — the id convention."""
-    return frame.groupby(group, sort=False)[value].min()
+    con = duckdb_conn.connect()
+    try:
+        _bind(con, UNITS_VIEW, units)
+        frame = con.execute(
+            f"SELECT l AS unit_id_l, r AS unit_id_r, source "
+            f"FROM ({_import_edges_sql(_columns(con, UNITS_VIEW))})"
+        ).df()
+    finally:
+        con.close()
+    return frame
 
 
 # ---------------------------------------------------------------------------
@@ -210,135 +349,133 @@ def _smallest_per_group(frame: pd.DataFrame, group: str, value: str) -> pd.Serie
 # ---------------------------------------------------------------------------
 
 
-def gate(
-    units: pd.DataFrame,
-    members: pd.DataFrame,
-    pairs: pd.DataFrame,
-    cluster_of_unit: pd.Series,
-    labels_by_unit: pd.DataFrame,
-    limits: dict,
-    merged_scopes: set | None = None,
-) -> pd.DataFrame:
+def _unit_info(con, unit_columns: set) -> None:
+    """``s4_unit_info``: the four unit columns the stage actually reads.
+
+    The PSC units file has sixty-odd columns and 15 million rows. This is the
+    only pass over it, and it takes four.
+    """
+    label = units_module.LABEL_COLUMN
+    size = "CAST(COALESCE(unit_size, 1) AS BIGINT)" if "unit_size" in unit_columns \
+        else "CAST(1 AS BIGINT)"
+    track = "CAST(track AS VARCHAR)" if "track" in unit_columns else "CAST(NULL AS VARCHAR)"
+    labelled = f'CAST("{label}" AS VARCHAR)' if label in unit_columns \
+        else "CAST(NULL AS VARCHAR)"
+    con.execute(f"""
+        CREATE OR REPLACE TABLE s4_unit_info AS
+        SELECT CAST(unit_id AS VARCHAR) AS unit_id, {size} AS unit_size,
+               {track} AS track, {labelled} AS label
+        FROM {UNITS_VIEW}
+    """)
+    con.execute("""
+        CREATE OR REPLACE TABLE s4_unit_code AS
+        SELECT unit_id, CAST(row_number() OVER (ORDER BY unit_id) - 1 AS INTEGER) AS code
+        FROM (SELECT DISTINCT unit_id FROM s4_unit_info)
+    """)
+
+
+def _summary(con, limits: dict, pair_columns: set, decisions: dict | None) -> pd.DataFrame:
     """One row per cluster: ``n_units``, ``n_records``, ``n_existing_ids``, statuses.
 
-    Every test is a groupby. ``weak_link`` reads the pairs whose two units are
-    both inside one cluster, which is what makes "the cluster may be a chain"
-    measurable without enumerating pairs that were never scored.
+    Every test is a group-by in SQL. ``weak_link`` reads the pairs whose two
+    units are both inside one cluster, which is what makes "the cluster may be a
+    chain" measurable without enumerating pairs that were never scored.
     """
-    frame = pd.DataFrame({
-        "unit_id": cluster_of_unit.index.to_numpy(),
-        "cluster_id": cluster_of_unit.to_numpy(),
-    })
-    sizes = units.set_index(units["unit_id"].astype(str))["unit_size"]
-    frame["unit_size"] = frame["unit_id"].map(sizes).fillna(1).astype("int64")
-    tracks = units.set_index(units["unit_id"].astype(str))["track"] \
-        if "track" in units.columns else None
-    frame["track"] = frame["unit_id"].map(tracks) if tracks is not None else None
-
-    summary = frame.groupby("cluster_id", sort=True).agg(
-        n_units=("unit_id", "size"),
-        n_records=("unit_size", "sum"),
-        track=("track", "first"),
-    )
-
-    # mixed_ids — distinct earlier entity ids among the cluster's records.
-    label_column = units_module.LABEL_COLUMN
-    if label_column in members.columns:
-        joined = members[["unit_id", label_column]].copy()
-        joined["cluster_id"] = joined["unit_id"].astype(str).map(cluster_of_unit)
-        distinct = (
-            joined.dropna(subset=[label_column])
-            .groupby("cluster_id", sort=False)[label_column].nunique()
-        )
+    if {"match_probability", "decided_by"} <= pair_columns:
+        weak = f"""
+            SELECT a.cluster_id AS cluster_id, min(p.match_probability) AS lo
+            FROM {PAIRS_VIEW} p
+            JOIN s4_unit_cluster a ON a.unit_id = CAST(p.unit_id_l AS VARCHAR)
+            JOIN s4_unit_cluster b ON b.unit_id = CAST(p.unit_id_r AS VARCHAR)
+            WHERE a.cluster_id = b.cluster_id
+              AND p.match_probability IS NOT NULL
+              AND (p.decided_by IS NULL OR CAST(p.decided_by AS VARCHAR) <> 'human')
+            GROUP BY a.cluster_id
+        """
     else:
-        distinct = pd.Series(dtype="int64")
-    summary["n_existing_ids"] = summary.index.map(distinct).fillna(0).astype("int64")
+        weak = "SELECT NULL AS cluster_id, NULL AS lo WHERE FALSE"
 
-    inside = _inside_pairs(pairs, cluster_of_unit)
-    # weak_link — a scored pair inside the cluster below the floor. A pair a
-    # human has already looked at is not weak evidence, whatever it scored.
-    weak = pd.Series(dtype=bool)
-    if len(inside):
-        scored = inside[inside["decided_by"] != "human"]
-        scored = scored[scored["match_probability"].notna()]
-        if len(scored):
-            weak = (
-                scored.groupby("cluster_id", sort=False)["match_probability"].min()
-                < limits["cluster_floor"]
-            )
-    summary["weak_link"] = summary.index.map(weak).fillna(False).astype(bool)
-
-    # conflict — a human FALSE label joining two units of one cluster.
-    conflict = pd.Series(dtype=bool)
-    if len(labels_by_unit):
-        false_labels = labels_by_unit[
-            labels_by_unit["is_match"].astype(str).str.upper() == "FALSE"
-        ].copy()
-        if len(false_labels):
-            left = false_labels["unit_id_l"].astype(str).map(cluster_of_unit)
-            right = false_labels["unit_id_r"].astype(str).map(cluster_of_unit)
-            same = left.notna() & (left == right)
-            conflict = pd.Series(True, index=left[same].unique())
-    summary["conflict"] = summary.index.map(conflict).fillna(False).astype(bool)
-
-    # cross_track_ids — this cluster carries an earlier id that also belongs to a
-    # cluster of the other track, so one manual group spans a person and an
-    # organisation (a man and his own company, say). The tool never suggests a
-    # merge across tracks (D5), so both halves stand; this makes them findable.
-    summary[CROSS_TRACK] = _cross_track(members, cluster_of_unit, summary)
+    summary = con.execute(f"""
+        WITH per_cluster AS (
+            SELECT c.cluster_id AS cluster_id, count(*) AS n_units,
+                   CAST(sum(COALESCE(u.unit_size, 1)) AS BIGINT) AS n_records,
+                   arg_min(u.track, c.unit_id) AS track
+            FROM s4_unit_cluster c
+            LEFT JOIN s4_unit_info u ON u.unit_id = c.unit_id
+            GROUP BY c.cluster_id
+        ),
+        mem AS (
+            SELECT c.cluster_id AS cluster_id, u.label AS label, u.track AS trk
+            FROM {MEMBERS_VIEW} m
+            JOIN s4_unit_info u ON u.unit_id = CAST(m.unit_id AS VARCHAR)
+            JOIN s4_unit_cluster c ON c.unit_id = CAST(m.unit_id AS VARCHAR)
+            WHERE u.label IS NOT NULL
+        ),
+        ids AS (SELECT cluster_id, count(DISTINCT label) AS n FROM mem GROUP BY cluster_id),
+        shared AS (SELECT label FROM mem GROUP BY label HAVING count(DISTINCT trk) > 1),
+        crossed AS (
+            SELECT DISTINCT cluster_id FROM mem
+            WHERE label IN (SELECT label FROM shared)
+        ),
+        weak AS ({weak}),
+        conflicted AS (
+            SELECT DISTINCT a.cluster_id AS cluster_id
+            FROM s4_applied x
+            JOIN s4_unit_cluster a ON a.unit_id = x.unit_id_l
+            JOIN s4_unit_cluster b ON b.unit_id = x.unit_id_r
+            WHERE x.is_match = 'FALSE' AND a.cluster_id = b.cluster_id
+        )
+        SELECT pc.cluster_id, pc.n_units, pc.n_records, pc.track,
+               CAST(COALESCE(ids.n, 0) AS BIGINT) AS n_existing_ids,
+               COALESCE(weak.lo < {float(limits['cluster_floor'])}, FALSE) AS weak_link,
+               (conflicted.cluster_id IS NOT NULL) AS conflict,
+               (crossed.cluster_id IS NOT NULL) AS {CROSS_TRACK}
+        FROM per_cluster pc
+        LEFT JOIN ids ON ids.cluster_id = pc.cluster_id
+        LEFT JOIN weak ON weak.cluster_id = pc.cluster_id
+        LEFT JOIN conflicted ON conflicted.cluster_id = pc.cluster_id
+        LEFT JOIN crossed ON crossed.cluster_id = pc.cluster_id
+        ORDER BY pc.cluster_id
+    """).df()
 
     summary["too_large"] = summary["n_units"] > limits["max_cluster_units"]
     summary["mixed_ids"] = summary["n_existing_ids"] > limits["max_existing_ids"]
     # A cluster of one unit is nothing to gate: there is no merge to doubt.
-    alone = summary["n_units"] < 2
+    alone = (summary["n_units"] < 2).to_numpy()
     for status in STATUS_ORDER:
         summary.loc[alone, status] = False
 
     # A human who has merged the whole cluster has answered every question the
     # gate asks. A decision always wins, so it is not withheld again — the same
     # rule weak_link already follows for a pair a human has decided.
-    summary["decided"] = summary.index.isin(merged_scopes or set())
+    merged_scopes = {
+        scope for scope, decision in (decisions or {}).items()
+        if decision.get("kind") == "merge"
+    }
+    summary["decided"] = summary["cluster_id"].isin(merged_scopes)
+    decided = summary["decided"].to_numpy()
     for status in ("too_large", "weak_link", "mixed_ids"):
-        summary.loc[summary["decided"], status] = False
+        summary.loc[decided, status] = False
 
-    statuses = [
-        [status for status in STATUS_ORDER if row[status]]
-        for _, row in summary[list(STATUS_ORDER)].iterrows()
-    ] if len(summary) else []
-    summary["statuses"] = ["|".join(s) for s in statuses] if len(summary) else []
-    summary["status"] = [s[0] if s else OK for s in statuses] if len(summary) else []
+    # The statuses of every cluster at once. The old row-by-row build cost
+    # 458,000 Python iterations on the PSC sample alone.
+    flags = {name: summary[name].to_numpy(dtype=bool) for name in STATUS_ORDER}
+    n = len(summary)
+    statuses = np.full(n, "", dtype=object)
+    for name in STATUS_ORDER:
+        hit = flags[name]
+        statuses[hit] = np.where(statuses[hit] == "", name, statuses[hit] + "|" + name)
+    status = np.full(n, OK, dtype=object)
+    for name in reversed(STATUS_ORDER):       # the first in STATUS_ORDER wins
+        status[flags[name]] = name
+    summary["statuses"] = statuses
+    summary["status"] = status
     summary["withheld"] = summary["status"] != OK
-    return summary.reset_index()
-
-
-def _cross_track(members: pd.DataFrame, cluster_of_unit: pd.Series,
-                 summary: pd.DataFrame) -> pd.Series:
-    """Clusters holding an earlier id that the other track also claims."""
-    label = units_module.LABEL_COLUMN
-    if label not in members.columns or "track" not in members.columns:
-        return pd.Series(False, index=summary.index)
-    frame = members[["unit_id", label, "track"]].dropna(subset=[label]).copy()
-    if not len(frame):
-        return pd.Series(False, index=summary.index)
-    frame["cluster_id"] = frame["unit_id"].astype(str).map(cluster_of_unit)
-    tracks_per_id = frame.groupby(label, sort=False)["track"].nunique()
-    shared = set(tracks_per_id.index[tracks_per_id > 1])
-    if not shared:
-        return pd.Series(False, index=summary.index)
-    flagged = set(frame.loc[frame[label].isin(shared), "cluster_id"].dropna())
-    return pd.Series(summary.index.isin(flagged), index=summary.index)
-
-
-def _inside_pairs(pairs: pd.DataFrame, cluster_of_unit: pd.Series) -> pd.DataFrame:
-    """The pairs whose two units landed in one cluster, with that cluster's id."""
-    if not len(pairs):
-        return pd.DataFrame(columns=["cluster_id", "match_probability", "decided_by"])
-    left = pairs["unit_id_l"].astype(str).map(cluster_of_unit)
-    right = pairs["unit_id_r"].astype(str).map(cluster_of_unit)
-    same = (left.notna() & (left == right)).to_numpy()
-    inside = pairs[same].copy()
-    inside["cluster_id"] = left[same].to_numpy()
-    return inside
+    return summary[[
+        "cluster_id", "n_units", "n_records", "track", "n_existing_ids",
+        "weak_link", "conflict", CROSS_TRACK, "too_large", "mixed_ids",
+        "decided", "statuses", "status", "withheld",
+    ]]
 
 
 # ---------------------------------------------------------------------------
@@ -346,54 +483,128 @@ def _inside_pairs(pairs: pd.DataFrame, cluster_of_unit: pd.Series) -> pd.DataFra
 # ---------------------------------------------------------------------------
 
 
-def proposed_parts(
-    cluster_of_unit: pd.Series,
-    withheld_clusters: set,
-    edges: pd.DataFrame,
-) -> pd.Series:
-    """``{unit_id: proposed_entity_key}``.
+def _parts(con, summary: pd.DataFrame, n_units: int) -> None:
+    """``s4_unit_part``: the proposed entity key of every unit.
 
     A cluster that passed the gate is proposed whole. A withheld one is rebuilt
     from the trusted edges alone — the import and human ones — so a human
     decision is never withheld, and each part it leaves becomes an entity.
     """
-    unit_ids = cluster_of_unit.index.to_numpy()
-    if not withheld_clusters:
-        return pd.Series(cluster_of_unit.to_numpy(), index=unit_ids).map(
-            lambda value: str(value)[2:] if str(value).startswith("C-") else str(value)
+    withheld = summary.loc[summary["withheld"], "cluster_id"]
+    if not len(withheld):
+        con.execute(
+            "CREATE OR REPLACE TABLE s4_unit_part AS "
+            "SELECT unit_id, whole_key AS part FROM s4_unit_cluster"
         )
+        return
 
-    in_withheld = pd.Series(cluster_of_unit.isin(withheld_clusters).to_numpy(),
-                            index=unit_ids)
-    trusted = edges[edges["source"].isin(TRUSTED_SOURCES)] if len(edges) else edges
-    if len(trusted):
-        keep = (
-            trusted["unit_id_l"].map(in_withheld).fillna(False)
-            & trusted["unit_id_r"].map(in_withheld).fillna(False)
-        ).to_numpy()
-        trusted = trusted[keep]
+    con.register("s4_withheld_in", pd.DataFrame({"cluster_id": withheld.to_numpy()}))
+    con.execute("CREATE OR REPLACE TABLE s4_withheld AS "
+                "SELECT CAST(cluster_id AS VARCHAR) AS cluster_id FROM s4_withheld_in")
+    trusted = ", ".join(f"'{source}'" for source in TRUSTED_SOURCES)
+    codes = _component_codes(con, f"""
+        SELECT a.code AS l, b.code AS r
+        FROM s4_edge e
+        JOIN s4_unit_cluster a ON a.unit_id = e.unit_id_l
+        JOIN s4_unit_cluster b ON b.unit_id = e.unit_id_r
+        WHERE e.source IN ({trusted})
+          AND a.cluster_id IN (SELECT cluster_id FROM s4_withheld)
+          AND b.cluster_id IN (SELECT cluster_id FROM s4_withheld)
+    """, n_units)
+    con.register("s4_rebuilt_in", codes)
+    con.execute("""
+        CREATE OR REPLACE TABLE s4_unit_part AS
+        WITH j AS (
+            SELECT u.unit_id, r.component
+            FROM s4_unit_code u JOIN s4_rebuilt_in r ON r.code = u.code
+        ),
+        smallest AS (SELECT component, min(unit_id) AS part FROM j GROUP BY component)
+        SELECT c.unit_id,
+               CASE WHEN c.cluster_id IN (SELECT cluster_id FROM s4_withheld)
+                    THEN s.part ELSE c.whole_key END AS part
+        FROM s4_unit_cluster c
+        JOIN j ON j.unit_id = c.unit_id
+        JOIN smallest s ON s.component = j.component
+    """)
 
-    # Units outside a withheld cluster keep their cluster; units inside are
-    # re-clustered on the trusted edges only.
-    rebuilt = components(unit_ids, trusted)
-    part_frame = pd.DataFrame({"unit_id": unit_ids, "part": rebuilt.to_numpy()})
-    smallest = _smallest_per_group(part_frame, "part", "unit_id")
-    rebuilt_key = pd.Series(part_frame["part"].map(smallest).to_numpy(), index=unit_ids)
 
-    whole_key = pd.Series(
-        [str(value)[2:] if str(value).startswith("C-") else str(value)
-         for value in cluster_of_unit.to_numpy()],
-        index=unit_ids,
-    )
-    return pd.Series(
-        np.where(in_withheld.to_numpy(), rebuilt_key.to_numpy(), whole_key.to_numpy()),
-        index=unit_ids,
-    )
+def _part_source(con) -> None:
+    """``s4_part_source``: the strongest accepted edge inside each proposed part.
+
+    The ranks are unique over the sources an accepted edge can carry — ``score``,
+    ``import`` and ``human`` — so the ``source DESC`` tie-break never decides
+    anything; it is there to keep the answer deterministic.
+    """
+    ranks = " ".join(f"WHEN '{name}' THEN {rank}" for name, rank in BASIS_ORDER.items())
+    con.execute(f"""
+        CREATE OR REPLACE TABLE s4_part_source AS
+        SELECT part, source FROM (
+            SELECT a.part AS part, e.source AS source,
+                   row_number() OVER (
+                       PARTITION BY a.part
+                       ORDER BY CASE e.source {ranks} ELSE 0 END DESC, e.source DESC
+                   ) AS rn
+            FROM s4_edge e
+            JOIN s4_unit_part a ON a.unit_id = e.unit_id_l
+            JOIN s4_unit_part b ON b.unit_id = e.unit_id_r
+            WHERE a.part = b.part
+        ) WHERE rn = 1
+    """)
+
+
+CLUSTERS_SELECT = """
+    SELECT c.unit_id, c.cluster_id, u.track AS track, p.part AS proposed_entity_key,
+           s.status, s.statuses, s.withheld, ps.source AS edge_source
+    FROM s4_unit_cluster c
+    JOIN s4_unit_part p ON p.unit_id = c.unit_id
+    LEFT JOIN s4_unit_info u ON u.unit_id = c.unit_id
+    LEFT JOIN s4_summary s ON s.cluster_id = c.cluster_id
+    LEFT JOIN s4_part_source ps ON ps.part = p.part
+    ORDER BY c.unit_id
+"""
 
 
 # ---------------------------------------------------------------------------
 # The stage
 # ---------------------------------------------------------------------------
+
+
+def _cluster(con, settings: dict, applied: pd.DataFrame | None,
+             decisions: dict | None) -> pd.DataFrame:
+    """Everything from the bound views to ``s4_summary``, in SQL. Returns it."""
+    limits = gate_settings(settings)
+    unit_columns = _columns(con, UNITS_VIEW)
+    pair_columns = _columns(con, PAIRS_VIEW)
+
+    _verdict_table(con, applied)
+    _unit_info(con, unit_columns)
+    _edge_table(con, unit_columns, pair_columns)
+
+    n_units = int(con.execute("SELECT count(*) FROM s4_unit_code").fetchone()[0])
+    codes = _component_codes(con, """
+        SELECT a.code AS l, b.code AS r
+        FROM s4_edge e
+        JOIN s4_unit_code a ON a.unit_id = e.unit_id_l
+        JOIN s4_unit_code b ON b.unit_id = e.unit_id_r
+    """, n_units)
+    con.register("s4_comp_in", codes)
+    con.execute("""
+        CREATE OR REPLACE TABLE s4_unit_cluster AS
+        WITH j AS (
+            SELECT u.unit_id, u.code, c.component
+            FROM s4_unit_code u JOIN s4_comp_in c ON c.code = u.code
+        ),
+        smallest AS (SELECT component, min(unit_id) AS whole_key FROM j GROUP BY component)
+        SELECT j.unit_id, j.code, 'C-' || s.whole_key AS cluster_id, s.whole_key
+        FROM j JOIN smallest s ON s.component = j.component
+    """)
+
+    summary = _summary(con, limits, pair_columns, decisions)
+    con.register("s4_summary_in", summary[["cluster_id", "status", "statuses", "withheld"]])
+    con.execute("CREATE OR REPLACE VIEW s4_summary AS SELECT * FROM s4_summary_in")
+    _parts(con, summary, n_units)
+    _part_source(con)
+    return summary
 
 
 def build_clusters(
@@ -404,74 +615,21 @@ def build_clusters(
     applied: pd.DataFrame | None = None,
     decisions: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """``(clusters, cluster_summary)`` — one row per unit, and one per cluster."""
-    limits = gate_settings(settings)
-    unit_ids = units["unit_id"].astype(str).to_numpy()
-    # The score and the human overlay, then the trusted merges an earlier round
-    # already made, then anything a human has since refused.
-    edges = pd.concat([accepted_edges(pairs, applied), import_edges(units)],
-                      ignore_index=True)
-    edges = edges.drop_duplicates(subset=["unit_id_l", "unit_id_r"], keep="first")
-    edges = drop_human_false(edges, applied)
+    """``(clusters, cluster_summary)`` — one row per unit, and one per cluster.
 
-    component = components(unit_ids, edges)
-    frame = pd.DataFrame({"unit_id": unit_ids, "component": component.to_numpy()})
-    smallest = _smallest_per_group(frame, "component", "unit_id")
-    cluster_of_unit = pd.Series(
-        ("C-" + frame["component"].map(smallest)).to_numpy(), index=unit_ids
-    )
-
-    wanted = ["unit_id"]
-    for column in (units_module.LABEL_COLUMN, "track"):
-        if column in units.columns:
-            wanted.append(column)
-    member_ids = members.merge(units[wanted], on="unit_id", how="left")
-    labels_by_unit = applied if applied is not None else pd.DataFrame(
-        columns=["unit_id_l", "unit_id_r", "is_match"]
-    )
-    merged_scopes = {
-        scope for scope, decision in (decisions or {}).items()
-        if decision.get("kind") == "merge"
-    }
-    summary = gate(units, member_ids, pairs, cluster_of_unit, labels_by_unit, limits,
-                   merged_scopes)
-
-    withheld = set(summary.loc[summary["withheld"], "cluster_id"])
-    parts = proposed_parts(cluster_of_unit, withheld, edges)
-
-    by_cluster = summary.set_index("cluster_id")
-    clusters = pd.DataFrame({
-        "unit_id": unit_ids,
-        "cluster_id": cluster_of_unit.to_numpy(),
-        "track": units["track"].to_numpy() if "track" in units.columns else None,
-        "proposed_entity_key": parts.to_numpy(),
-    })
-    clusters["status"] = clusters["cluster_id"].map(by_cluster["status"])
-    clusters["statuses"] = clusters["cluster_id"].map(by_cluster["statuses"])
-    clusters["withheld"] = clusters["cluster_id"].map(by_cluster["withheld"]).astype(bool)
-    # The strongest edge inside each proposed part, for entity_basis in stage 5.
-    clusters["edge_source"] = clusters["proposed_entity_key"].map(
-        _strongest_source(parts, edges)
-    )
-    return clusters.sort_values("unit_id", kind="mergesort").reset_index(drop=True), summary
-
-
-BASIS_ORDER = {"single": 0, "exact_key": 1, "import": 2, "score": 3, "human": 4}
-
-
-def _strongest_source(parts: pd.Series, edges: pd.DataFrame) -> pd.Series:
-    """The strongest accepted edge inside each proposed part."""
-    if not len(edges):
-        return pd.Series(dtype="object")
-    left = edges["unit_id_l"].map(parts)
-    right = edges["unit_id_r"].map(parts)
-    inside = edges[(left.notna() & (left == right)).to_numpy()].copy()
-    if not len(inside):
-        return pd.Series(dtype="object")
-    inside["part"] = left[left.notna() & (left == right)].to_numpy()
-    inside["rank"] = inside["source"].map(BASIS_ORDER).fillna(0)
-    best = inside.sort_values("rank", kind="mergesort").groupby("part").last()
-    return best["source"]
+    The in-memory entry point: the same SQL as the stage, over frames. Used by
+    the tests and by anything that already holds the three frames.
+    """
+    con = duckdb_conn.connect()
+    try:
+        _bind(con, UNITS_VIEW, units)
+        _bind(con, MEMBERS_VIEW, members)
+        _bind(con, PAIRS_VIEW, pairs)
+        summary = _cluster(con, settings, applied, decisions)
+        clusters = con.execute(CLUSTERS_SELECT).df()
+    finally:
+        con.close()
+    return clusters, summary
 
 
 def held_groups(groups: pd.DataFrame) -> pd.DataFrame:
@@ -484,6 +642,19 @@ def held_groups(groups: pd.DataFrame) -> pd.DataFrame:
     return held.groupby("group_id", sort=True).agg(
         track=("track", "first"), n_records=("record_id", "size")
     ).reset_index()
+
+
+def _held_groups_from_file(con, path: Path) -> pd.DataFrame:
+    """The same, as one aggregate over the parquet. One row per held group."""
+    if not Path(path).is_file():
+        return pd.DataFrame(columns=["group_id", "track", "n_records"])
+    return con.execute(f"""
+        SELECT group_id, min(CAST(track AS VARCHAR)) AS track,
+               CAST(count(*) AS BIGINT) AS n_records
+        FROM read_parquet({_literal(path)})
+        WHERE status = '{keys.HELD}'
+        GROUP BY group_id ORDER BY group_id
+    """).df()
 
 
 def counts_from(clusters: pd.DataFrame, summary: pd.DataFrame,
@@ -513,6 +684,35 @@ def counts_from(clusters: pd.DataFrame, summary: pd.DataFrame,
     }
 
 
+def _applied_labels(con, run_dir: Path, labels: pd.DataFrame) -> pd.DataFrame | None:
+    """The human labels as decisions about this run's unit pairs.
+
+    Only the members and groups of the records the labels actually name are read
+    — a label set is thousands of rows against sixteen million members, and the
+    overlay needs no more than the units those records now sit in.
+    """
+    if labels is None or not len(labels):
+        return None
+    named = pd.unique(pd.concat([
+        labels["record_id_a"].astype(str), labels["record_id_b"].astype(str),
+    ], ignore_index=True))
+    wanted = list(named)
+    members = con.execute(
+        f"SELECT CAST(unit_id AS VARCHAR) AS unit_id, "
+        f"CAST(record_id AS VARCHAR) AS record_id FROM {MEMBERS_VIEW} "
+        f"WHERE CAST(record_id AS VARCHAR) IN (SELECT UNNEST(?))", [wanted],
+    ).df()
+    groups_path = run_dir / EXACT_GROUPS_FILENAME
+    if groups_path.is_file():
+        groups = con.execute(
+            f"SELECT * FROM read_parquet({_literal(groups_path)}) "
+            f"WHERE CAST(record_id AS VARCHAR) IN (SELECT UNNEST(?))", [wanted],
+        ).df()
+    else:
+        groups = pd.DataFrame(columns=["record_id", "group_id", "status", "key_ids"])
+    return label_overlay.outcomes(labels, members, groups)["applied"]
+
+
 def run_stage_4_cluster(
     run_dir: str,
     config_dir: str,
@@ -531,22 +731,30 @@ def run_stage_4_cluster(
     settings = json.loads(
         (config_dir / "linkage_settings.json").read_text(encoding="utf-8")
     )
-    units = pd.read_parquet(run_dir / units_module.UNITS_FILENAME)
-    members = pd.read_parquet(run_dir / units_module.UNIT_MEMBERS_FILENAME)
-    pairs = pd.read_parquet(run_dir / PAIRS_FILENAME)
-    groups = pd.read_parquet(run_dir / EXACT_GROUPS_FILENAME)
+    temp_dir = run_dir / "duckdb_tmp"
+    # A killed run leaves its spill behind; clear it before adding to it.
+    duckdb_conn.clear_spill(temp_dir)
+    con = duckdb_conn.connect(temp_dir)
+    try:
+        _bind(con, UNITS_VIEW, run_dir / units_module.UNITS_FILENAME)
+        _bind(con, MEMBERS_VIEW, run_dir / units_module.UNIT_MEMBERS_FILENAME)
+        _bind(con, PAIRS_VIEW, run_dir / PAIRS_FILENAME)
 
-    applied = None
-    if labels is not None and len(labels):
-        applied = label_overlay.outcomes(labels, members, groups)["applied"]
+        applied = _applied_labels(con, run_dir, labels)
+        n_units = int(con.execute(f"SELECT count(*) FROM {UNITS_VIEW}").fetchone()[0])
+        _step(f"Clustering {n_units:,} units...", progress_callback)
 
-    _step(f"Clustering {len(units):,} units...", progress_callback)
-    clusters, summary = build_clusters(units, members, pairs, settings, applied,
-                                       decisions)
-    clusters.to_parquet(run_dir / CLUSTERS_FILENAME, index=False)
+        summary = _cluster(con, settings, applied, decisions)
+        out = run_dir / CLUSTERS_FILENAME
+        con.execute(
+            f"COPY ({CLUSTERS_SELECT}) TO {_literal(out)} (FORMAT PARQUET)"
+        )
+        held = _held_groups_from_file(con, run_dir / EXACT_GROUPS_FILENAME)
+    finally:
+        con.close()
+        duckdb_conn.clear_spill(temp_dir)
 
-    held = held_groups(groups)
-    counts = counts_from(clusters, summary, held, decisions)
+    counts = counts_from(None, summary, held, decisions)
     elapsed = time.time() - t_start
     _step(
         f"Stage 4 complete in {elapsed:.1f}s — {counts['clusters_total']:,} clusters, "

@@ -27,6 +27,7 @@ import re
 import numpy as np
 import pandas as pd
 
+from app.model import corpus as corpus_lib
 from app.model import references as refs
 from app.model.features import Feature
 
@@ -361,26 +362,67 @@ def _house_number(series: pd.Series) -> pd.Series:
     return series.map({v: one(v) for v in present})
 
 
-def _tfidf_cosine(pairs: pd.DataFrame, units: pd.DataFrame, column: str) -> pd.Series:
-    """Cosine of the two names in a TF-IDF space over the units in this file."""
+#: The corpus statistics this builder needs, declared rather than fitted on the
+#: fly. ``app/model/corpus.py`` explains why. The scope is the track:
+#: ``name_core`` is an organisation column and the sample's 449,397 person units
+#: carry none, so counting them in would add that many empty documents and push
+#: every IDF towards the same value.
+NAME_CORE_TFIDF = corpus_lib.CorpusSpec(
+    name="name_core_tfidf", column="name_core", scope="track",
+    max_features=20000, analyzer="word", token_pattern=r"[A-Za-z0-9]+",
+    lowercase=True, norm="l2",
+)
+
+CORPUS_SPECS = {"organisation": [NAME_CORE_TFIDF]}
+
+
+def corpus_specs(track: str) -> list:
+    """What this builder needs fitted over the units before it can score."""
+    return list(CORPUS_SPECS.get(track, []))
+
+
+def _tfidf_cosine(pairs: pd.DataFrame, units: pd.DataFrame, column: str,
+                  references: dict | None = None) -> pd.Series:
+    """Cosine of the two names in a TF-IDF space fitted over every unit.
+
+    Every unit of the track — not the units this call happens to have been
+    handed. That is the point. It used to fit over the units named in *pairs*,
+    so one pair scored differently depending on how many others it arrived
+    with, and the per-pair explanation could not reproduce a single number the
+    scoring run had written down.
+
+    The fitted vocabulary and IDF arrive on *references*, put there by
+    ``corpus.for_run`` from what the run stored. With nothing there — an old
+    run, a test — they are fitted here over the units given, which is the same
+    answer whenever those are all of them.
+    """
     out = pd.Series(np.nan, index=pairs.index, dtype="float64")
     if column not in units.columns:
         return out
     try:
-        from sklearn.feature_extraction.text import TfidfVectorizer
+        import sklearn.feature_extraction.text  # noqa: F401
     except ImportError:
         return out
 
+    spec = NAME_CORE_TFIDF
+    fitted = corpus_lib.from_references(references, spec.name)
+    if fitted is None:
+        texts = corpus_lib.texts_for(spec, units, "organisation")
+        if not len(texts) or not texts.fillna("").astype(str).str.strip().any():
+            return out
+        fitted = corpus_lib.fit(spec, texts)
+    if not fitted.vocabulary:
+        return out
+
+    # Only the units this call is about are transformed. The statistics belong
+    # to the run; the vectors belong to this batch.
     wanted = pd.unique(
         pd.concat([pairs["unit_id_l"], pairs["unit_id_r"]]).astype(str)
     )
     subset = units[units["unit_id"].astype(str).isin(set(wanted))]
-    texts = subset[column].fillna("").astype(str)
-    if not len(texts) or not texts.str.strip().any():
+    if not len(subset):
         return out
-
-    matrix = TfidfVectorizer(analyzer="word", token_pattern=r"[A-Za-z0-9]+",
-                             max_features=20000).fit_transform(texts)
+    matrix = fitted.transform(subset[column].fillna("").astype(str))
     position = {uid: i for i, uid in enumerate(subset["unit_id"].astype(str))}
     left = pairs["unit_id_l"].astype(str).map(position)
     right = pairs["unit_id_r"].astype(str).map(position)
@@ -482,7 +524,8 @@ def build(pairs: pd.DataFrame, units: pd.DataFrame,
     else:
         core_l, core_r = col("name_core", "l"), col("name_core", "r")
         out["name_core_similarity"] = _jaro_winkler(core_l, core_r)
-        out["name_tfidf_cosine"] = _tfidf_cosine(pairs, units, "name_core")
+        out["name_tfidf_cosine"] = _tfidf_cosine(pairs, units, "name_core",
+                                                 references)
         out["name_fingerprint_equal"] = (
             (_fingerprint(core_l) == _fingerprint(core_r)) & core_l.notna()
         ).astype(float)

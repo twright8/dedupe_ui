@@ -18,6 +18,14 @@ published entity that this run splits leaves two parts both entitled to it, and
 a profile that mints from the earlier manual ID will mint the same one twice
 when the run keeps apart what that manual work merged. Both are resolved here,
 by different rules, and both are counted and listed.
+
+**Out of core (B5).** ``run_stage_5_entities`` reads no file whole. The clusters
+and the unit members are joined in DuckDB, ``entities.parquet`` is written by
+``COPY ... TO``, the invariants and the two evaluation reports are SQL, and
+``records.parquet`` is read as a **projection** — six of its sixty-four columns
+on PSC. The functions above ``run_stage_5_entities`` are the in-memory
+reference: they take frames, the tests use them, and ``test_entities.py`` holds
+the two paths to the same answer.
 """
 
 import json
@@ -27,6 +35,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from app import duckdb_conn
 from app.pipeline.dedupe import units as units_module
 from app.pipeline.dedupe.stage_1_clean import RECORDS_FILENAME
 from app.pipeline.dedupe.stage_4_cluster import BASIS_ORDER, CLUSTERS_FILENAME
@@ -45,6 +54,18 @@ ATTRIBUTE_BASES = ("human", "rule", "majority", "raw", "tie")
 ID_STATUSES = ("new", "kept", "survivor", "minted_after_collision")
 
 MAX_EXAMPLES = 20
+
+# The columns ``proposed_members`` produces, in order. They matter because the
+# minting hook is handed ``proposed.merge(records)``, and pandas suffixes any
+# name the two sides share — ``track`` becomes ``track_x`` and ``track_y``.
+PROPOSED_COLUMNS = ("record_id", "unit_id", "entity_key", "cluster_id", "track", "basis")
+
+# The record columns a profile's ``mint_entity_ids`` hook reads. Both shipped
+# profiles are covered: donations reads ``existing_entity_id`` and ``record_id``,
+# PSC reads ``company_number_padded`` and ``track``. A profile that reads more
+# declares its own ``mint_columns``; without that its extra columns would not be
+# in the projection and it would mint different ids.
+MINT_COLUMNS = ("record_id", "track", "existing_entity_id", "company_number_padded")
 
 
 def _step(label, progress_callback=None):
@@ -392,12 +413,24 @@ def build_entities(
 
     check_invariants(frame)
 
+    report = _report(summary, collisions, attributes)
+    summary_out = summary[[
+        "entity_key", "entity_id", "id_status", "n_records", "smallest_record",
+        "track", "cluster_id",
+    ]].copy()
+    summary_out["absorbs"] = summary["absorbs"].map(lambda v: "|".join(str(x) for x in v))
+    return frame, {"report": report, "summary": summary_out, "attributes": attributes}
+
+
+def _report(summary: pd.DataFrame, collisions: list[dict],
+            attributes: dict[str, pd.DataFrame]) -> dict:
+    """What the proposal did, in the order the report has always carried it."""
     ties = sorted({
         str(key)
         for settled in attributes.values()
         for key in settled.loc[settled["basis"] == "tie", "entity_key"]
     })
-    report = {
+    return {
         "entities_proposed": int(len(summary)),
         "by_id_status": {
             status: int((summary["id_status"] == status).sum())
@@ -410,12 +443,6 @@ def build_entities(
         "entities_absorbing": int(summary["absorbs"].map(len).gt(0).sum()),
         "registry_entities_absorbed": int(summary["absorbs"].map(len).sum()),
     }
-    summary_out = summary[[
-        "entity_key", "entity_id", "id_status", "n_records", "smallest_record",
-        "track", "cluster_id",
-    ]].copy()
-    summary_out["absorbs"] = summary["absorbs"].map(lambda v: "|".join(str(x) for x in v))
-    return frame, {"report": report, "summary": summary_out, "attributes": attributes}
 
 
 def entity_figures(records: pd.DataFrame, frame: pd.DataFrame) -> dict:
@@ -541,9 +568,14 @@ def check_invariants(frame: pd.DataFrame) -> None:
             )
 
 
-def counts_from(frame: pd.DataFrame, extra: dict, registry_members: dict) -> dict:
-    """The run counts stage 5 contributes, in the pipeline's snake_case."""
+def counts_from(frame, extra: dict, registry_members: dict) -> dict:
+    """The run counts stage 5 contributes, in the pipeline's snake_case.
+
+    *frame* is the proposal, or just how many rows it has — the out-of-core path
+    never holds it.
+    """
     report = extra["report"]
+    n_records = int(frame) if isinstance(frame, (int, np.integer)) else int(len(frame))
     return {
         "entities_proposed": report["entities_proposed"],
         "entities_new": report["by_id_status"]["new"],
@@ -551,7 +583,7 @@ def counts_from(frame: pd.DataFrame, extra: dict, registry_members: dict) -> dic
         "entities_merged": report["by_id_status"]["survivor"],
         "id_collisions": report["id_collisions"],
         "attribute_ties": report["attribute_ties"],
-        "records_with_entity": int(len(frame)),
+        "records_with_entity": n_records,
     }
 
 
@@ -569,6 +601,420 @@ def _merge_into_score_eval(run_dir: Path, report: dict) -> None:
     path.write_text(json.dumps(evaluation, indent=2), encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# Out of core: the same work, over the run's files, in DuckDB
+# ---------------------------------------------------------------------------
+
+CLUSTERS_VIEW = "s5_clusters"
+MEMBERS_VIEW = "s5_members"
+RECORDS_VIEW = "s5_records"
+
+
+def _literal(path) -> str:
+    """A path as a SQL string literal. A view cannot carry a bound parameter."""
+    return "'" + str(path).replace("'", "''") + "'"
+
+
+def _view(con, name: str, path) -> None:
+    con.execute(
+        f"CREATE OR REPLACE VIEW {name} AS "
+        f"SELECT * FROM read_parquet({_literal(path)})"
+    )
+
+
+def _columns(con, name: str) -> list[str]:
+    return [d[0] for d in con.execute(f"SELECT * FROM {name} LIMIT 0").description]
+
+
+def required_record_columns(profile, available: list[str]) -> list[str]:
+    """The record columns this stage reads, in the file's own order.
+
+    Sixty-four columns of sixteen million PSC records is several gigabytes of
+    pandas. Six of them are ever looked at: ``record_id`` and ``track`` for the
+    evaluation, ``existing_entity_id`` for the evaluation and for the donations
+    mint, the consensus columns and their ``_rule`` twins, and whatever the
+    profile's mint hook reads.
+    """
+    wanted = {"record_id", "track", units_module.LABEL_COLUMN}
+    wanted.update(getattr(profile, "mint_columns", None) or MINT_COLUMNS)
+    for column in getattr(profile, "consensus_columns", []) or []:
+        wanted.update((column, f"{column}_rule"))
+    return [column for column in available if column in wanted]
+
+
+def _rank_case(expression: str) -> str:
+    arms = " ".join(f"WHEN '{name}' THEN {rank}" for name, rank in BASIS_ORDER.items())
+    return f"CASE {expression} {arms} ELSE 0 END"
+
+
+def _proposed_table(con) -> None:
+    """``s5_proposed``: one row per record — its unit, entity, cluster and basis.
+
+    The same rule ``proposed_members`` follows. A record alone in its unit and
+    its unit alone in its entity was never merged with anything; inside a merged
+    exact group it is at least ``exact_key``; joined to another unit, the
+    strongest edge on its path wins.
+    """
+    cluster_columns = set(_columns(con, CLUSTERS_VIEW))
+    edge = "COALESCE(c.edge_source, 'score')" if "edge_source" in cluster_columns \
+        else "'score'"
+    con.execute(f"""
+        CREATE OR REPLACE TABLE s5_proposed AS
+        WITH base AS (
+            SELECT CAST(m.record_id AS VARCHAR) AS record_id,
+                   CAST(m.unit_id AS VARCHAR) AS unit_id,
+                   COALESCE(CAST(c.proposed_entity_key AS VARCHAR),
+                            CAST(m.unit_id AS VARCHAR)) AS entity_key,
+                   c.cluster_id AS cluster_id,
+                   c.track AS track,
+                   {edge} AS edge
+            FROM {MEMBERS_VIEW} m
+            LEFT JOIN {CLUSTERS_VIEW} c
+                   ON CAST(c.unit_id AS VARCHAR) = CAST(m.unit_id AS VARCHAR)
+        ),
+        sized AS (
+            SELECT *, count(*) OVER (PARTITION BY unit_id) AS unit_size FROM base
+        ),
+        based AS (
+            SELECT *, CASE WHEN unit_size > 1 THEN 'exact_key' ELSE 'single' END AS basis0
+            FROM sized
+        ),
+        per_entity AS (
+            SELECT entity_key, count(DISTINCT unit_id) AS n_units FROM base GROUP BY entity_key
+        )
+        SELECT b.record_id, b.unit_id, b.entity_key, b.cluster_id, b.track,
+               CASE WHEN e.n_units > 1
+                     AND {_rank_case('b.edge')} > {_rank_case('b.basis0')}
+                    THEN b.edge ELSE b.basis0 END AS basis
+        FROM based b JOIN per_entity e ON e.entity_key = b.entity_key
+    """)
+
+
+def _mint_frame(con, record_columns: list[str], claimed_keys: bool) -> pd.DataFrame:
+    """The records of every proposal the registry does not already know.
+
+    Built with pandas' own merge naming, because that is what the hook sees: a
+    column both sides carry is suffixed ``_x`` (the proposal) and ``_y`` (the
+    record). ``track`` is the one that collides, which is why the shipped PSC
+    hook never finds a ``track`` column and mints every id with the person
+    prefix. Reproducing that exactly is the point — this slice moves memory, not
+    behaviour.
+    """
+    shared = [c for c in record_columns if c in PROPOSED_COLUMNS and c != "record_id"]
+    left = ", ".join(
+        f'p.{name} AS "{name}_x"' if name in shared else f"p.{name}"
+        for name in PROPOSED_COLUMNS
+    )
+    right = ", ".join(
+        f'r."{name}" AS "{name}_y"' if name in shared else f'r."{name}"'
+        for name in record_columns if name != "record_id"
+    )
+    where = "WHERE p.entity_key NOT IN (SELECT entity_key FROM s5_claimed)" \
+        if claimed_keys else ""
+    select = f"{left}{', ' + right if right else ''}"
+    return con.execute(f"""
+        SELECT {select}
+        FROM s5_proposed p
+        LEFT JOIN {RECORDS_VIEW} r ON CAST(r.record_id AS VARCHAR) = p.record_id
+        {where}
+    """).df()
+
+
+def _resolve_ids_out_of_core(con, record_columns: list[str], registry_members: dict,
+                             profile) -> tuple[pd.DataFrame, list[dict]]:
+    """``resolve_ids``, with the per-record work in SQL and the rest per entity.
+
+    The result is one row per proposed entity, which is the size of the answer
+    itself — there is no way to be smaller than that.
+    """
+    summary = con.execute("""
+        SELECT entity_key, CAST(count(*) AS BIGINT) AS n_records,
+               min(record_id) AS smallest_record,
+               min(track) AS track, min(cluster_id) AS cluster_id
+        FROM s5_proposed GROUP BY entity_key ORDER BY entity_key
+    """).df()
+
+    con.execute("CREATE OR REPLACE TABLE s5_claimed"
+                "(entity_key VARCHAR, registry_entity VARCHAR)")
+    if registry_members:
+        con.register("s5_registry_in", pd.DataFrame({
+            "record_id": list(registry_members.keys()),
+            "registry_entity": list(registry_members.values()),
+        }))
+        con.execute("""
+            INSERT INTO s5_claimed
+            SELECT DISTINCT p.entity_key, CAST(g.registry_entity AS VARCHAR)
+            FROM s5_proposed p
+            JOIN s5_registry_in g ON CAST(g.record_id AS VARCHAR) = p.record_id
+            ORDER BY 1, 2
+        """)
+    claimed = con.execute("SELECT * FROM s5_claimed").df()
+
+    n_claims = claimed.groupby("entity_key", sort=False)["registry_entity"].size() \
+        if len(claimed) else pd.Series(dtype="int64")
+    summary["n_claims"] = summary["entity_key"].map(n_claims).fillna(0).astype("int64")
+
+    # Rule 1: exactly one registry entity, so keep its id.
+    single = claimed[claimed["entity_key"].map(n_claims) == 1] if len(claimed) else claimed
+    kept = single.set_index("entity_key")["registry_entity"] if len(single) \
+        else pd.Series(dtype=object)
+
+    # Rule 2: several, so the profile picks the survivor and the rest are aliases.
+    several = claimed[claimed["entity_key"].map(n_claims) > 1] if len(claimed) else claimed
+    survivors = profile.choose_survivors(several) if len(several) else pd.Series(dtype=object)
+    absorbed = pd.Series(dtype=object)
+    if len(several):
+        joined = several.copy()
+        joined["survivor"] = joined["entity_key"].map(survivors)
+        losers = joined[joined["registry_entity"].astype(str)
+                        != joined["survivor"].astype(str)]
+        absorbed = losers.groupby("entity_key", sort=False)["registry_entity"].apply(list)
+
+    # Rule 3: none, so the profile mints one from the members themselves.
+    with_records = _mint_frame(con, record_columns, bool(len(claimed)))
+    minted = profile.mint_entity_ids(with_records) if len(with_records) \
+        else pd.Series(dtype=object)
+    del with_records
+
+    entity_id = summary["entity_key"].map(kept)
+    entity_id = entity_id.where(entity_id.notna(), summary["entity_key"].map(survivors))
+    entity_id = entity_id.where(entity_id.notna(), summary["entity_key"].map(minted))
+    summary["entity_id"] = entity_id.where(entity_id.notna(),
+                                           summary["entity_key"]).astype(str)
+    summary["id_status"] = np.where(
+        summary["n_claims"] == 1, "kept",
+        np.where(summary["n_claims"] > 1, "survivor", "new"),
+    )
+    summary["absorbs"] = summary["entity_key"].map(absorbed).map(
+        lambda value: value if isinstance(value, list) else []
+    )
+    summary["from_registry"] = summary["n_claims"] > 0
+
+    summary, collisions = _break_collisions(summary, None, None, profile)
+    return summary.drop(columns=["n_claims"]), collisions
+
+
+def _consensus_out_of_core(con, column: str, record_columns: list[str],
+                           overrides: pd.DataFrame | None) -> pd.DataFrame:
+    """One consensus column, settled from two narrow projections."""
+    if column not in record_columns:
+        return pd.DataFrame(columns=["entity_key", "value", "basis"])
+    rule_column = f"{column}_rule"
+    wanted = [column] + ([rule_column] if rule_column in record_columns else [])
+    proposed = con.execute(
+        "SELECT record_id, entity_key FROM s5_proposed"
+    ).df()
+    records = con.execute(
+        f'SELECT CAST(record_id AS VARCHAR) AS record_id, '
+        f'{", ".join(chr(34) + c + chr(34) for c in wanted)} FROM {RECORDS_VIEW}'
+    ).df()
+    return consensus(proposed, records, column, overrides)
+
+
+def _write_entities(con, out_path: Path, attributes: dict[str, pd.DataFrame]) -> int:
+    """Build ``s5_entities`` and copy it out. Returns the row count."""
+    selects, joins = [], []
+    for index, (column, settled) in enumerate(attributes.items()):
+        con.register(f"s5_attr_{index}", settled)
+        selects.append(
+            f'a{index}.value AS "{column}_entity", '
+            f'a{index}.basis AS "{column}_entity_basis"'
+        )
+        joins.append(
+            f"LEFT JOIN s5_attr_{index} a{index} ON a{index}.entity_key = p.entity_key"
+        )
+    extra = ("," + ", ".join(selects)) if selects else ""
+    con.execute(f"""
+        CREATE OR REPLACE TABLE s5_entities AS
+        SELECT p.record_id, s.entity_id, p.basis AS entity_basis, s.id_status,
+               p.cluster_id, p.track, p.unit_id, p.entity_key{extra}
+        FROM s5_proposed p
+        LEFT JOIN s5_ids s ON s.entity_key = p.entity_key
+        {" ".join(joins)}
+        ORDER BY p.unit_id, p.record_id
+    """)
+    _check_invariants_out_of_core(con)
+    con.execute(f"COPY s5_entities TO {_literal(out_path)} (FORMAT PARQUET)")
+    return int(con.execute("SELECT count(*) FROM s5_entities").fetchone()[0])
+
+
+def _check_invariants_out_of_core(con) -> None:
+    """The same three rules ``check_invariants`` holds, as three aggregates."""
+    missing, examples = con.execute("""
+        SELECT count(*), list(record_id)[1:5] FROM s5_entities
+        WHERE entity_id IS NULL OR trim(CAST(entity_id AS VARCHAR)) IN ('', 'nan', 'None')
+    """).fetchone()
+    if missing:
+        raise EntityInvariantError(
+            f"{int(missing)} record(s) have no entity id, for example {list(examples)}"
+        )
+    repeated, examples = con.execute("""
+        SELECT COALESCE(sum(n - 1), 0), list(record_id)[1:5] FROM (
+            SELECT record_id, count(*) AS n FROM s5_entities
+            GROUP BY record_id HAVING count(*) > 1
+        )
+    """).fetchone()
+    if repeated:
+        raise EntityInvariantError(
+            f"{int(repeated)} record(s) appear twice, for example {list(examples)}"
+        )
+    crossing = con.execute("""
+        SELECT count(*), list(entity_id)[1:5] FROM (
+            SELECT entity_id FROM s5_entities
+            GROUP BY entity_id HAVING count(DISTINCT track) > 1
+        )
+    """).fetchone()
+    if crossing[0]:
+        raise EntityInvariantError(
+            f"{int(crossing[0])} entity id(s) span two tracks, "
+            f"for example {list(crossing[1])}"
+        )
+
+
+_LABEL_SQL = f"""
+    SELECT CAST(record_id AS VARCHAR) AS record_id, CAST(track AS VARCHAR) AS track,
+           CASE WHEN "{units_module.LABEL_COLUMN}" IS NULL
+                  OR trim(CAST("{units_module.LABEL_COLUMN}" AS VARCHAR)) = ''
+                THEN NULL ELSE CAST("{units_module.LABEL_COLUMN}" AS VARCHAR) END AS lbl
+    FROM {RECORDS_VIEW}
+"""
+
+
+def _ratio(numerator, denominator):
+    """A share, or None when there is nothing to divide — never a silent zero."""
+    numerator = int(numerator or 0)
+    denominator = int(denominator or 0)
+    return round(numerator / denominator, 6) if denominator else None
+
+
+def _scores_sql(con, track: str | None) -> dict:
+    """``keys_eval._scores`` for one track, or for the whole run, as aggregates."""
+    track_filter = "" if track is None else "WHERE l.track = ?"
+    params = [] if track is None else [track]
+    row = con.execute(f"""
+        WITH lab AS (SELECT * FROM ({_LABEL_SQL}) l {track_filter}),
+             merged AS (
+                SELECT e.record_id, 'E' || CAST(e.entity_id AS VARCHAR) AS group_id
+                FROM s5_entities e
+                {"JOIN lab k ON k.record_id = e.record_id" if track is not None else ""}
+             ),
+             joined AS (
+                SELECT m.group_id, l.lbl FROM merged m
+                LEFT JOIN lab l ON l.record_id = m.record_id
+                WHERE l.lbl IS NOT NULL
+             ),
+             per_group AS (SELECT group_id, count(*) AS n FROM joined GROUP BY group_id),
+             per_cell AS (SELECT group_id, lbl, count(*) AS n FROM joined GROUP BY 1, 2),
+             labelled AS (SELECT record_id, lbl FROM lab WHERE lbl IS NOT NULL),
+             manual AS (SELECT lbl, count(*) AS n FROM labelled GROUP BY lbl),
+             hit AS (
+                SELECT l.lbl, m.group_id, count(*) AS n
+                FROM labelled l JOIN merged m ON m.record_id = l.record_id
+                GROUP BY 1, 2
+             )
+        SELECT (SELECT COALESCE(sum((n * (n - 1)) // 2), 0) FROM per_cell),
+               (SELECT COALESCE(sum((n * (n - 1)) // 2), 0) FROM per_group),
+               (SELECT COALESCE(sum((n * (n - 1)) // 2), 0) FROM hit),
+               (SELECT COALESCE(sum((n * (n - 1)) // 2), 0) FROM manual)
+    """, params).fetchone()
+    same, labelled_pairs, found, manual_pairs = (int(v) for v in row)
+    return {
+        "pair_precision": _ratio(same, labelled_pairs),
+        "pair_recall": _ratio(found, manual_pairs),
+        "labelled_pairs": labelled_pairs,
+        "labelled_pairs_agreeing": same,
+        "manual_pairs": manual_pairs,
+        "manual_pairs_found": found,
+    }
+
+
+def _entity_figures_sql(con) -> dict:
+    """``entity_figures``, as aggregates over the two parquet files."""
+    entities_after = int(
+        con.execute("SELECT count(DISTINCT entity_id) FROM s5_entities").fetchone()[0]
+    )
+    conflicts = int(con.execute(f"""
+        WITH lab AS ({_LABEL_SQL})
+        SELECT count(*) FROM (
+            SELECT e.entity_id FROM s5_entities e
+            LEFT JOIN lab l ON l.record_id = e.record_id
+            GROUP BY e.entity_id HAVING count(DISTINCT l.lbl) >= 2
+        )
+    """).fetchone()[0])
+    tracks = [row[0] for row in con.execute(f"""
+        SELECT DISTINCT track FROM ({_LABEL_SQL}) WHERE track IS NOT NULL ORDER BY 1
+    """).fetchall()]
+    overall = _scores_sql(con, None)
+    return {
+        "circular": (
+            "The imported labels are both an input and the yardstick here: every "
+            "earlier group joins its units as trusted import edges (D11), so this "
+            "set and with_human score near 1.0 recall by construction. Tune on "
+            "score_only, which leaves the import overlay out."
+        ),
+        "entities_after": entities_after,
+        "pair_precision": overall["pair_precision"],
+        "pair_recall": overall["pair_recall"],
+        "conflicts": conflicts,
+        "by_track": {str(track): _scores_sql(con, track) for track in tracks},
+    }
+
+
+def _compare_with_existing_sql(con, record_columns: list[str]) -> dict:
+    """``compare_with_existing``, as aggregates. Same keys, same rounding."""
+    empty = {"labelled_records": 0, "identical": None, "different": None, "reasons": {}}
+    if units_module.LABEL_COLUMN not in record_columns:
+        return empty
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE s5_versus AS
+        WITH lab AS ({_LABEL_SQL})
+        SELECT CAST(e.entity_id AS VARCHAR) AS entity_id, e.id_status, l.lbl,
+               (CAST(e.entity_id AS VARCHAR) = l.lbl) AS same
+        FROM s5_entities e JOIN lab l ON l.record_id = e.record_id
+        WHERE l.lbl IS NOT NULL
+    """)
+    total = int(con.execute("SELECT count(*) FROM s5_versus").fetchone()[0])
+    if not total:
+        return empty
+    row = con.execute("""
+        WITH ids_per_entity AS (
+            SELECT entity_id, count(DISTINCT lbl) AS n FROM s5_versus GROUP BY entity_id
+        ),
+        entities_per_id AS (
+            SELECT lbl, count(DISTINCT entity_id) AS n FROM s5_versus GROUP BY lbl
+        ),
+        differing AS (SELECT * FROM s5_versus WHERE NOT same)
+        SELECT (SELECT count(*) FROM s5_versus WHERE same),
+               (SELECT count(*) FROM differing d JOIN ids_per_entity i
+                     ON i.entity_id = d.entity_id WHERE i.n > 1),
+               (SELECT count(*) FROM differing WHERE id_status = 'minted_after_collision'),
+               (SELECT count(*) FROM differing d JOIN entities_per_id e
+                     ON e.lbl = d.lbl WHERE e.n > 1)
+    """).fetchone()
+    identical_records = int(row[0])
+    reasons = {
+        "merged_two_earlier_groups": int(row[1]),
+        "collision_re_mint": int(row[2]),
+        "split": int(row[3]),
+    }
+    return {
+        "labelled_records": total,
+        "identical": round(identical_records / total, 6),
+        "different": round((total - identical_records) / total, 6),
+        "identical_records": identical_records,
+        "different_records": total - identical_records,
+        "reasons": reasons,
+        "reason_shares": {
+            name: round(count / total, 6) if total else None
+            for name, count in reasons.items()
+        },
+        "circular": (
+            "The earlier ids are an input to the run as well as the yardstick "
+            "here (D11), so a high share identical is agreement, not accuracy."
+        ),
+    }
+
+
 def run_stage_5_entities(
     run_dir: str,
     db_path: str | None = None,
@@ -582,9 +1028,7 @@ def run_stage_5_entities(
     if progress_callback:
         progress_callback("stage_start", {"stage": STAGE, "name": STAGE_NAME})
 
-    clusters = pd.read_parquet(run_dir / CLUSTERS_FILENAME)
-    members = pd.read_parquet(run_dir / units_module.UNIT_MEMBERS_FILENAME)
-    records = pd.read_parquet(run_dir / RECORDS_FILENAME)
+    profile = get_profile()
     registry_members = store.current_members(db_path) if db_path else {}
     overrides = None
     if db_path:
@@ -592,25 +1036,55 @@ def run_stage_5_entities(
 
         overrides = active_overrides(db_path)
 
-    _step(f"Proposing entities for {len(records):,} records...", progress_callback)
-    frame, extra = build_entities(clusters, members, records, registry_members,
-                                  overrides=overrides)
-    frame.to_parquet(run_dir / ENTITIES_FILENAME, index=False)
-    report = extra["report"]
-    report["entities"] = entity_figures(records, frame)
-    report["versus_existing_entity_id"] = compare_with_existing(records, frame)
-    if extra["attributes"]:
+    temp_dir = run_dir / "duckdb_tmp"
+    duckdb_conn.clear_spill(temp_dir)
+    con = duckdb_conn.connect(temp_dir)
+    try:
+        _view(con, CLUSTERS_VIEW, run_dir / CLUSTERS_FILENAME)
+        _view(con, MEMBERS_VIEW, run_dir / units_module.UNIT_MEMBERS_FILENAME)
+        _view(con, RECORDS_VIEW, run_dir / RECORDS_FILENAME)
+        record_columns = required_record_columns(profile, _columns(con, RECORDS_VIEW))
+
+        n_records = int(
+            con.execute(f"SELECT count(*) FROM {RECORDS_VIEW}").fetchone()[0]
+        )
+        _step(f"Proposing entities for {n_records:,} records...", progress_callback)
+
+        _proposed_table(con)
+        summary, collisions = _resolve_ids_out_of_core(
+            con, record_columns, registry_members, profile
+        )
+        con.register("s5_ids_in", summary[["entity_key", "entity_id", "id_status"]])
+        con.execute("CREATE OR REPLACE VIEW s5_ids AS SELECT * FROM s5_ids_in")
+
+        attributes: dict[str, pd.DataFrame] = {}
+        for column in getattr(profile, "consensus_columns", []) or []:
+            attributes[column] = _consensus_out_of_core(
+                con, column, record_columns, overrides
+            )
+
+        written = _write_entities(con, run_dir / ENTITIES_FILENAME, attributes)
+        report = _report(summary, collisions, attributes)
+        report["entities"] = _entity_figures_sql(con)
+        report["versus_existing_entity_id"] = _compare_with_existing_sql(
+            con, record_columns
+        )
+    finally:
+        con.close()
+        duckdb_conn.clear_spill(temp_dir)
+
+    if attributes:
         report["attribute_basis"] = {
             column: {name: int((settled["basis"] == name).sum())
                      for name in ATTRIBUTE_BASES}
-            for column, settled in extra["attributes"].items()
+            for column, settled in attributes.items()
         }
     (run_dir / ENTITY_REPORT_FILENAME).write_text(
         json.dumps(report, indent=2), encoding="utf-8"
     )
     _merge_into_score_eval(run_dir, report)
 
-    counts = counts_from(frame, extra, registry_members)
+    counts = counts_from(written, {"report": report}, registry_members)
     elapsed = time.time() - t_start
     _step(
         f"Stage 5 complete in {elapsed:.1f}s — {counts['entities_proposed']:,} entities "

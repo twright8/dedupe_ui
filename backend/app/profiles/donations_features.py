@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from app.model.features import Feature
+from app.model import corpus as corpus_lib
 from app.model import references as refs
 
 # The donations profile joins multi-valued cells with this; `units.parquet`
@@ -48,6 +49,29 @@ TITLE_GENDER = {
 # organisation names are short; 20,000 tokens covers every word in the sheet
 # several times over and keeps the matrix small.
 TFIDF_MAX_FEATURES = 20000
+
+#: The corpus statistics the organisation name feature needs, declared rather
+#: than fitted on the fly (`app/model/corpus.py`).
+#:
+#: The scope is the whole RUN, not the organisation track, because that is what
+#: this builder has always done — it is handed the whole units frame and fits
+#: over all of it, person units included, which on the real donations run adds
+#: 13,310 empty documents to 9,065 real ones and lifts every IDF. Narrowing it
+#: to the track would be an improvement and would move every stored feature
+#: value in the trained model, so it is a change to make deliberately with a
+#: retrain, not a side effect of moving the fit. `docs/MODEL.md` records it.
+NAME_CORE_TFIDF = corpus_lib.CorpusSpec(
+    name="name_core_tfidf", column="name_core", scope="run",
+    max_features=TFIDF_MAX_FEATURES, analyzer="word",
+    token_pattern=r"[^\s]+", lowercase=False, norm="l2",
+)
+
+CORPUS_SPECS = {"organisation": [NAME_CORE_TFIDF]}
+
+
+def corpus_specs(track: str) -> list:
+    """What this builder needs fitted over the units before it can score."""
+    return list(CORPUS_SPECS.get(track, []))
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +392,8 @@ def _nature_frame(events: pd.DataFrame | None) -> pd.DataFrame:
     return out
 
 
-def _tfidf_cosine(pairs: pd.DataFrame, units: pd.DataFrame) -> np.ndarray:
+def _tfidf_cosine(pairs: pd.DataFrame, units: pd.DataFrame,
+                  references: dict | None = None) -> np.ndarray:
     """Cosine similarity of the two names in TF-IDF space, one number per pair.
 
     The word weights are fitted over **every unit in the frame**, not over the
@@ -383,7 +408,6 @@ def _tfidf_cosine(pairs: pd.DataFrame, units: pd.DataFrame) -> np.ndarray:
     """
     if not len(pairs):
         return np.zeros(0, dtype="float64")
-    from sklearn.feature_extraction.text import TfidfVectorizer
 
     names = units.set_index(units["unit_id"].astype(str))["name_core"] \
         if "name_core" in units.columns else pd.Series(dtype="object")
@@ -394,11 +418,10 @@ def _tfidf_cosine(pairs: pd.DataFrame, units: pd.DataFrame) -> np.ndarray:
     if not known.any():
         return np.full(len(pairs), np.nan)
 
-    vectoriser = TfidfVectorizer(
-        analyzer="word", token_pattern=r"[^\s]+", lowercase=False,
-        max_features=TFIDF_MAX_FEATURES, norm="l2",
-    )
-    matrix = vectoriser.fit_transform(names.fillna("").astype(str).to_numpy())
+    fitted = corpus_lib.from_references(references, NAME_CORE_TFIDF.name)
+    if fitted is None:
+        fitted = corpus_lib.fit(NAME_CORE_TFIDF, names)
+    matrix = fitted.transform(names.fillna("").astype(str).to_numpy())
     position = pd.Series(np.arange(len(names)), index=names.index)
     li = position.reindex(left).to_numpy()
     ri = position.reindex(right).to_numpy()
@@ -581,9 +604,17 @@ _ORGANISATION_SQL = f"""
          ELSE 0.0 END AS donor_status_std_equal,
 
     -- nature of donation (D13c)
+    -- Cast both sides: a run with no usable nature rows registers an EMPTY
+    -- pandas object column, which carries no type at all, so DuckDB gives it a
+    -- scalar one and `list_distinct` refuses to bind. The cast makes the empty
+    -- case a list of nothing rather than a binder error, and is a no-op when
+    -- there are real rows.
     CASE WHEN nl.natures IS NULL OR nr.natures IS NULL THEN NULL
-         ELSE len(list_intersect(nl.natures, nr.natures))::DOUBLE
-              / nullif(len(list_distinct(list_concat(nl.natures, nr.natures))), 0)
+         ELSE len(list_intersect(CAST(nl.natures AS VARCHAR[]),
+                                 CAST(nr.natures AS VARCHAR[])))::DOUBLE
+              / nullif(len(list_distinct(list_concat(
+                    CAST(nl.natures AS VARCHAR[]),
+                    CAST(nr.natures AS VARCHAR[])))), 0)
     END AS nature_overlap,
 {_SHARED_SQL}
 """
@@ -668,7 +699,7 @@ def build(
 
     out = out.sort_values("_row").drop(columns=["_row"]).reset_index(drop=True)
     if track == "organisation":
-        out["name_tfidf_cosine"] = _tfidf_cosine(pairs, units)
+        out["name_tfidf_cosine"] = _tfidf_cosine(pairs, units, references)
 
     frame = pd.DataFrame(index=pairs.index)
     for feature in wanted:

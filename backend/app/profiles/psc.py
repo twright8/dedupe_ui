@@ -8,28 +8,32 @@ million records, so nothing here may hold the file, or the frame, twice.
 
 How the file is read
 --------------------
-A thread decompresses the zip member with Python's own ``zipfile`` and writes
-the bytes into a FIFO; DuckDB reads that FIFO as newline-delimited JSON and
-writes parquet straight back out. Three reasons for a FIFO rather than piping
-through ``/dev/stdin``:
+Python's own ``zipfile`` decompresses the member a million lines at a time into
+an ordinary temp file. DuckDB reads that file as newline-delimited JSON, pulls
+the fields out and appends one staging parquet per chunk; the chunk file is
+deleted before the next one is written. The counts and the record projection
+are then taken off the staging parquets, and those are deleted too. The
+decompression stays inside this process, so a run does not depend on an
+``unzip`` binary being present on the server.
 
-* the decompression stays inside this process, so a run does not depend on an
-  ``unzip`` binary being present on the server;
-* DuckDB opens a FIFO by path exactly as it opens a file, so the projection is
-  ordinary SQL and the 13 GB member never touches disk;
-* stdin is a single global, and a run shares its process with the web server.
+**This used to be a FIFO, and the FIFO could not do it.** DuckDB's JSON reader
+cannot seek a pipe, so it buffers the whole input instead of streaming it, and
+the memory it needs grows with the file rather than with the query. Measured on
+this snapshot with a 2 GiB cap: a million records through a FIFO is fine, four
+million fails, and the same four million read from an ordinary file stream
+through in 44 seconds well inside the cap. No memory limit makes a 13 GB member
+work through a pipe. Chunking is what keeps the disk cost bounded too — one
+chunk file at a time, about 800 MB, rather than a 13 GB copy of the member.
 
-Each side opens the FIFO once and reads to EOF — reopening it per batch
-deadlocks, because the writer blocks until a reader arrives and DuckDB has
-already finished. DuckDB is given an explicit column schema, so a key missing
-from the first rows cannot change how the rest of the file is read.
+DuckDB is given an explicit column schema, so a key missing from the first rows
+of a chunk cannot change how the rest of the file is read.
 """
 
 import hashlib
 import os
 import re
+import shutil
 import tempfile
-import threading
 import zipfile
 from pathlib import Path
 
@@ -60,6 +64,25 @@ QUICK_ROWS_ENV = "PSC_QUICK_ROWS"
 DUCKDB_MEMORY_LIMIT = os.environ.get("PSC_DUCKDB_MEMORY", "2GB")
 DUCKDB_THREADS = int(os.environ.get("PSC_DUCKDB_THREADS", "2"))
 PARQUET_ROW_GROUP = 100_000
+
+# Where the extracted chunks land while the counts and the projection are taken
+# off them. Deleted before ``extract_to_parquet`` returns, and on the way in, so
+# a killed load cannot leave a gigabyte behind for the next one.
+STAGING_DIRNAME = "psc_extract_staging"
+
+# How many decompressed lines go into one chunk file. This is the loader's
+# memory AND disk ceiling: one chunk on disk, one chunk through DuckDB.
+CHUNK_LINES_ENV = "PSC_CHUNK_LINES"
+DEFAULT_CHUNK_LINES = 1_000_000
+
+
+def chunk_size() -> int:
+    """Lines per chunk file, from ``PSC_CHUNK_LINES``."""
+    try:
+        value = int(os.environ.get(CHUNK_LINES_ENV, DEFAULT_CHUNK_LINES))
+    except ValueError:
+        return DEFAULT_CHUNK_LINES
+    return value if value > 0 else DEFAULT_CHUNK_LINES
 
 MEMBER_SUFFIXES = (".txt", ".jsonl", ".ndjson", ".json")
 
@@ -270,40 +293,21 @@ def _open_stream(path: Path):
     )
 
 
-def _pump(path: Path, fifo: str, limit: int | None, box: dict) -> None:
-    """Decompress into the FIFO. Runs in a thread; DuckDB is the reader.
+def _write_chunk(source, path: Path, lines: int) -> int:
+    """Copy up to *lines* decompressed lines into *path*. Returns how many.
 
-    A failure is put in *box* rather than raised: a thread that died before
-    opening the FIFO would leave DuckDB blocked on a writer that never comes.
+    Lines, not bytes, because DuckDB has to be handed whole JSON objects: a
+    chunk that ends mid-object is a parse error, and one that ends on a newline
+    is a valid file on its own.
     """
-    source = holder = None
-    try:
-        source, holder = _open_stream(path)
-        with open(fifo, "wb") as sink:
-            if limit is None:
-                while True:
-                    chunk = source.read(1 << 20)
-                    if not chunk:
-                        break
-                    sink.write(chunk)
-            else:
-                for written, line in enumerate(source, start=1):
-                    sink.write(line)
-                    if written >= limit:
-                        break
-    except Exception as exc:  # noqa: BLE001 — handed to the caller through *box*
-        box["error"] = exc
-        try:  # let the reader see EOF rather than hang
-            open(fifo, "wb").close()
-        except OSError:
-            pass
-    finally:
-        for handle in (source, holder):
-            if handle is not None:
-                try:
-                    handle.close()
-                except Exception:
-                    pass
+    written = 0
+    with open(path, "wb") as sink:
+        for line in source:
+            sink.write(line)
+            written += 1
+            if written >= lines:
+                break
+    return written
 
 
 def _connect(temp_dir: Path | None = None) -> duckdb.DuckDBPyConnection:
@@ -344,33 +348,76 @@ def extract_to_parquet(input_path: Path, out_path: Path,
                        options: LoadOptions | None = None) -> dict:
     """Stream *input_path* into a records parquet at *out_path*, and count.
 
-    Nothing is held in Python: the bytes go decompressor to FIFO to DuckDB to
-    parquet, and this process keeps only the counts.
+    The member is decompressed a chunk of lines at a time into an ordinary temp
+    file; DuckDB reads that file, extracts the fields and appends one staging
+    parquet per chunk; the chunk file is deleted before the next one is written.
+    The counts and the projection are then taken off the staging parquets, which
+    are deleted too. Nothing is held in Python but one line at a time.
+
+    **Why not a FIFO, and why not a TEMP TABLE.** Both were tried and both fail
+    at full scale, for different reasons.
+
+    A TEMP TABLE materialises the extract *in memory*, and an in-memory DuckDB
+    cannot evict base-table data to its temp directory, so the whole
+    16-million-row extract has to fit under ``PSC_DUCKDB_MEMORY``. The full
+    snapshot dies with ``OutOfMemoryException`` at 1.8 GiB of a 2 GiB cap.
+
+    A FIFO is worse, and it is worse in a way that looks like it works. DuckDB's
+    JSON reader cannot seek a pipe, so it buffers the input rather than streaming
+    it, and the memory it needs grows with the *file*, not with the query.
+    Measured on this snapshot with a 2 GiB cap: 1,000,000 records through a FIFO
+    is fine, 4,000,000 fails — and the same 4,000,000 records read from an
+    ordinary file stream through in 44 seconds well inside the cap. No memory
+    limit makes a 13 GB member work through a pipe. That is why the member now
+    touches disk, which earlier versions of this profile went out of their way
+    to avoid.
+
+    Chunking is what keeps the disk cost bounded as well as the memory: one
+    chunk file at a time (``PSC_CHUNK_LINES`` lines, about 800 MB at the default
+    million) plus the staging parquets, rather than a 13 GB copy of the member.
     """
     limit = quick_rows(options)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    staging = out_path.parent / STAGING_DIRNAME
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    chunk_lines = chunk_size()
 
-    with tempfile.TemporaryDirectory(prefix="psc-fifo-") as work:
-        fifo = os.path.join(work, "records.ndjson")
-        os.mkfifo(fifo)
-        box: dict = {}
-        pump = threading.Thread(
-            target=_pump, args=(Path(input_path), fifo, limit, box), daemon=True
-        )
-        pump.start()
-
+    with tempfile.TemporaryDirectory(prefix="psc-chunk-") as work:
+        chunk_path = Path(work) / "chunk.ndjson"
+        source, holder = _open_stream(Path(input_path))
         con = _connect(Path(out_path).parent / "duckdb_tmp")
         try:
-            # One scan: a FIFO can only be read once, so the counts and the
-            # parquet both come from this table.
+            index = 0
+            total = 0
+            while True:
+                want = chunk_lines if limit is None \
+                    else min(chunk_lines, limit - total)
+                written = _write_chunk(source, chunk_path, want) if want > 0 else 0
+                # An empty first chunk still gets extracted, so a snapshot with
+                # no records leaves a staging file with the right schema rather
+                # than an empty directory nothing can read.
+                if written == 0 and index > 0:
+                    break
+                con.execute(
+                    f"COPY ({_EXTRACT.format(drop_prefix=DROP_KIND_PREFIX)}) "
+                    f"TO '{staging / f'part_{index:05d}.parquet'}' "
+                    f"(FORMAT PARQUET, COMPRESSION ZSTD, "
+                    f"ROW_GROUP_SIZE {PARQUET_ROW_GROUP})",
+                    [str(chunk_path)],
+                )
+                chunk_path.unlink(missing_ok=True)
+                total += written
+                index += 1
+                if written < want or (limit is not None and total >= limit):
+                    break
+
+            # A view, so the projection below and the counts stay the SQL they
+            # were when the extract was a table.
             con.execute(
-                f"CREATE TEMP TABLE extracted AS "
-                f"{_EXTRACT.format(drop_prefix=DROP_KIND_PREFIX)}",
-                [fifo],
+                f"CREATE TEMP VIEW extracted AS "
+                f"SELECT * FROM read_parquet('{staging}/part_*.parquet')"
             )
-            pump.join()
-            if "error" in box:
-                raise box["error"]
 
             read, dropped_kind, dropped_name = con.execute("""
                 SELECT count(*),
@@ -385,6 +432,13 @@ def extract_to_parquet(input_path: Path, out_path: Path,
             kept = con.execute(f"SELECT count(*) FROM '{out_path}'").fetchone()[0]
         finally:
             con.close()
+            for handle in (source, holder):
+                if handle is not None:
+                    try:
+                        handle.close()
+                    except Exception:  # noqa: BLE001 — closing must not mask a failure
+                        pass
+            shutil.rmtree(staging, ignore_errors=True)
 
     return {
         "input_rows": int(read),

@@ -4,11 +4,17 @@
 ``entities.parquet`` is one row per record. The Entities tab wants one row per
 entity, so everything here is a groupby in DuckDB over that file joined to the
 records.
+
+**Out of core (B5).** The filters, the counts, the sort and the page are all
+SQL. Building a Python dict per entity and then slicing it, which is what this
+used to do, costs one dict per entity: fine for the 18,000 of a donations run
+and impossible for the 15 million of a full PSC one.
 """
 
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 
 from app import duckdb_conn
 
@@ -34,6 +40,7 @@ MAX_NAMES = 5
 
 TRACKS = ("person", "organisation")
 BASES = ("single", "exact_key", "import", "score", "human")
+ID_STATUSES = ("new", "kept", "survivor", "minted_after_collision")
 SORTS = ("size", "priority", "name", "entity_id")
 
 
@@ -58,7 +65,9 @@ def _open(run_dir: str):
     records = Path(run_dir) / RECORDS_FILENAME
     if not path.is_file() or not records.is_file():
         raise EntitiesNotFound(str(path))
-    return duckdb_conn.connect(), path, records
+    # The run's own temp directory, so anything DuckDB spills belongs to a run
+    # and is bounded by DUCKDB_MAX_TEMP (`docs/PSC_HANDOVER.md` section 11).
+    return duckdb_conn.connect(Path(run_dir) / "duckdb_tmp"), path, records
 
 
 def _check(value, allowed, label):
@@ -69,6 +78,23 @@ def _check(value, allowed, label):
 def _consensus_columns(entity_columns: list[str]) -> list[str]:
     return [c for c in get_profile().consensus_columns
             if f"{c}_entity" in entity_columns]
+
+
+BASIS_RANK = {name: index for index, name in enumerate(BASES)}
+
+# The strongest basis of an entity, the same answer ``max(bases, key=rank)``
+# gives: the highest-ranked one, and among equals the alphabetically first,
+# because ``bases`` arrives sorted.
+_RANK_CASE = " ".join(f"WHEN '{name}' THEN {rank}" for name, rank in BASIS_RANK.items())
+_STRONGEST = (
+    f"COALESCE(list_filter(bases, x -> (CASE x {_RANK_CASE} ELSE 0 END) = "
+    f"list_max(list_transform(bases, x -> CASE x {_RANK_CASE} ELSE 0 END)))[1],"
+    f" 'single')"
+)
+
+# A separator a search needle cannot sensibly carry, so joining the names for
+# one LIKE cannot invent a match across two of them.
+_NAME_JOIN = "chr(1)"
 
 
 def _base_sql(run_dir: str, record_columns: list[str], entity_columns: list[str],
@@ -86,6 +112,8 @@ def _base_sql(run_dir: str, record_columns: list[str], entity_columns: list[str]
         f', any_value(e."{column}_entity_basis") AS "attr_basis_{index}"'
         for index, column in enumerate(consensus)
     )
+    stored_status = "any_value(CAST(e.id_status AS VARCHAR))" \
+        if "id_status" in entity_columns else "CAST(NULL AS VARCHAR)"
     sql = f"""
         SELECT CAST(e.entity_id AS VARCHAR) AS entity_id,
                any_value(e.track) AS track,
@@ -96,7 +124,8 @@ def _base_sql(run_dir: str, record_columns: list[str], entity_columns: list[str]
                list_slice(list_sort(list_distinct(list({name}))), 1, {MAX_NAMES}) AS names,
                min({name}) AS first_name,
                list_slice(list_sort(list_distinct(list({label}))), 1, {MAX_NAMES})
-                   AS existing_entity_ids
+                   AS existing_entity_ids,
+               {stored_status} AS stored_id_status
                {priority_select}{consensus_select}
         FROM read_parquet(?) e
         JOIN read_parquet(?) r
@@ -106,13 +135,11 @@ def _base_sql(run_dir: str, record_columns: list[str], entity_columns: list[str]
     return sql, [str(entities_path(run_dir)), str(Path(run_dir) / RECORDS_FILENAME)]
 
 
-BASIS_RANK = {name: index for index, name in enumerate(BASES)}
-
-
 def _item(row: dict, priority: list[str], consensus: list[str],
           id_status: dict) -> dict:
     bases = [b for b in (row.get("bases") or []) if b]
-    strongest = max(bases, key=lambda b: BASIS_RANK.get(b, 0)) if bases else "single"
+    strongest = row.get("entity_basis") \
+        or (max(bases, key=lambda b: BASIS_RANK.get(b, 0)) if bases else "single")
     return {
         "entity_id": row["entity_id"],
         "entity_basis": strongest,
@@ -127,7 +154,8 @@ def _item(row: dict, priority: list[str], consensus: list[str],
             column: _json_safe(row.get(f"priority_{index}"))
             for index, column in enumerate(priority)
         },
-        "id_status": id_status.get(row["entity_id"], "new"),
+        "id_status": (row.get("id_status") or row.get("stored_id_status")
+                      or id_status.get(row["entity_id"], "new")),
         "attributes": {
             column: {"value": _json_safe(row.get(f"attr_{index}")),
                      "basis": _json_safe(row.get(f"attr_basis_{index}"))}
@@ -170,84 +198,139 @@ def get_entities(
         consensus = _consensus_columns(entity_columns)
         base, params = _base_sql(run_dir, record_columns, entity_columns,
                                  priority, consensus)
-        rows = _rows(con.execute(base, params))
+        # One pass over the two parquet files, into a table the filters, the
+        # counts, the sort and the page then read. Without it every one of those
+        # would scan the files again.
+        con.execute(f"CREATE OR REPLACE TEMP TABLE er_base AS {base}", params)
+        _id_status_table(con, entity_columns, statuses)
+
+        tie = " OR ".join(
+            f"\"attr_basis_{index}\" = 'tie'" for index in range(len(consensus))
+        ) or "FALSE"
+        counts_row = con.execute(f"""
+            SELECT count(*),
+                   {", ".join(f"count(*) FILTER (WHERE entity_basis = '{name}')"
+                              for name in BASES)},
+                   {", ".join(f"count(*) FILTER (WHERE id_status = '{name}')"
+                              for name in ID_STATUSES)},
+                   count(*) FILTER (WHERE track = 'person'),
+                   count(*) FILTER (WHERE track = 'organisation'),
+                   count(*) FILTER (WHERE {tie})
+            FROM er_rows
+        """).fetchone()
+        counts = dict(zip(
+            ("all", *BASES, *ID_STATUSES, "person", "organisation", "attribute_ties"),
+            (int(value) for value in counts_row),
+        ))
+
+        where, binds = [], []
+        if track is not None:
+            where.append("track = ?")
+            binds.append(track)
+        if basis is not None:
+            where.append("entity_basis = ?")
+            binds.append(basis)
+        if id_status is not None:
+            where.append("id_status = ?")
+            binds.append(id_status)
+        if min_size and min_size > 1:
+            where.append("n_records >= ?")
+            binds.append(int(min_size))
+        if q:
+            pattern = f"%{q.lower()}%"
+            where.append(
+                f"(lower(entity_id) LIKE ? OR lower(COALESCE("
+                f"list_aggregate(names, 'string_agg', {_NAME_JOIN}), '')) LIKE ?)"
+            )
+            binds.extend([pattern] * 2)
+        where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+
+        sort_sql = {
+            "size": "n_records",
+            "priority": " + ".join(
+                f'COALESCE("priority_{index}", 0)' for index in range(len(priority))
+            ) or "n_records",
+            "name": "lower(COALESCE(names[1], ''))",
+            "entity_id": "entity_id",
+        }[sort_key]
+
+        total = int(con.execute(
+            f"SELECT count(*) FROM er_rows{where_sql}", binds
+        ).fetchone()[0])
+        # The tie-break follows the key, as the Python sort it replaces did:
+        # `sort(key=(key, entity_id), reverse=...)` reverses both.
+        rows = _rows(con.execute(
+            f"""SELECT * FROM er_rows{where_sql}
+                ORDER BY {sort_sql} {order_sql}, entity_id {order_sql}
+                LIMIT ? OFFSET ?""",
+            [*binds, limit, offset],
+        ))
     finally:
         con.close()
 
-    items = [_item(row, priority, consensus, statuses) for row in rows]
-    counts = {
-        "all": len(items),
-        **{name: sum(1 for i in items if i["entity_basis"] == name) for name in BASES},
-        **{name: sum(1 for i in items if i["id_status"] == name)
-           for name in ("new", "kept", "survivor", "minted_after_collision")},
-        "person": sum(1 for i in items if i["track"] == "person"),
-        "organisation": sum(1 for i in items if i["track"] == "organisation"),
-        "attribute_ties": sum(
-            1 for i in items
-            if any(a.get("basis") == "tie" for a in i["attributes"].values())
-        ),
-    }
-
-    if track is not None:
-        items = [i for i in items if i["track"] == track]
-    if basis is not None:
-        items = [i for i in items if i["entity_basis"] == basis]
-    if id_status is not None:
-        items = [i for i in items if i["id_status"] == id_status]
-    if min_size and min_size > 1:
-        items = [i for i in items if i["n_records"] >= int(min_size)]
-    if q:
-        needle = q.lower()
-        items = [
-            i for i in items
-            if needle in i["entity_id"].lower()
-            or any(needle in (n or "").lower() for n in i["names"])
-        ]
-
-    reverse = order_sql == "DESC"
-    key = {
-        "size": lambda i: i["n_records"],
-        "priority": lambda i: sum(v or 0 for v in i["priority"].values()),
-        "name": lambda i: (i["names"][0] or "").lower() if i["names"] else "",
-        "entity_id": lambda i: i["entity_id"],
-    }[sort_key]
-    items.sort(key=lambda i: (key(i), i["entity_id"]), reverse=reverse)
-
     return {
-        "total": len(items),
+        "total": total,
         "offset": offset,
         "limit": limit,
-        "items": items[offset:offset + limit],
+        "items": [_item(row, priority, consensus, statuses) for row in rows],
         "counts": counts,
         "columns": describe_columns(record_columns),
         "priority_columns": priority,
     }
 
 
+def _id_status_table(con, entity_columns: list[str], statuses: dict) -> None:
+    """``er_rows``: the base with ``entity_basis`` and ``id_status`` settled.
+
+    ``id_status`` is a column of the proposal, and the caller's map is built
+    from that column, so the file is read first and the map is the fallback for
+    a run written before the column existed.
+    """
+    if "id_status" in entity_columns:
+        status = "COALESCE(stored_id_status, 'new')"
+    elif statuses:
+        con.register("er_status_in", pd.DataFrame({
+            "entity_id": [str(key) for key in statuses],
+            "id_status": [statuses[key] for key in statuses],
+        }))
+        con.execute(
+            "CREATE OR REPLACE TEMP TABLE er_status AS "
+            "SELECT CAST(entity_id AS VARCHAR) AS entity_id, "
+            "CAST(id_status AS VARCHAR) AS id_status FROM er_status_in"
+        )
+        status = "COALESCE((SELECT s.id_status FROM er_status s "
+        status += "WHERE s.entity_id = b.entity_id), 'new')"
+    else:
+        status = "'new'"
+    con.execute(f"""
+        CREATE OR REPLACE TEMP VIEW er_rows AS
+        SELECT b.*, {_STRONGEST} AS entity_basis, {status} AS id_status
+        FROM er_base b
+    """)
+
+
 def get_entity(run_dir: str, entity_id: str, statuses: dict | None = None,
                with_events: bool = False) -> dict | None:
     """One entity with its member records, and its evidence rows when asked."""
-    page = get_entities(run_dir, limit=MAX_LIMIT, statuses=statuses, min_size=1)
-    found = next((i for i in page["items"] if i["entity_id"] == str(entity_id)), None)
-    if found is None:
-        # The page above is capped; look the one entity up directly.
-        con, path, records = _open(run_dir)
-        try:
-            entity_columns = _column_names(con, path)
-            record_columns = _column_names(con, records)
-            priority = [c for c in get_profile().priority_columns if c in record_columns]
-            consensus = _consensus_columns(entity_columns)
-            base, params = _base_sql(run_dir, record_columns, entity_columns,
-                                     priority, consensus)
-            rows = _rows(con.execute(
-                f"SELECT * FROM ({base}) WHERE entity_id = ?",
-                [*params, str(entity_id)],
-            ))
-        finally:
-            con.close()
-        if not rows:
-            return None
-        found = _item(rows[0], priority, consensus, statuses or {})
+    # One entity is looked up directly. Paging the whole list first and then
+    # searching it would build a row per entity to find one of them.
+    con, path, records = _open(run_dir)
+    try:
+        entity_columns = _column_names(con, path)
+        record_columns = _column_names(con, records)
+        priority = [c for c in get_profile().priority_columns if c in record_columns]
+        consensus = _consensus_columns(entity_columns)
+        base, params = _base_sql(run_dir, record_columns, entity_columns,
+                                 priority, consensus)
+        rows = _rows(con.execute(
+            f"SELECT * FROM ({base}) WHERE entity_id = ?",
+            [*params, str(entity_id)],
+        ))
+    finally:
+        con.close()
+    if not rows:
+        return None
+    found = _item(rows[0], priority, consensus, statuses or {})
 
     con, path, records = _open(run_dir)
     try:

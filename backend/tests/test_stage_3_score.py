@@ -12,7 +12,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 os.environ.setdefault("SITE_PASSWORD", "testpass123")
 
-from app.pipeline.dedupe import score_eval, units as units_module
+from app.pipeline.dedupe import score_eval, stage_3_score as stage_3
+from app.pipeline.dedupe import units as units_module
+from tests.conftest import nulls_as_none
 from app.pipeline.dedupe.stage_3_score import (
     BlockingBudgetError,
     _db_api,
@@ -764,3 +766,297 @@ def test_the_unit_build_is_unchanged_by_where_the_vote_happens():
     assert row["n_existing_ids"] == 2
     assert row["existing_entity_id"] is None     # two ids means no single id
     assert len(members) == 4
+
+
+# ---------------------------------------------------------------------------
+# Out of core: the pairs never exist whole
+# ---------------------------------------------------------------------------
+
+
+def test_only_the_ids_the_scores_and_the_gammas_survive_a_prediction():
+    """Splink hands back both sides' values and a Bayes factor per comparison.
+
+    `finalise_pairs` threw all of that away again, but only after 3.3 GB of it
+    had become Python objects. The projection drops them in SQL instead.
+    """
+    names = ["unit_id_l", "unit_id_r", "match_probability", "match_weight",
+             "surname_l", "surname_r", "gamma_surname", "tf_surname_l",
+             "bf_surname", "bf_tf_adj_surname", "gamma_postcode"]
+    assert stage_3.prediction_columns(names) == [
+        "unit_id_l", "unit_id_r", "match_probability", "match_weight",
+        "gamma_postcode", "gamma_surname",
+    ]
+
+
+def test_the_batch_sizes_come_from_the_environment(monkeypatch):
+    monkeypatch.setenv(stage_3.PAIR_BATCH_ENV, "1234")
+    monkeypatch.setenv(stage_3.MODEL_BATCH_ENV, "99")
+    assert stage_3.pair_batch_rows() == 1234
+    assert stage_3.model_batch_pairs() == 99
+    monkeypatch.setenv(stage_3.PAIR_BATCH_ENV, "0")
+    monkeypatch.setenv(stage_3.MODEL_BATCH_ENV, "nonsense")
+    assert stage_3.pair_batch_rows() == stage_3.DEFAULT_PAIR_BATCH
+    assert stage_3.model_batch_pairs() == stage_3.DEFAULT_MODEL_BATCH
+
+
+def test_the_overlay_projection_asks_for_the_columns_it_reads_and_no_others():
+    ruleset = {"vetoes": [{"id": "v1", "track": "person", "action": "reject",
+                           "when": [{"column": "dob_year_clean", "op": "abs_diff_gt",
+                                     "value": 1}]}]}
+
+    class Profile:
+        priority_columns = ["total_value"]
+
+    columns = stage_3.overlay_columns(ruleset, profile=Profile())
+    assert columns == ["unit_id", "track", "existing_entity_id", "held_group_id",
+                       "total_value", "dob_year_clean"]
+
+
+def test_a_batched_overlay_writes_what_one_pass_writes(tmp_path):
+    """The identity that makes the streaming safe: a pairs file written a batch
+    at a time has to equal the file written in one go, row for row."""
+    units = _overlay_units()
+    pairs = _overlay_pairs()
+    pairs["gamma_surname"] = [0, 2, 1, 2]
+    source = tmp_path / "predictions_person.parquet"
+    pairs.to_parquet(source, index=False)
+
+    whole = tmp_path / "whole.parquet"
+    stage_3.overlay_predictions({"person": source}, units, 0.5, 0.92, whole,
+                                batch_rows=1000)
+    batched = tmp_path / "batched.parquet"
+    stage_3.overlay_predictions({"person": source}, units, 0.5, 0.92, batched,
+                                batch_rows=1)
+    left = pd.read_parquet(whole)
+    right = pd.read_parquet(batched)
+    assert left.equals(right)
+    # And it is what the in-memory path has always produced. Stage 3 always
+    # stamped the track onto a track's pairs before the overlays ran, so the
+    # streamed file carries it too.
+    in_memory = pairs.copy()
+    in_memory["track"] = "person"
+    expected = finalise_pairs(apply_overlays(in_memory, units, 0.5, 0.92), units)
+    # File against frame, so nulls are compared by meaning: a frame that never
+    # went through parquet spells a missing value differently. The file against
+    # file check above is the one that is exact, and it is.
+    assert list(left.columns) == list(expected.columns)
+    assert nulls_as_none(left).equals(nulls_as_none(expected))
+
+
+def test_two_tracks_are_laid_out_on_one_set_of_columns(tmp_path):
+    """Each track has its own comparisons, so its own gammas. The file holds the
+    union with a null where a track has no such comparison — which is exactly
+    what concatenating the two frames used to leave behind."""
+    units = _overlay_units().copy()
+    units["track"] = ["person", "person", "person", "organisation", "organisation"]
+    person = pd.DataFrame({
+        "unit_id_l": ["1"], "unit_id_r": ["2"], "match_probability": [0.99],
+        "match_weight": [7.0], "gamma_surname": [2],
+    })
+    organisation = pd.DataFrame({
+        "unit_id_l": ["4"], "unit_id_r": ["5"], "match_probability": [0.95],
+        "match_weight": [4.0], "gamma_regnum": [1],
+    })
+    person.to_parquet(tmp_path / "p.parquet", index=False)
+    organisation.to_parquet(tmp_path / "o.parquet", index=False)
+
+    out = tmp_path / "pairs.parquet"
+    stage_3.overlay_predictions(
+        {"person": tmp_path / "p.parquet", "organisation": tmp_path / "o.parquet"},
+        units, 0.5, 0.92, out, batch_rows=1,
+    )
+    written = pd.read_parquet(out)
+    assert list(written["track"]) == ["person", "organisation"]
+    assert {"gamma_surname", "gamma_regnum"} <= set(written.columns)
+    assert pd.isna(written.loc[1, "gamma_surname"])
+    assert pd.isna(written.loc[0, "gamma_regnum"])
+
+
+def test_a_writer_keeps_one_schema_when_the_first_batch_is_all_null(tmp_path):
+    """Stage 1 learnt this on the records file and it holds here.
+
+    A batch where every veto reason is null must not write a different type from
+    the batch after it, or the file cannot be read back at all.
+    """
+    path = tmp_path / "pairs.parquet"
+    writer = stage_3.PairWriter(path)
+    writer.write(pd.DataFrame({"unit_id_l": ["1"], "vetoed_by": [None]}))
+    writer.write(pd.DataFrame({"unit_id_l": ["2"], "vetoed_by": ["v1"]}))
+    writer.close()
+    back = pd.read_parquet(path)
+    assert list(back["unit_id_l"]) == ["1", "2"]
+    # One column, one type, both rows readable. pandas 3 hands a text column's
+    # missing value back as NaN, so the null is compared by meaning.
+    assert nulls_as_none(back)["vetoed_by"].tolist() == [None, "v1"]
+
+
+def test_the_pair_counts_agree_with_the_frame_they_replace(tmp_path):
+    from app.rules import vetoes
+
+    units = _overlay_units()
+    pairs = finalise_pairs(apply_overlays(_overlay_pairs(), units, 0.5, 0.92), units)
+    pairs["vetoed_by"] = [None, "v1", None, None]
+    path = tmp_path / "pairs.parquet"
+    pairs.to_parquet(path, index=False)
+
+    counted = stage_3.pair_counts(path, tmp_path / "duckdb_tmp")
+    assert counted["pairs_scored"] == len(pairs)
+    assert counted["pairs_decided_by_import"] == int(
+        (pairs["decided_by"] == "import").sum())
+    assert counted["pairs_import_disagrees"] == int(
+        pairs["import_disagrees"].fillna(False).sum())
+    for key, value in vetoes.counts_from(pairs).items():
+        assert counted[key] == value, key
+
+
+def test_the_unit_counts_agree_with_the_frame_they_replace(tmp_path):
+    units = _overlay_units()
+    path = tmp_path / "units.parquet"
+    units.to_parquet(path, index=False)
+    assert stage_3.unit_counts_of(path, tmp_path / "duckdb_tmp") == \
+        units_module.counts_from(units)
+
+
+def test_rewriting_the_pairs_in_batches_is_the_in_memory_answer(tmp_path):
+    units = _overlay_units()
+    pairs = finalise_pairs(apply_overlays(_overlay_pairs(), units, 0.5, 0.92), units)
+    path = tmp_path / "pairs.parquet"
+    pairs.to_parquet(path, index=False)
+
+    stage_3.rewrite_pairs(path, units, 0.5, 0.98, batch_rows=1)
+    rewritten = pd.read_parquet(path)
+    expected = finalise_pairs(apply_overlays(pairs.copy(), units, 0.5, 0.98), units)
+    assert list(rewritten.columns) == list(expected.columns)
+    # Again file against frame, so the nulls are compared by meaning.
+    assert nulls_as_none(rewritten).equals(nulls_as_none(expected))
+
+    # And a batch of one writes the same file as one pass, exactly.
+    one_pass = tmp_path / "one_pass.parquet"
+    expected.to_parquet(one_pass, index=False)
+    stage_3.rewrite_pairs(one_pass, units, 0.5, 0.98, batch_rows=1000)
+    assert rewritten.equals(pd.read_parquet(one_pass))
+
+
+def test_the_evaluation_is_the_same_whether_it_reads_a_frame_or_a_file(tmp_path):
+    """The evaluation of a hundred million pairs has to stream, and streaming it
+    must not change a single number."""
+    records, groups, units, members, pairs = _eval_fixtures()
+    path = tmp_path / "pairs.parquet"
+    pairs.to_parquet(path, index=False)
+
+    in_memory = score_eval.evaluate(records, groups, units, members, pairs)
+    from_file = score_eval.evaluate(records, groups, units, members, path)
+    assert json.dumps(from_file, sort_keys=True, default=str) == \
+        json.dumps(in_memory, sort_keys=True, default=str)
+
+
+def test_the_components_step_is_given_integer_arrays():
+    """Strings in SciPy, or a dict of fifteen million of them, is what had to go."""
+    import numpy as np
+
+    rows = np.array([0, 1], dtype="int32")
+    cols = np.array([1, 2], dtype="int32")
+    labels = score_eval.components_of(rows, cols, 4)
+    assert len(labels) == 4
+    assert labels[0] == labels[1] == labels[2]
+    assert labels[3] != labels[0]
+
+
+def test_the_histogram_is_counted_in_duckdb_not_embedded_row_by_row(tmp_path):
+    """The person chart was a 68 MB HTML file because Altair embeds its data.
+
+    Fifty bins is fifty rows, whatever the run's size.
+    """
+    import numpy as np
+
+    units = _overlay_units()
+    raw = _overlay_pairs()
+    raw["track"] = "person"
+    pairs = finalise_pairs(apply_overlays(raw, units, 0.5, 0.92), units)
+    path = tmp_path / "pairs.parquet"
+    pairs.to_parquet(path, index=False)
+
+    counts = stage_3.histogram_counts(path, "person", tmp_path / "duckdb_tmp")
+    assert int(counts["pairs"].sum()) == len(pairs)
+    assert counts["bin"].max() < stage_3.HISTOGRAM_BINS
+    edges = np.linspace(0.0, 1.0, stage_3.HISTOGRAM_BINS + 1)
+    expected, _ = np.histogram(pairs["match_probability"].to_numpy(), bins=edges)
+    got = np.zeros(stage_3.HISTOGRAM_BINS, dtype="int64")
+    for _, row in counts.iterrows():
+        got[int(row["bin"])] += int(row["pairs"])
+    assert list(got) == list(expected)
+
+
+# ---------------------------------------------------------------------------
+# The hot-key control, where the budget and the scorer meet it
+# ---------------------------------------------------------------------------
+
+
+def _hot_units(n_hot: int = 40, n_rest: int = 6) -> pd.DataFrame:
+    """One very common surname and a few rare ones, with two forename initials."""
+    rows = [{"unit_id": f"h{i}", "track": "person", "surname": "SMITH",
+             "forename_initial": "A" if i % 2 else "B"} for i in range(n_hot)]
+    rows += [{"unit_id": f"r{i}", "track": "person", "surname": f"RARE{i}",
+              "forename_initial": "C"} for i in range(n_rest)]
+    return pd.DataFrame(rows)
+
+
+def _hot_settings(control: dict | None) -> dict:
+    rule = {"id": "b1", "description": "same surname",
+            "sql": "l.surname = r.surname"}
+    if control:
+        rule.update(control)
+    return {
+        "tracks": {
+            "person": {"blocking_rules": [rule], "comparisons": [],
+                       "em_blocking_rules": [], "max_pairs": 10_000_000},
+            "organisation": {"blocking_rules": [], "comparisons": [],
+                             "em_blocking_rules": [], "max_pairs": 10_000_000},
+        }
+    }
+
+
+def test_the_budget_prices_a_rule_after_its_hot_key_control():
+    """A budget that prices the uncontrolled rule is not a budget.
+
+    Forty units on one surname make 780 pairs. Refining the oversized block on
+    the forename initial leaves two blocks of twenty, which make 380.
+    """
+    units = _hot_units()
+    api = _db_api()
+
+    plain, _ = blocking_budget_report(units, _hot_settings(None), api)
+    assert plain["tracks"]["person"]["rules"][0]["pairs"] == 780
+
+    controlled, _ = blocking_budget_report(units, _hot_settings({
+        "max_block_size": 30, "on_oversize": "refine",
+        "refine_with": ["forename_initial"],
+    }), api)
+    entry = controlled["tracks"]["person"]["rules"][0]
+    assert entry["pairs"] == 380
+    assert entry["pairs_before_control"] == 780
+    assert entry["control"]["max_block_size"] == 30
+    assert "forename initial" in entry["control_description"].lower()
+    # The rule's own SQL is reported unchanged beside what was really run, so a
+    # reader can see both.
+    assert entry["sql"] == "l.surname = r.surname"
+    assert entry["sql_after_control"] != entry["sql"]
+
+
+def test_a_rule_with_no_control_is_handed_back_untouched():
+    """The donations no-op. Nothing in the generated SQL path may run for a rule
+    that does not ask for it."""
+    rules = [{"id": "b1", "description": "", "sql": "l.surname = r.surname"}]
+    assert stage_3.controlled_rules(_hot_units(), rules, "person") is rules
+
+
+def test_dropping_an_oversized_block_leaves_only_the_rest():
+    """Over the drop line the block is not compared at all, and its units are
+    reported as too common to compare on this rule."""
+    units = _hot_units()
+    report, _ = blocking_budget_report(units, _hot_settings({
+        "max_block_size": 30, "on_oversize": "drop",
+    }), _db_api())
+    entry = report["tracks"]["person"]["rules"][0]
+    assert entry["pairs"] == 0
+    assert entry["pairs_before_control"] == 780
