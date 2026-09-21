@@ -573,8 +573,8 @@ def publish(run_id: str, body: PublishBody | None = None,
         _db_path(), run_id, plan, published_by=user_name or "",
         edges=edges, collisions=_collisions(run_dir).get("id_collision_examples") or [],
     )
-    write_db(_db_path(), "UPDATE runs SET label = COALESCE(label, ?) WHERE id = ?",
-             ("published", run_id))
+    # A run's label is its title on screen (the input file's name when unset), so
+    # publishing must not write one. "Published" is read from entity_publications.
     log_event(
         _db_path(), user=user_name or "unknown", kind="publish",
         description=(f"Published run {run_id}: {plan['summary']['new']} new, "
