@@ -139,7 +139,7 @@ Each slice ends with something Tom can check in the browser.
 | 8 | PSC profile: bulk loader, person track, scale guards | A full PSC person run completes |
 | 9 | PSC organisation track | Placeholder numbers no longer merge silently |
 
-## Progress (updated 2026-09-18)
+## Progress (updated 2026-09-21)
 
 | # | Slice | State |
 |---|---|---|
@@ -151,8 +151,9 @@ Each slice ends with something Tom can check in the browser.
 | 5 | GBT per track, cold start, explanations, model panel, "most useful to label" | done |
 | 6 | Organisation track for donations | folded into slices 2 to 5: both tracks were built together |
 | 7 | Staging on the server, then the cutover with the chooser page | DONE on 2026-09-18. All three tools are on port 8000 behind Caddy: `/` chooser, `/runs` roe_ui (now on 127.0.0.1:8001), `/donations/` (8101), `/psc/` (8102). Smoke test 16 of 16 on the live address. Backup and rollback: `/home/ubuntu/backups/20260918-195350`. roe_ui already had a fixed `SECRET_KEY`, so the new tools reuse its password and key and nobody was logged out |
-| 8 | PSC profile: bulk loader, both tracks, scale guards | 8a done on a 500,000-record sample (`3282dc4`). 8b (full scale) in progress: see `PSC_HANDOVER.md` |
-| 9 | PSC organisation track | built with slice 8a. Needs the full-scale run and tuning |
+| 8 | PSC profile: bulk loader, both tracks, scale guards | DONE on the laptop, 2026-09-21. The full snapshot (15,952,486 rows) runs end to end under the project interpreter: 15,029,263 records, 11,799,425 units, 40,992,151 scored pairs, about 9.07 million proposed entities after the person veto rules and the Mixed names gate. Every screen answers in under 2 s on the 6 GB run, through per-run index files. Verdict on the person track: usable, with two caveats. One common name spread over many postcodes still merges. The review queue is 2.6 million pairs. Not yet on the server: copy the run folder and register it with `backend/scripts/adopt_run.py` (`PSC_HANDOVER.md` section 107). Stage 2 still peaks at 18 GB, so a full rebuild belongs on the laptop |
+| 9 | PSC organisation track | done with slice 8. Healthy on the full run: exact core name and registration number carry the weight |
+| 10 | One set of words, plain definitions, provenance (D21, D22) | done on 2026-09-21. `GLOSSARY.md`, `TERMINOLOGY_AUDIT.md`, `PROVENANCE.md`. The build fails on a retired word |
 
 Contracts live beside this file: `RULESET.md`, `LINKAGE.md`, `PAIRS_API.md`, `ENTITIES.md`, `ENTITIES_API.md`, `MODEL.md`, `MODEL_API.md`.
 
@@ -164,7 +165,8 @@ Known follow-ups: donations person scores pile up at 0.70 to 0.80 because Splink
 
 1. **Trade union size guard.** The key "Trade union: same name" holds any group over 200 records for one human confirmation. Eight groups are held: UNITE 207 and 259, TGWU 299, USDAW 439, AMICUS 453, CWU 677, GMB 1,006, UNISON 1,144 (4,484 records). Raising the guard to 1,200 merges all eight without review and lifts organisation recall from 67.1% to 71.7% with no new conflict. Current setting: 200. Change it on Config, Match keys, "Trade union: same name", max group size.
 2. **Reporting period and the bequest flag, for individuals.** Steve listed recipient, local unit, amount, date accepted and donation type. Does he also read the reporting period or whether a donation was a bequest? Both are already visible in the evidence tables behind "Show everything". If he uses them, add them to the individuals' evidence focus in `app/profiles/donations.py` so they show in the "What to check" strip.
-3. Set aside by Tom: the Kibana password visible on the server's process list, and HTTPS on port 8000.
+3. **PSC statements.** The loader drops 922,564 rows of kind `persons-with-significant-control-statement`, such as "the company has no registrable person". They name nobody, so there is nothing to dedupe. Should the tool keep them in a side table, so a user looking at one company can see that it filed a statement? Current setting: dropped, and the count is shown on the run.
+4. Set aside by Tom: the Kibana password visible on the server's process list, and HTTPS on port 8000.
 
 ## Open items
 
