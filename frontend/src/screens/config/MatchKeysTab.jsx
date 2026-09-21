@@ -2,17 +2,20 @@
    Config tab: Match keys
    ------------------------------------------------------------
    A match key merges records that hold the same values in every one
-   of its columns. Tiers run in order within a track, and guards stop
-   a key merging a group that looks wrong — a placeholder number, a
-   group that is too big, or one carrying too many different names.
-   The preview runs the draft against a real run and scores it
-   against the labels that already exist.
+   of its columns. What it merges is an exact group. Tiers run in
+   order within a track, and a guard stops a key merging a set of
+   records that looks wrong — a placeholder number, a set that is too
+   big, or one carrying too many different names. A set a guard stops
+   becomes a held group, waiting for a person. The preview runs the
+   draft against a real run and scores it against the labels that
+   already exist.
    ============================================================ */
 
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../api";
 import { Icons } from "../../components/Icons";
+import { Term, TermHint } from "../../components/Term";
 import { fmtNumber, fmtPct } from "../../components/ProbBar";
 import { Empty } from "../../components/Empty";
 import { ConditionList } from "./RuleList";
@@ -34,6 +37,16 @@ import {
   useDebounced,
   RunPicker,
 } from "./shared";
+
+/* Every guard in plain words, for the preview's example groups. The editor
+   below already translates each guard's JSON key; this is the same vocabulary
+   on the reading side, so the stored key never reaches the screen. */
+const GUARD_WORDS = {
+  blocklists: "the value is on an ignored list",
+  max_group_size: "too many records in the group",
+  max_distinct: "too many different values in a column",
+  require_any_equal: "no second column agreed",
+};
 
 const GUARD_DEFAULTS = {
   blocklists: [],
@@ -180,7 +193,7 @@ export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
       <SectionErrors errors={errorsOnSection(errors, "match_keys")} />
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <div className="seg" title="Which track these keys merge">
+        <div className="seg" title="Which track these match keys merge">
           {tracks.map((t) => (
             <button key={t.key} className={track === t.key ? "on" : ""} onClick={() => setTrack(t.key)}>
               {t.label}
@@ -195,22 +208,25 @@ export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
       <div style={EDITOR_GRID}>
         <div className="card" style={{ minWidth: 0 }}>
           <div className="card-h">
-            <h3>Match keys</h3>
+            <h3>
+              <Term name="matchKey" plural cap />
+            </h3>
             <span className="muted" style={{ fontSize: 12 }}>
-              tiers run in order &middot; groups from different keys that share a record are united
+              tiers run in order &middot; groups from different match keys that share a record are
+              united
             </span>
             <div className="actions">
               <button className="btn sm" onClick={addKey}>
                 <Icons.plus size={12} />
-                Add key
+                Add match key
               </button>
             </div>
           </div>
           {forTrack.length === 0 ? (
             <div className="card-b">
               <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-                No match keys for this track. Nothing merges on an exact key, and every record
-                stands alone until scoring runs.
+                No match keys for this track. Nothing is merged before scoring, so every record
+                stands alone until the scorer runs.
               </p>
             </div>
           ) : (
@@ -219,7 +235,9 @@ export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
                 <tr>
                   <th style={{ width: 34 }}>#</th>
                   <th style={{ width: 62 }}>Order</th>
-                  <th>Key</th>
+                  <th>
+                    Match key <TermHint name="matchKey" />
+                  </th>
                   <th style={{ width: 44 }}></th>
                 </tr>
               </thead>
@@ -242,7 +260,7 @@ export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
                       <td style={{ whiteSpace: "normal", minWidth: 0 }}>
                         <DescriptionInput
                           value={k.name}
-                          placeholder="What this key matches on, in a few words"
+                          placeholder="What this match key matches on, in a few words"
                           onChange={(v) => updateKey(index, { name: v })}
                         />
 
@@ -272,7 +290,7 @@ export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
                           >
                             <option value="always">always</option>
                             <option value="no_earlier_key">
-                              only records that no earlier key could use
+                              only records that no earlier match key could use
                             </option>
                           </select>
                         </div>
@@ -287,7 +305,7 @@ export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
                             conditions={k.when}
                             columns={cols.union || []}
                             tokenLists={ruleset.token_lists}
-                            emptyNote="No condition, so this key applies to every record on this track."
+                            emptyNote="No condition, so this match key applies to every record on this track."
                             onChange={(when) =>
                               updateKey(index, { when: when.length ? when : undefined })
                             }
@@ -320,7 +338,7 @@ export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
                             checked={!k.allow_null}
                             onChange={(e) => updateKey(index, { allow_null: !e.target.checked })}
                           />
-                          Records with a missing value never match on this key
+                          Records with a missing value never match on this match key
                         </label>
 
                         {/* Guards: everything that can stop this key merging. */}
@@ -334,7 +352,9 @@ export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
                             gap: 8,
                           }}
                         >
-                          <div className="eyebrow">Guards</div>
+                          <div className="eyebrow">
+                            Guards <TermHint name="guard" />
+                          </div>
 
                           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
                             <span className="muted" style={{ fontSize: 12, width: 120 }}>
@@ -423,8 +443,12 @@ export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
                               value={k.on_guard_fail || "review"}
                               onChange={(e) => updateKey(index, { on_guard_fail: e.target.value })}
                             >
-                              <option value="review">hold for review</option>
-                              <option value="skip">leave unmerged silently</option>
+                              <option value="review">
+                                make a held group and wait for a person
+                              </option>
+                              <option value="skip">
+                                leave the records unmerged, and say nothing
+                              </option>
                             </select>
                           </div>
                         </div>
@@ -432,7 +456,7 @@ export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
                       <td style={{ verticalAlign: "top", paddingTop: 11 }}>
                         <button
                           className="btn sm ghost"
-                          title="Delete this key"
+                          title="Delete this match key"
                           onClick={() => editKeys((list) => list.filter((_, i) => i !== index))}
                         >
                           <Icons.x size={12} />
@@ -454,7 +478,7 @@ export default function MatchKeysTab({ ruleset, setRuleset, errors, profile }) {
 }
 
 /* ============================================================
-   Preview — the draft's keys run against one run's records
+   Preview — the draft's match keys run against one run's records
    ============================================================ */
 
 // A count with its change against the run's own saved numbers.
@@ -543,8 +567,8 @@ function KeyPreview({ ruleset }) {
   if (runs.length === 0) {
     return (
       <Empty
-        title="No completed run to test against"
-        sub="Match keys are tested on a run's cleaned records. Start a run, then come back and the numbers appear here."
+        title="No completed run to preview against"
+        sub="Match keys are previewed on a run's cleaned records. Start a run, then come back and the numbers appear here."
         action={
           <button className="btn primary" onClick={() => navigate("/runs/new")}>
             <Icons.play size={14} stroke="#fff" /> New run
@@ -564,7 +588,10 @@ function KeyPreview({ ruleset }) {
     <div className="card" style={PREVIEW_CARD_STYLE}>
       <div className="card-h">
         <Icons.bolt size={16} />
-        <h3>Test keys</h3>
+        <h3>Preview</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          what these match keys would merge in one run's records
+        </span>
         <div className="actions">
           <button className="btn sm" onClick={() => setAttempt((n) => n + 1)} disabled={loading}>
             <Icons.refresh size={12} />
@@ -593,7 +620,11 @@ function KeyPreview({ ruleset }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 12, opacity: loading ? 0.5 : 1 }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <DeltaKpi
-                label="Merged groups"
+                label={
+                  <>
+                    Exact groups <TermHint name="exactGroup" />
+                  </>
+                }
                 value={overall.merged_groups}
                 baseline={base.merged_groups}
               />
@@ -603,21 +634,29 @@ function KeyPreview({ ruleset }) {
                 baseline={base.merged_records}
               />
               <DeltaKpi
-                label="Entities after"
+                label={
+                  <>
+                    Entities after <TermHint name="entity" />
+                  </>
+                }
                 value={overall.entities_after}
                 baseline={base.entities_after}
                 invert
-                sub="one ID per group"
+                sub="one entity ID per group"
               />
               <DeltaKpi
-                label="Held for review"
+                label={
+                  <>
+                    Held groups <TermHint name="heldGroup" />
+                  </>
+                }
                 value={overall.held_groups}
                 baseline={base.held_groups}
                 invert
                 colour="var(--amber)"
                 sub={
                   overall.held_records != null
-                    ? `${fmtNumber(overall.held_records)} records`
+                    ? `${fmtNumber(overall.held_records)} records waiting`
                     : undefined
                 }
               />
@@ -627,20 +666,22 @@ function KeyPreview({ ruleset }) {
 
             <div>
               <div className="eyebrow" style={{ marginBottom: 6 }}>
-                Agreement with existing labels
+                Agreement with the <Term name="earlierGrouping" />
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 <ScorePair
                   label="Pair precision"
+                  termName="pairPrecision"
                   value={evaluation.pair_precision}
                   baseline={baseEval.pair_precision}
-                  help="Of the labelled pairs these keys join, how many an earlier grouping also joined."
+                  help="Of the pairs these match keys join, the share the earlier grouping had already joined."
                 />
                 <ScorePair
                   label="Pair recall"
+                  termName="pairRecall"
                   value={evaluation.pair_recall}
                   baseline={baseEval.pair_recall}
-                  help="Of the pairs the manual work joined, how many these keys already find."
+                  help="Of the pairs the earlier grouping joined, the share these match keys join too."
                 />
                 <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                   <span
@@ -654,7 +695,7 @@ function KeyPreview({ ruleset }) {
                     {evaluation.conflicts == null ? "--" : fmtNumber(evaluation.conflicts)}
                   </span>
                   <span className="muted" style={{ fontSize: 12 }}>
-                    groups joining records that already carry different entity IDs
+                    groups that join records the earlier grouping gave different IDs
                   </span>
                 </div>
               </div>
@@ -663,14 +704,20 @@ function KeyPreview({ ruleset }) {
             {keyRows.length > 0 && (
               <div>
                 <div className="eyebrow" style={{ marginBottom: 6 }}>
-                  Per key
+                  Per match key
                 </div>
                 <table className="t" style={{ borderRadius: 0, tableLayout: "fixed" }}>
                   <thead>
                     <tr>
-                      <th>Key</th>
-                      <th style={{ width: 78, textAlign: "right" }}>Groups</th>
-                      <th style={{ width: 56, textAlign: "right" }}>Held</th>
+                      <th>
+                        Match key <TermHint name="matchKey" />
+                      </th>
+                      <th style={{ width: 78, textAlign: "right" }}>
+                        Exact groups <TermHint name="exactGroup" />
+                      </th>
+                      <th style={{ width: 62, textAlign: "right" }}>
+                        Held groups <TermHint name="heldGroup" />
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -693,13 +740,18 @@ function KeyPreview({ ruleset }) {
                             }}
                           >
                             {k.name || <span className="muted">(unnamed)</span>}
-                            <div className="mono muted" style={{ fontSize: 11 }}>
-                              tier {k.tier} &middot; {fmtNumber(k.eligible_records)} eligible &middot;{" "}
-                              {fmtNumber(k.records)} merged
-                              {k.blocked_values ? ` · ${fmtNumber(k.blocked_values)} blocked` : ""}
-                              {k.excluded_by_condition
-                                ? ` · ${fmtNumber(k.excluded_by_condition)} not this kind of record`
+                            <div className="muted" style={{ fontSize: 11 }}>
+                              tier {k.tier} &middot; {fmtNumber(k.eligible_records)} records could
+                              use it &middot; {fmtNumber(k.records)} records merged
+                              {k.blocked_values
+                                ? ` · ${fmtNumber(k.blocked_values)} values ignored by a guard`
                                 : ""}
+                              {k.excluded_by_condition
+                                ? ` · ${fmtNumber(k.excluded_by_condition)} records not this kind`
+                                : ""}{" "}
+                              <span className="mono" style={{ fontSize: 11 }}>
+                                {k.id}
+                              </span>
                             </div>
                           </td>
                           <td className="mono tnum" style={{ textAlign: "right", verticalAlign: "top" }}>
@@ -730,11 +782,14 @@ function KeyPreview({ ruleset }) {
                                     }
                                     style={{ marginRight: 6 }}
                                   >
-                                    {ex.status}
+                                    {ex.status === "held" ? "Held group" : "Exact group"}
                                   </span>
-                                  <span className="mono muted">{ex.size} records</span>
+                                  <span className="muted">{ex.size} records</span>
                                   {ex.guard && (
-                                    <span className="mono muted"> &middot; {ex.guard}</span>
+                                    <span className="muted">
+                                      {" "}
+                                      &middot; stopped because {GUARD_WORDS[ex.guard] || "a guard failed"}
+                                    </span>
                                   )}
                                   <div className="mono">{(ex.names || []).join(" | ")}</div>
                                 </div>
@@ -747,7 +802,7 @@ function KeyPreview({ ruleset }) {
                   </tbody>
                 </table>
                 <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-                  Click a key to see example groups.
+                  Click a match key to see example groups.
                 </div>
               </div>
             )}
@@ -758,7 +813,7 @@ function KeyPreview({ ruleset }) {
   );
 }
 
-function ScorePair({ label, value, baseline, help }) {
+function ScorePair({ label, termName, value, baseline, help }) {
   const delta = baseline == null || value == null ? null : value - baseline;
   return (
     <div>
@@ -766,11 +821,13 @@ function ScorePair({ label, value, baseline, help }) {
         <span className="mono" style={{ fontSize: 16, fontWeight: 600 }}>
           {value == null ? "--" : fmtPct(value, 1)}
         </span>
-        <span style={{ fontSize: 12.5 }}>{label}</span>
+        <span style={{ fontSize: 12.5 }}>
+          {label} {termName && <TermHint name={termName} />}
+        </span>
         {delta != null && Math.abs(delta) >= 0.0005 && (
           <span className={`delta ${delta >= 0 ? "up" : "down"}`}>
             {delta > 0 ? "+" : "−"}
-            {(Math.abs(delta) * 100).toFixed(1)}pp
+            {(Math.abs(delta) * 100).toFixed(1)} <Term name="percentagePoint" plural />
           </span>
         )}
       </div>

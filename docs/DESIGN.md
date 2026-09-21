@@ -105,6 +105,12 @@ Known limit: the existing donations labels were made almost entirely on the name
 
 **D20. Go-live safety.** The new tools first run on a spare port, with `roe_ui` untouched. The cutover happens once, at a quiet time, after a copy of `/var/lib/roe_ui`, the service file, and the Caddyfile. A smoke test checks `roe_ui` before and after. Tom runs every command that changes the server. Claude runs read-only checks only.
 
+### Words and provenance
+
+**D21. One name per thing** (agreed with Tom, 2026-09-21). `GLOSSARY.md` is the source of truth for every term a user sees. The frontend reads its words from one file, `frontend/src/glossary.js`, and a build check fails when a retired term comes back. The nine choices Tom approved: the cluster screen says "cluster", never "group"; the two answers on a pair are "Match" and "Not a match" (the API keeps TRUE and FALSE); a score is shown as a decimal such as 0.92 everywhere, and precision and recall stay percentages; stages are named, never numbered; the rule is a "match key" and its result an "exact group", and "exact key" is retired; "cold start" becomes "new model", with a definition; the unused ROE-OCOD endpoints are deleted; every export carries the code version. Stable API field names stay as they are. The words on screen change.
+
+**D22. One provenance list.** Anything the tool shows or exports can be traced to how it was decided, from what, by whom and when. One ordered list serves pairs, clusters, entity IDs, attribute values and labels, weakest first: On its own, Match key, Score, Veto rule, Earlier grouping, Reviewer. A later item always beats an earlier one. "Suggested" (a machine-written label) sits outside the list and never ranks. The code that labels an entity's basis must follow this order: it ranked Score above Earlier grouping, which contradicted the rules doc. To build: the registry stores why records are together; the chain of links behind a merge is stored, not rebuilt; a run records its input file's hash, row count and load date, the code version, the config version, the model versions and the name table's build; the export's run sheet carries all of that with plain labels; a pair's bucket can be tied to the lines that set it; the audit log's gaps are closed. Detail and ranking: `TERMINOLOGY_AUDIT.md`, "Provenance gaps".
+
 ## Differences from `roe_ui` that the user will see
 
 These follow from working within one dataset.

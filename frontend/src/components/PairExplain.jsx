@@ -5,10 +5,14 @@
    level it reached, the label Splink gives that level, and the
    evidence in bits. Positive bits push the pair towards a match,
    negative away from it, and a null level contributed nothing.
-   The bar list keeps the shape of roe_ui's feature breakdown.
+
+   The score at the end is a decimal, the same format as every
+   other score on every other screen.
    ============================================================ */
 
 import { Icons } from "./Icons";
+import { Term } from "./Term";
+import { fmtProb } from "./ProbBar";
 
 function barWidth(weight, max) {
   if (weight == null || !max) return 0;
@@ -55,7 +59,7 @@ export function PairExplain({ explanation, matchWeight, matchProbability }) {
                     ) : (
                       <>
                         {r.column}
-                        {r.gamma != null && ` · level ${r.gamma}`}
+                        {r.gamma != null && ` · comparison level ${r.gamma}`}
                       </>
                     )}
                   </div>
@@ -87,9 +91,9 @@ export function PairExplain({ explanation, matchWeight, matchProbability }) {
           })}
         </div>
         <p className="muted" style={{ fontSize: 11.5, margin: "10px 0 0", lineHeight: 1.5 }}>
-          A comparison with a dash had nothing to compare on one side, so it neither helped nor
-          hurt. The bits add up to the total, which the model turns into the score
-          {matchProbability != null && <> of {(matchProbability * 100).toFixed(1)}%</>}.
+          A <Term name="comparison" /> with a dash had nothing to compare on one side, so it
+          neither helped nor hurt. The bits add up to the total, which the model turns into the
+          score{matchProbability != null && <> of {fmtProb(matchProbability)}</>}.
         </p>
       </div>
     </div>

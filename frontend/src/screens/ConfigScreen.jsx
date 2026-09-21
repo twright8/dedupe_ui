@@ -1,11 +1,16 @@
 /* ============================================================
    Screen: Config & rules
    ------------------------------------------------------------
-   The shell around the rule editor. It owns one draft ruleset, the
+   The shell around the editor. It owns one draft config, the
    linkage settings beside it, and the save-as-a-new-version flow.
    Each tab edits that one draft and nothing else, so adding a tab
-   (match keys arrive in slice 2b) means one entry in TABS below and
-   one new file under screens/config/.
+   means one entry in TABS below and one new file under
+   screens/config/.
+
+   Each tab has its own noun for the thing it edits — track rule,
+   cleaning step, derived column rule, match key, veto rule,
+   blocking rule — because "rule" on its own would cover all six.
+   The tab labels below say which.
 
    Validation runs twice: debounced against /api/config/validate
    while editing, and again on the server at save time. Either way
@@ -18,6 +23,7 @@ import { api, validationErrors } from "../api";
 import { Icons } from "../components/Icons";
 import { Empty } from "../components/Empty";
 import { useProfile } from "../profile";
+import { Term } from "../components/Term";
 import TracksTab from "./config/TracksTab";
 import CleaningTab from "./config/CleaningTab";
 import DerivedTab from "./config/DerivedTab";
@@ -65,7 +71,7 @@ const TABS = [
   },
   {
     id: "cleaning",
-    lab: "Cleaning rules",
+    lab: "Cleaning steps",
     count: (rs) => rs.cleaning.person.length + rs.cleaning.organisation.length,
     render: (ctx) => (
       <CleaningTab
@@ -117,7 +123,7 @@ const TABS = [
   },
   {
     id: "vetoes",
-    lab: "Vetoes",
+    lab: "Veto rules",
     count: (rs) => (rs.vetoes || []).length,
     render: (ctx) => (
       <VetoesTab
@@ -240,9 +246,9 @@ export default function ConfigScreen() {
     setSaveErrors([]);
   }, []);
 
-  // Live validation, so a bad rule shows up before the user reaches Save. Both
+  // Live validation, so a mistake shows up before the user reaches Save. Both
   // halves of the draft go, because a linkage setting can name a column the
-  // cleaning rules no longer produce. A backend that only reads the ruleset
+  // cleaning steps no longer produce. A backend that only reads the config
   // ignores the rest.
   const validateBody = useMemo(
     () => ({ ruleset, linkage_settings: linkage }),
@@ -395,8 +401,10 @@ export default function ConfigScreen() {
         <div>
           <h1 className="page-title">Config & rules</h1>
           <p className="page-sub">
-            Track assignment, cleaning steps, the token lists and lookups they use, and Splink
-            thresholds. Every save creates a new immutable version. Runs reference a specific version.
+            Track rules, cleaning steps, derived columns, the tables they read, match keys, veto
+            rules and the three decision lines. Every save writes a new{" "}
+            <Term name="configVersion" />, which can never be changed afterwards, and every run
+            names the version it used.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

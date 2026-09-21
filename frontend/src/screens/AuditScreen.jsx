@@ -8,6 +8,7 @@ import { api } from "../api";
 import { Icons } from "../components/Icons";
 import { fmtDateTime, timeAgo } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
+import { Term } from "../components/Term";
 
 const PER_PAGE = 25;
 
@@ -32,6 +33,7 @@ function KindTag({ kind }) {
     upload: { cls: "",       lab: "upload" },
     export: { cls: "",       lab: "export" },
     model:  { cls: "violet", lab: "model" },
+    publish: { cls: "ink",   lab: "publish" },
   };
   const m = map[kind] || { cls: "", lab: kind };
   return (
@@ -59,10 +61,11 @@ export default function AuditScreen() {
     { id: "run",    lab: "Runs",      icon: Icons.runs },
     { id: "label",  lab: "Labels",    icon: Icons.review },
     { id: "config", lab: "Config",    icon: Icons.config },
-    { id: "threshold", lab: "Threshold", icon: Icons.bolt },
-    { id: "model", lab: "Model", icon: Icons.bolt },
+    { id: "threshold", lab: "Thresholds", icon: Icons.bolt },
+    { id: "model", lab: "Models", icon: Icons.bolt },
     { id: "upload", lab: "Uploads",   icon: Icons.upload },
     { id: "export", lab: "Exports",   icon: Icons.download },
+    { id: "publish", lab: "Publishes", icon: Icons.check },
   ];
 
   // Fetch events from API
@@ -126,8 +129,10 @@ export default function AuditScreen() {
         <div>
           <h1 className="page-title">Audit log</h1>
           <p className="page-sub">
-            Every action — runs, labels, config saves, threshold changes, uploads, exports — attributed
-            to a user. Append-only.
+            Every action this tool took, with the person who took it and the time. Eight kinds: a{" "}
+            <Term name="run" />, a <Term name="label" />, a config save, a threshold change, an
+            upload, an export, a model change and a <Term name="publish" />. Nothing here is ever
+            changed or removed.
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>

@@ -1,18 +1,19 @@
 /* ============================================================
    ModelPanel — the trained model for each track
    ------------------------------------------------------------
-   Splink finds the candidate pairs and scores them. This model
-   re-scores those candidates from the answers people have saved.
-   A model that has seen fewer than fifty human answers is a cold
-   start: it re-orders the review queue and decides nothing. Once
-   it is graded against a frozen test set it may decide pairs.
+   Splink finds the pairs worth comparing and scores them. This
+   model re-scores those pairs from the answers people have saved.
+   A model that has not been measured against the test set is a
+   new model: it re-orders the review queue and decides nothing.
+   Once it is graded against the test set it may decide pairs.
    ============================================================ */
 
-import { useState, useEffect, useCallback } from "react";
+import { Fragment, useState, useEffect, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { Icons } from "./Icons";
-import { fmtNumber, fmtPct, fmtDateTime } from "./ProbBar";
+import { Term, TermHint } from "./Term";
+import { fmtNumber, fmtPct, fmtProb, fmtDateTime } from "./ProbBar";
 import { useProfile } from "../profile";
 
 // Colour per evidence group, so one kind of evidence reads the same everywhere.
@@ -26,21 +27,73 @@ const GROUP_COLOURS = {
   size: "var(--muted)",
 };
 
+/* The words for the same groups. ModelExplain shows these groups for one pair
+   and reads them from here, so a group is named the same in both places. */
+const GROUP_LABELS = {
+  splink: "Splink score",
+  name: "Name",
+  rarity: "Name rarity",
+  recipients: "Recipients",
+  timing: "Timing",
+  amounts: "Amounts",
+  size: "Size",
+};
+
 export function groupColour(key) {
   return GROUP_COLOURS[key] || "var(--ink-2)";
 }
 
-// The state line at the top, in words rather than flags.
-function stateSentence(model) {
-  if (!model?.active) return "No model yet. Train one from a finished run.";
+/* A group's own words. An unknown key is spelled out rather than printed as the
+   wire value, so `name_rarity` never reaches the screen. */
+export function groupLabel(key) {
+  if (GROUP_LABELS[key]) return GROUP_LABELS[key];
+  const words = String(key || "").replace(/_/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "Other evidence";
+}
+
+/* A share the API may send either as 0 to 1 or as a percentage already. */
+function asPercent(value) {
+  if (value == null) return "—";
+  return value <= 1 ? fmtPct(value, 1) : `${value}%`;
+}
+
+/* The outside tables the model can use. The name-frequency table is the only
+   one today, and the glossary names it. */
+function ReferenceName({ reference }) {
+  const key = String(reference?.name || reference?.label || "").toLowerCase();
+  if (key.includes("name_frequenc") || key.includes("name frequenc")) {
+    return <Term name="nameFrequencyTable" />;
+  }
+  return <>{reference?.label || reference?.name || "an outside table"}</>;
+}
+
+/* The state line at the top, in words rather than flags. It carries the first
+   mention of the words the rest of the panel uses. */
+function StateSentence({ model }) {
+  if (!model?.active) return <>No model yet. Train one from a finished run.</>;
   const v = model.active;
   if (!v.graded) {
-    return `Version ${v.version} is active — cold start, not graded: it only re-orders the review queue.`;
+    return (
+      <>
+        Version {v.version} is active. It is a <Term name="newModel" />: it has not been measured
+        against the <Term name="testSet" />, so it only re-orders the review queue.
+      </>
+    );
   }
   if (model.can_auto_accept && v.accept != null) {
-    return `Version ${v.version} is active and graded: it decides pairs at ${v.accept.toFixed(2)} and above.`;
+    return (
+      <>
+        Version {v.version} is active and is a <Term name="gradedModel" />: it decides pairs at a{" "}
+        <Term name="score" /> of {fmtProb(v.accept)} and above.
+      </>
+    );
   }
-  return `Version ${v.version} is active and graded, but no accept line was set, so every pair it scores goes to review.`;
+  return (
+    <>
+      Version {v.version} is active and is a <Term name="gradedModel" />, but no{" "}
+      <Term name="acceptLine" /> was set, so every pair it scores goes to review.
+    </>
+  );
 }
 
 export default function ModelPanel({ runId }) {
@@ -153,11 +206,16 @@ export default function ModelPanel({ runId }) {
   function applyToRun(force) {
     run("apply", api.applyModelToRun(runId, { force: !!force }), (res) => {
       const line = (res.tracks || [])
-        .map((t) => `${t.track}: version ${t.version}${t.graded ? ", graded" : ", cold start"}`)
+        .map((t) => {
+          const name = tracks.find((x) => x.key === t.track)?.label || t.track;
+          return `${name}: version ${t.version}${t.graded ? ", graded" : ", a new model"}`;
+        })
         .join(" · ");
       setMessage({
         tone: "ok",
-        text: `Applied to this run. ${line}. Review band ${fmtNumber(res.review_before)} to ${fmtNumber(res.review_after)}.`,
+        text:
+          `Applied to this run. ${line}. Pairs for review: ` +
+          `${fmtNumber(res.review_before)} before, ${fmtNumber(res.review_after)} after.`,
       });
     });
   }
@@ -172,9 +230,11 @@ export default function ModelPanel({ runId }) {
   const versions = model?.versions || [];
   // One list describes every outside table, present or not.
   const missingReferences = (report?.report?.references || []).filter((r) => !r.present);
-  // The cold-start warning carries the number of answers the model still needs.
-  const coldStart = (model?.warnings || []).find((w) => w.code === "cold_start");
-  const needed = coldStart ? Number((coldStart.message.match(/(\d+)\s+are needed/) || [])[1]) || null : null;
+  // The warning about a model with too few answers carries the number it needs.
+  const tooFewAnswers = (model?.warnings || []).find((w) => w.code === "cold_start");
+  const needed = tooFewAnswers
+    ? Number((tooFewAnswers.message.match(/(\d+)\s+are needed/) || [])[1]) || null
+    : null;
   const training = job && (job.state === "queued" || job.state === "running");
   // The collapse guard answers 409 with the whole sentence, so it is printed as
   // the API wrote it and a forced retry is offered beside it.
@@ -206,9 +266,10 @@ export default function ModelPanel({ runId }) {
 
       <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <p className="muted" style={{ fontSize: 12.5, margin: 0, lineHeight: 1.55 }}>
-          Splink finds the candidate pairs and scores them. This model re-scores those candidates
-          using the answers people have saved. It learns from your answers, from the decisions taken
-          on whole groups, and at a lower weight from any earlier grouping.
+          Splink finds the <Term name="pair" plural /> worth comparing and scores them. This model
+          re-scores those pairs using the answers people have saved. It learns from your answers,
+          from every <Term name="groupDecision" />, and at a lower weight from any{" "}
+          <Term name="earlierGrouping" />.
         </p>
 
         {loading ? (
@@ -219,7 +280,9 @@ export default function ModelPanel({ runId }) {
           <p style={{ fontSize: 13, color: "var(--ti-red)", margin: 0 }}>{error}</p>
         ) : (
           <>
-            <div style={{ fontSize: 13.5, fontWeight: 500 }}>{stateSentence(model)}</div>
+            <div style={{ fontSize: 13.5, fontWeight: 500 }}>
+              <StateSentence model={model} />
+            </div>
 
             {/* The caveats live in one place, above the importance numbers.
                 Here only the reason it cannot decide, and the way to fix it. */}
@@ -228,10 +291,11 @@ export default function ModelPanel({ runId }) {
                 <span className="muted">Why this model cannot decide pairs yet: </span>
                 {needed != null ? (
                   <>
-                    {fmtNumber(active.n_human_labels)} of the {fmtNumber(needed)} answers it needs.
+                    it has {fmtNumber(active.n_human_labels)} of the {fmtNumber(needed)} answers it
+                    needs.
                   </>
                 ) : (
-                  "it has no frozen test set to be graded against."
+                  "it has no test set to be measured against."
                 )}{" "}
                 <button
                   className="btn sm"
@@ -253,16 +317,24 @@ export default function ModelPanel({ runId }) {
                     <dd className="mono">v{active.config_version}</dd>
                   </>
                 )}
-                <dt>rows trained on</dt>
-                <dd className="mono">
-                  {fmtNumber(active.n_train_rows)} ({fmtNumber(active.n_human_labels)} of them yours)
+                <dt>
+                  training set <TermHint name="trainingSet" />
+                </dt>
+                <dd>
+                  {fmtNumber(active.n_train_rows)} labels, {fmtNumber(active.n_human_labels)} of them
+                  your own answers
                 </dd>
-                <dt>AUC</dt>
-                <dd className="mono">{active.auc == null ? "—" : active.auc.toFixed(3)}</dd>
                 {missingReferences.length > 0 && (
                   <>
-                    <dt>missing tables</dt>
-                    <dd className="mono">{missingReferences.map((m) => m.name).join(", ")}</dd>
+                    <dt>outside tables missing</dt>
+                    <dd>
+                      {missingReferences.map((m, i) => (
+                        <Fragment key={m.name || i}>
+                          {i > 0 ? ", " : ""}
+                          <ReferenceName reference={m} />
+                        </Fragment>
+                      ))}
+                    </dd>
                   </>
                 )}
               </dl>
@@ -286,7 +358,7 @@ export default function ModelPanel({ runId }) {
                 className="btn"
                 onClick={() => applyToRun(false)}
                 disabled={busy === "apply" || !model?.active_version}
-                title="Score this run with the active model and re-bucket on it. Splink is not run again."
+                title="Score this run with the active model, then put every pair in a bucket again. Splink is not run again."
               >
                 {busy === "apply" ? "Applying…" : "Apply to this run"}
               </button>
@@ -392,21 +464,27 @@ function LabelSources({ report }) {
         <table className="t" style={{ borderRadius: 0 }}>
           <thead>
             <tr>
-              <th>Source</th>
-              <th style={{ width: 90, textAlign: "right" }}>Rows</th>
-              <th style={{ width: 90, textAlign: "right" }}>Same</th>
-              <th style={{ width: 96, textAlign: "right" }}>Not same</th>
-              <th style={{ width: 84, textAlign: "right" }}>Weight</th>
+              <th>Where the labels came from</th>
+              <th style={{ width: 90, textAlign: "right" }}>
+                Labels <TermHint name="label" />
+              </th>
+              <th style={{ width: 90, textAlign: "right" }}>Match</th>
+              <th style={{ width: 96, textAlign: "right" }}>Not a match</th>
+              <th style={{ width: 120, textAlign: "right" }}>Weight (1 = in full)</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r, i) => (
               <tr key={i}>
                 <td style={{ whiteSpace: "normal" }}>
-                  {SOURCE_LABELS[r.source] || r.source}
+                  {SOURCE_LABELS[r.source] || String(r.source || "").replace(/_/g, " ")}
                   {r.held_out === 1 && (
-                    <span className="tag violet" style={{ marginLeft: 6 }} title="Never trained on">
-                      held back for testing
+                    <span
+                      className="tag violet"
+                      style={{ marginLeft: 6 }}
+                      title="Held back from training, and used only to grade the model"
+                    >
+                      test set
                     </span>
                   )}
                   {r.capped && (
@@ -429,7 +507,7 @@ function LabelSources({ report }) {
                   {fmtNumber(r.negatives)}
                 </td>
                 <td className="mono tnum" style={{ textAlign: "right" }}>
-                  {r.weight == null ? "—" : r.weight}
+                  {r.weight == null ? "—" : Number(r.weight).toFixed(2)}
                 </td>
               </tr>
             ))}
@@ -437,8 +515,8 @@ function LabelSources({ report }) {
         </table>
       </div>
       <p className="muted" style={{ fontSize: 11.5, margin: "6px 0 0", lineHeight: 1.5 }}>
-        A weight of 1 means the row counts in full. The earlier grouping counts for less, because it
-        was not made in this tool. The rows held back for testing are never trained on, so the
+        A weight of 1 means the label counts in full. The earlier grouping counts for less, because
+        it was not made in this tool. The labels in the test set are never trained on, so the
         grading is honest.
       </p>
     </div>
@@ -465,9 +543,11 @@ function VersionList({ versions, openVersion, setOpenVersion, onActivate, busy }
             <tr>
               <th style={{ width: 80 }}>Version</th>
               <th style={{ width: 160 }}>Trained</th>
-              <th style={{ width: 70, textAlign: "right" }}>AUC</th>
+              <th style={{ width: 120, textAlign: "right" }}>How well it sorts pairs</th>
               <th style={{ width: 110, textAlign: "right" }}>Your answers</th>
-              <th style={{ width: 130, textAlign: "right" }}>Held back for testing</th>
+              <th style={{ width: 120, textAlign: "right" }}>
+                Test set <TermHint name="testSet" />
+              </th>
               <th style={{ width: 110 }}>Graded</th>
               <th>Note</th>
               <th style={{ width: 90 }}></th>
@@ -505,10 +585,18 @@ function VersionList({ versions, openVersion, setOpenVersion, onActivate, busy }
                 </td>
                 <td>
                   {v.graded ? (
-                    <span className="tag green">graded</span>
+                    <span
+                      className="tag green"
+                      title="Measured against the test set, so it may decide pairs"
+                    >
+                      graded
+                    </span>
                   ) : (
-                    <span className="tag amber" title="It re-orders the queue and decides nothing">
-                      cold start
+                    <span
+                      className="tag amber"
+                      title="Not measured against the test set. It re-orders the review queue and decides nothing."
+                    >
+                      new model
                     </span>
                   )}
                 </td>
@@ -531,6 +619,11 @@ function VersionList({ versions, openVersion, setOpenVersion, onActivate, busy }
           </tbody>
         </table>
       </div>
+      <p className="muted" style={{ fontSize: 11.5, margin: "6px 0 0", lineHeight: 1.5 }}>
+        How well it sorts pairs: how often the model puts a matching pair above a non-matching one.
+        0.5 is chance, 1 is perfect. The test set column counts the labels held back to grade that
+        version.
+      </p>
     </div>
   );
 }
@@ -586,8 +679,8 @@ function TrainingReport({ version }) {
         ))}
         {missing.map((m) => (
           <div key={m.name} style={{ marginTop: 6 }}>
-            The {m.label} table is missing, so these features have no value:{" "}
-            <span className="mono">{(m.affects || []).join(", ")}</span>.
+            The <ReferenceName reference={m} /> is missing, so these pieces of evidence have no
+            value: <span className="mono">{(m.affects || []).join(", ")}</span>.
           </div>
         ))}
       </div>
@@ -600,18 +693,18 @@ function TrainingReport({ version }) {
 function Metrics({ report, thresholds }) {
   const rows = [
     {
-      label: "AUC",
+      label: "How well it sorts pairs",
       value: report.auc?.value,
-      help: "How well it sorts a matching pair above a non-matching one. 0.5 is chance, 1 is perfect.",
+      help: "How often it puts a matching pair above a non-matching one. 0.5 is chance, 1 is perfect.",
       extra:
         report.auc?.source === "held_out"
-          ? "measured on the answers held back for testing"
-          : "measured out of fold",
+          ? "measured on the test set"
+          : "measured on labels it was not trained on, a slice at a time",
     },
     {
       label: "Average precision",
       value: report.average_precision?.value,
-      help: "How well it does when you only look at the pairs it is most sure about.",
+      help: "How well it does when you only look at the pairs it is most sure about. 0 is worst, 1 is best.",
     },
   ];
 
@@ -648,18 +741,18 @@ function Metrics({ report, thresholds }) {
                   label="At the accept line"
                   line={thresholds.accept}
                   metrics={thresholds.accept_metrics}
-                  help="Pairs at or above this score are merged without review. The second figure is the cautious reading of the same test, which is what the line is set on."
+                  help="Pairs at or above this score are merged without review. The second figure is the cautious end of the range, which is what the line is set on."
                 />
                 <ThresholdRow
-                  label="At the reject line"
+                  label="At the review line"
                   line={thresholds.reject}
                   metrics={thresholds.reject_metrics}
-                  help="Pairs below this score are dropped. The second figure is again the cautious reading."
+                  help="Pairs below this score are rejected without review. The second figure is again the cautious end of the range."
                 />
               </>
             ) : (
               <tr>
-                <td>Decision lines</td>
+                <td>Accept and review lines</td>
                 <td className="mono" style={{ textAlign: "right" }}>
                   —
                 </td>
@@ -674,9 +767,9 @@ function Metrics({ report, thresholds }) {
       </div>
       {thresholds.available && (
         <p className="muted" style={{ fontSize: 11.5, margin: "6px 0 0", lineHeight: 1.5 }}>
-          The lines come from {fmtNumber(thresholds.n_test)} answers held back for testing, never
-          from a slider. The target is a precision of {thresholds.target_precision} on the cautious
-          reading.
+          The lines come from {fmtNumber(thresholds.n_test)} labels in the test set, never from a
+          slider. The target is a <Term name="precision" /> of{" "}
+          {asPercent(thresholds.target_precision)} at the cautious end of the range.
         </p>
       )}
     </div>
@@ -690,14 +783,14 @@ function ThresholdRow({ label, line, metrics, help }) {
         {label}
         {line != null && (
           <div className="mono muted" style={{ fontSize: 11 }}>
-            score {line.toFixed(2)}
+            score {fmtProb(line)}
           </div>
         )}
       </td>
       <td className="mono tnum" style={{ textAlign: "right", whiteSpace: "nowrap" }}>
         {metrics ? (
           <>
-            {fmtPct(metrics.precision, 1)}
+            precision {fmtPct(metrics.precision, 1)}
             <div className="muted" style={{ fontSize: 11 }}>
               at worst {fmtPct(metrics.precision_wilson_lower, 1)}
             </div>
@@ -803,7 +896,7 @@ function Importance({ importance }) {
         <div className="actions">
           <div className="seg">
             <button className={view === "shap" ? "on" : ""} onClick={() => setView("shap")}>
-              Pull on the score
+              Moved the score
             </button>
             <button className={view === "gain" ? "on" : ""} onClick={() => setView("gain")}>
               Splitting power
@@ -814,19 +907,26 @@ function Importance({ importance }) {
       <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <p className="muted" style={{ fontSize: 12, margin: 0, lineHeight: 1.5 }}>
           {view === "shap"
-            ? "How far each piece of evidence moves the score on an average pair, ignoring which way."
-            : "How much each piece of evidence helped the trees split the data."}
+            ? "How much each piece of evidence moved the score on an average pair, ignoring which way. The percentage is that evidence's share of all the movement."
+            : "How much each piece of evidence helped the model split the data. The percentage is that evidence's share of the total."}
         </p>
         <div className="features">
           {rows.slice(0, 18).map((f) => (
             <div className="ft" key={f.name} style={{ alignItems: "center" }}>
               <div className="lab" style={{ whiteSpace: "normal" }}>
                 {f.label || f.name}
-                <div className="mono muted" style={{ fontSize: 11 }}>
-                  {f.group}
+                <div className="muted" style={{ fontSize: 11 }}>
+                  {groupLabel(f.group)}
                 </div>
               </div>
-              <div className="bar" title={String(f.value)}>
+              <div
+                className="bar"
+                title={
+                  view === "shap"
+                    ? `moved the score by ${Math.abs(f.value || 0).toFixed(3)} on an average pair`
+                    : `splitting power ${Math.abs(f.value || 0).toFixed(3)}`
+                }
+              >
                 <i
                   style={{
                     width: `${(Math.abs(f.value || 0) / max) * 100}%`,
@@ -849,9 +949,9 @@ function Importance({ importance }) {
                 <thead>
                   <tr>
                     <th>Evidence removed</th>
-                    <th style={{ width: 90, textAlign: "right" }}>Features</th>
+                    <th style={{ width: 110, textAlign: "right" }}>Pieces of evidence</th>
                     <th style={{ width: 140, textAlign: "right" }}>Average precision</th>
-                    <th style={{ width: 110, textAlign: "right" }}>Change</th>
+                    <th style={{ width: 140, textAlign: "right" }}>Change in average precision</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -868,7 +968,7 @@ function Importance({ importance }) {
                             marginRight: 6,
                           }}
                         />
-                        {a.label || a.group}
+                        {a.label || groupLabel(a.group)}
                       </td>
                       <td className="mono tnum" style={{ textAlign: "right" }}>
                         {a.n_features}
@@ -891,9 +991,10 @@ function Importance({ importance }) {
               </table>
             </div>
             <p className="muted" style={{ fontSize: 11.5, margin: "6px 0 0", lineHeight: 1.5 }}>
-              The model was trained again without each kind of evidence. A change below zero means it
-              did worse without that evidence, so the evidence was helping. With everything in, the
-              average precision was {ablation.full == null ? "—" : ablation.full.toFixed(4)}.
+              The model was trained again without each kind of evidence. Average precision runs from
+              0 to 1. A change below zero means the model did worse without that evidence, so the
+              evidence was helping. With every piece of evidence in, the average precision was{" "}
+              {ablation.full == null ? "—" : ablation.full.toFixed(4)}.
             </p>
           </div>
         )}

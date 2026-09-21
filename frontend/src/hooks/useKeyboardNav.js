@@ -7,20 +7,24 @@ import { useEffect } from "react";
 /**
  * Binds keyboard shortcuts for navigating a review queue and applying labels.
  *
+ * The two answers a reviewer gives are Match and Not a match. The API still
+ * takes TRUE and FALSE, so the words are mapped to those values here, at the
+ * edge, and the raw values never reach the screen.
+ *
  * Keys:
- *   J / ArrowDown  — select next item
- *   K / ArrowUp    — select previous item
- *   T / Y          — label TRUE
- *   F / N          — label FALSE
- *   U              — clear label
+ *   J / ArrowDown  — select next pair
+ *   K / ArrowUp    — select previous pair
+ *   T / Y          — answer Match        (sent as TRUE)
+ *   F / N          — answer Not a match  (sent as FALSE)
+ *   U              — clear the label
  *
  * Ignores keypresses when focus is inside a textarea or input.
  *
  * @param {Object} opts
- * @param {Array}    opts.items       — filtered item list
- * @param {string}   opts.selectedId  — currently selected item ID
+ * @param {Array}    opts.items       — filtered pair list
+ * @param {string}   opts.selectedId  — currently selected pair ID
  * @param {Function} opts.setSelectedId — setter for selected ID
- * @param {Function} opts.onLabel     — (matchId, value) => void
+ * @param {Function} opts.onLabel     — (pairId, "TRUE" | "FALSE" | null) => void
  * @param {boolean}  opts.enabled     — only active when true (diff mode)
  */
 export function useKeyboardNav({ items, selectedId, setSelectedId, onLabel, enabled }) {

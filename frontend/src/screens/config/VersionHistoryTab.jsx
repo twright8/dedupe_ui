@@ -1,10 +1,11 @@
 /* ============================================================
    Config tab: Version history
    ------------------------------------------------------------
-   Every save writes a new immutable version. The diff is reported
-   per ruleset section (token lists, lookups, track rules, cleaning,
-   match keys, vetoes, linkage settings), so the shapes below are
-   read defensively: whatever the server sends is rendered as added,
+   Every save writes a new config version, which can never be
+   changed afterwards. The server reports what changed one section
+   at a time (token lists, lookups, track rules, cleaning steps,
+   match keys, veto rules, thresholds), so the shapes below are read
+   defensively: whatever the server sends is rendered as added,
    removed and changed lines.
    ============================================================ */
 
@@ -12,6 +13,7 @@ import { useState, useEffect } from "react";
 import { api } from "../../api";
 import { Icons } from "../../components/Icons";
 import { fmtDateTime } from "../../components/ProbBar";
+import { Term } from "../../components/Term";
 
 // Section names in the order they read best, with the wording the tabs use.
 const SECTION_LABELS = {
@@ -19,11 +21,12 @@ const SECTION_LABELS = {
   lookups: "Lookups",
   track_rules: "Track rules",
   default_track: "Default track",
-  "cleaning.person": "Cleaning — people",
-  "cleaning.organisation": "Cleaning — organisations",
-  cleaning: "Cleaning",
+  "cleaning.person": "Cleaning steps — people",
+  "cleaning.organisation": "Cleaning steps — organisations",
+  cleaning: "Cleaning steps",
+  derived_columns: "Derived columns",
   match_keys: "Match keys",
-  vetoes: "Vetoes",
+  vetoes: "Veto rules",
   linkage_settings: "Thresholds & Splink",
 };
 
@@ -168,7 +171,9 @@ export default function VersionHistoryTab({ versions, currentVersion, onRestore 
       <div className="card">
         <div className="card-h">
           <Icons.history size={16} />
-          <h3>Versions</h3>
+          <h3>
+            <Term name="configVersion" plural cap />
+          </h3>
         </div>
         <div>
           {versions.map((v) => {
@@ -217,9 +222,9 @@ export default function VersionHistoryTab({ versions, currentVersion, onRestore 
 
       <div className="card">
         <div className="card-h">
-          <h3>Diff: {diffLabel}</h3>
+          <h3>What changed: {diffLabel}</h3>
           <span className="muted" style={{ fontSize: 12 }}>
-            by ruleset section
+            one section at a time
           </span>
           <div className="actions">
             <button className="btn sm" onClick={handleRestore} disabled={!selected || restoring}>
@@ -228,13 +233,13 @@ export default function VersionHistoryTab({ versions, currentVersion, onRestore 
             </button>
             <button className="btn sm" onClick={copyPatch}>
               <Icons.download size={12} />
-              Copy patch
+              Copy these changes
             </button>
           </div>
         </div>
         {diffLoading ? (
           <p className="muted pulse" style={{ padding: 30, textAlign: "center" }}>
-            Loading diff...
+            Loading what changed...
           </p>
         ) : sections.length > 0 ? (
           <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -261,7 +266,7 @@ export default function VersionHistoryTab({ versions, currentVersion, onRestore 
           <p className="muted" style={{ padding: 30, textAlign: "center" }}>
             {selected
               ? "No changes between these versions."
-              : "Select a version to view its diff."}
+              : "Pick a version on the left to see what changed in it."}
           </p>
         )}
       </div>

@@ -2,8 +2,8 @@
    PublishPanel — what publishing would change, and the exports
    ------------------------------------------------------------
    A run only ever proposes entity IDs. Publishing is the one step
-   that writes them into the durable register, so this panel shows
-   the numbers first and asks for a confirmation that repeats them.
+   that writes them into the registry, so this panel shows the
+   numbers first and asks for a confirmation that repeats them.
    ============================================================ */
 
 import { useState, useEffect } from "react";
@@ -12,31 +12,59 @@ import { api } from "../api";
 import { Icons } from "./Icons";
 import { fmtNumber, fmtDateTime } from "./ProbBar";
 import { Empty } from "./Empty";
-import { exportDescription } from "../profileText";
+import { exportDescription, noun } from "../profileText";
+import { Term, TermHint } from "./Term";
 
-// Each line of the preview, with the sentence that says what it means.
-const SUMMARY_ROWS = [
-  { key: "new", label: "New entities", help: "Nothing in the register claimed these records." },
-  { key: "kept", label: "IDs kept", help: "One register entity already held the records, so its ID stands." },
-  {
-    key: "merged",
-    label: "Entities merged",
-    help: "This run joins records that the register holds under different IDs. One ID survives and the others become aliases.",
-  },
-  {
-    key: "split",
-    label: "Entities split",
-    help: "This run breaks up a register entity. The part holding the smallest record ID keeps the ID.",
-  },
-  { key: "aliases", label: "Aliases created", help: "Retired IDs that will still lead to the surviving entity." },
-  { key: "records_moved", label: "Records moved", help: "Records whose entity ID changes." },
-  {
-    key: "id_collisions",
-    label: "ID collisions",
-    help: "Two proposed entities claimed the same earlier ID. The register's claim wins and the other entity takes a new ID.",
-    warn: true,
-  },
-];
+/* Each line of the preview, with the sentence that says what it means and the
+   glossary word its label uses. */
+function summaryRows(recordPlural) {
+  const cap = recordPlural.charAt(0).toUpperCase() + recordPlural.slice(1);
+  return [
+    {
+      key: "new",
+      label: "New entities",
+      term: "entity",
+      help: `Nothing in the registry claimed these ${recordPlural}, so each one gets a new entity ID.`,
+    },
+    {
+      key: "kept",
+      label: "IDs kept",
+      term: "entityId",
+      help: `One registry entity already held these ${recordPlural}, so its ID stands.`,
+    },
+    {
+      key: "merged",
+      label: "Entities merged",
+      term: "survivingId",
+      help: `This run joins ${recordPlural} the registry holds under different IDs. One ID survives and the others are retired.`,
+    },
+    {
+      key: "split",
+      label: "Entities split",
+      term: "entity",
+      help: "This run breaks up a registry entity. The part holding the smallest record ID keeps the ID.",
+    },
+    {
+      key: "aliases",
+      label: "Retired IDs",
+      term: "retiredId",
+      help: "Entity IDs that lost a merge. Each one still leads to the ID that survived.",
+    },
+    {
+      key: "records_moved",
+      label: `${cap} moved`,
+      term: "record",
+      help: `${cap} whose entity ID changes.`,
+    },
+    {
+      key: "id_collisions",
+      label: "ID clashes",
+      term: "idClash",
+      help: "Two proposed entities claimed the same earlier ID. The registry's claim wins and the other entity takes a new ID.",
+      warn: true,
+    },
+  ];
+}
 
 /* The preview compares every proposed entity with the registry, which takes
    several seconds on a real run. It is cached per run so switching tabs does
@@ -54,6 +82,8 @@ export default function PublishPanel({ runId, run, profile }) {
 
   const counts = run?.counts || {};
   const queue = counts.reviewQueue || 0;
+  const recordPlural = noun(profile, "record_plural");
+  const SUMMARY_ROWS = summaryRows(recordPlural);
 
   function load(force) {
     if (!force && previewCache.has(runId)) {
@@ -81,11 +111,11 @@ export default function PublishPanel({ runId, run, profile }) {
       "",
       `${fmtNumber(s.new)} new entities`,
       `${fmtNumber(s.kept)} IDs kept`,
-      `${fmtNumber(s.merged)} entities merged, creating ${fmtNumber(s.aliases)} aliases`,
+      `${fmtNumber(s.merged)} entities merged, retiring ${fmtNumber(s.aliases)} IDs`,
       `${fmtNumber(s.split)} entities split`,
-      `${fmtNumber(s.records_moved)} records move to a different ID`,
+      `${fmtNumber(s.records_moved)} ${recordPlural} move to a different ID`,
       "",
-      "This writes the durable register. It is recorded in the audit log.",
+      "This writes the registry. It is recorded in the audit log.",
     ];
     if (!confirm(lines.join("\n"))) return;
     if (force && !confirm("A newer run is already published. Publishing this older run undoes the newer decisions. Are you sure?")) {
@@ -157,8 +187,9 @@ export default function PublishPanel({ runId, run, profile }) {
           }}
         >
           <span>
-            {fmtNumber(queue)} group{queue === 1 ? " is" : "s are"} still undecided. Publishing now
-            keeps them apart. You can publish again after deciding them.
+            {fmtNumber(queue)} withheld cluster{queue === 1 ? " or held group is" : "s or held groups are"}{" "}
+            still waiting for a person. Publishing now keeps their records apart. You can publish
+            again once they are settled.
           </span>
           <button
             className="btn sm"
@@ -192,7 +223,7 @@ export default function PublishPanel({ runId, run, profile }) {
           <Icons.export size={16} />
           <h3>What publishing would change</h3>
           <span className="muted" style={{ fontSize: 12 }}>
-            {fmtNumber(preview?.registry_entities)} entities in the register today
+            {fmtNumber(preview?.registry_entities)} entities in the <Term name="registry" /> today
           </span>
           <div className="actions">
             <button className="btn sm" onClick={() => load(true)}>
@@ -232,7 +263,9 @@ export default function PublishPanel({ runId, run, profile }) {
                 const isOpen = open === row.key;
                 return [
                   <tr key={row.key}>
-                    <td>{row.label}</td>
+                    <td>
+                      {row.label} {row.term && <TermHint name={row.term} />}
+                    </td>
                     <td
                       className="mono tnum"
                       style={{
@@ -280,8 +313,8 @@ export default function PublishPanel({ runId, run, profile }) {
             {publishing ? "Publishing…" : "Publish this run"}
           </button>
           <span className="muted" style={{ fontSize: 12 }}>
-            {fmtNumber(s.records_total)} records in total. Publishing writes the register once and
-            records who did it.
+            {fmtNumber(s.records_total)} {recordPlural} in total. Publishing writes the registry
+            once, and the audit log records who did it.
           </span>
         </div>
       </div>
@@ -295,7 +328,7 @@ export default function PublishPanel({ runId, run, profile }) {
         <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div>
             <div className="eyebrow" style={{ marginBottom: 6 }}>
-              This run's proposal
+              This run's proposal <TermHint name="proposal" />
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <a className="btn" href={api.runExportUrl(runId, { format: "xlsx", scope: "proposal" })}>
@@ -312,7 +345,7 @@ export default function PublishPanel({ runId, run, profile }) {
 
           <div>
             <div className="eyebrow" style={{ marginBottom: 6 }}>
-              The published register
+              The published registry <TermHint name="registry" />
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <a
@@ -325,13 +358,13 @@ export default function PublishPanel({ runId, run, profile }) {
                 <Icons.export size={14} /> CSV
               </a>
               <a className="btn ghost" href={api.registryAliasesUrl()}>
-                <Icons.link size={14} /> aliases.csv
+                <Icons.link size={14} /> Retired IDs
               </a>
             </div>
             <p className="muted" style={{ fontSize: 12, margin: "6px 0 0", lineHeight: 1.5 }}>
-              The same file built from the register rather than this run's proposal. It only works
-              once the run has been published. The aliases file lists every retired ID with the ID
-              that replaced it.
+              The same file built from the registry rather than this run's proposal. It only works
+              once the run has been published. The retired IDs file lists every retired ID beside
+              the ID that replaced it.
             </p>
           </div>
         </div>
@@ -394,8 +427,8 @@ function Examples({ kind, rows }) {
           )}
           {kind === "aliases" && (
             <>
-              <span className="mono">{r.retired_entity_id}</span> now leads to{" "}
-              <span className="mono">{r.survivor_entity_id}</span>
+              Retired <span className="mono">{r.retired_entity_id}</span> now leads to the
+              surviving ID <span className="mono">{r.survivor_entity_id}</span>
               <span className="muted"> &middot; {(r.names || []).join(" · ")}</span>
             </>
           )}

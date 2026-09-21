@@ -14,6 +14,8 @@ import ExactGroupsTable from "../components/ExactGroupsTable";
 import EntitiesTable from "../components/EntitiesTable";
 import PublishPanel from "../components/PublishPanel";
 import { useProfile } from "../profile";
+import { Term, TermHint, Provenance } from "../components/Term";
+import { noun, existingLabelName } from "../profileText";
 import {
   hasEntityCounts,
   hasExactCounts,
@@ -154,74 +156,48 @@ function UnmappedLookupValuesPanel({ run, runId, navigate }) {
   );
 }
 
-// ---------- Confusion-matrix cell ----------
-function ConfCell({ n, good, warn, note }) {
-  const bg = good
-    ? "var(--green-50)"
-    : warn
-      ? "var(--amber-50)"
-      : "var(--ti-red-50)";
-  const fg = good
-    ? "var(--green)"
-    : warn
-      ? "var(--amber)"
-      : "var(--ti-red)";
-  return (
-    <div
-      style={{
-        padding: 12,
-        background: bg,
-        border: `1px solid ${bg}`,
-        borderRadius: 5,
-        textAlign: "center",
-      }}
-    >
-      <div
-        className="mono"
-        style={{ fontSize: 22, fontWeight: 600, color: fg }}
-      >
-        {n}
-      </div>
-      <div className="muted" style={{ fontSize: 11 }}>
-        {note}
-      </div>
-    </div>
-  );
-}
-
 // ---------- Record KPI strip ----------
 // Track cards come from the profile, so a profile with different tracks gets
 // its own cards without a change here. Count keys come from trackCountKey().
 function RecordKpis({ c }) {
-  const tracks = useProfile().tracks || [];
+  const profile = useProfile();
+  const tracks = profile.tracks || [];
+  const recordPlural = noun(profile, "record_plural");
+  const recordPluralCap = recordPlural.charAt(0).toUpperCase() + recordPlural.slice(1);
   const share = (n) =>
-    fmtPct(c.recordsTotal > 0 ? (n || 0) / c.recordsTotal : 0, 1) + " of records";
+    fmtPct(c.recordsTotal > 0 ? (n || 0) / c.recordsTotal : 0, 1) + " of " + recordPlural;
 
   return (
     <div className="kpi-grid">
       <div className="kpi">
-        <div className="label">Records</div>
+        <div className="label">
+          {recordPluralCap} <TermHint name="record" />
+        </div>
         <div className="value">{fmtNumber(c.recordsTotal)}</div>
         <div className="delta muted">{fmtNumber(c.inputRows)} rows in the file</div>
       </div>
       {tracks.map((t) => (
         <div className="kpi" key={t.key}>
-          <div className="label">{t.label}</div>
+          <div className="label">
+            {t.label} <TermHint name="track" />
+          </div>
           <div className="value">{fmtNumber(c[trackCountKey(t.key)])}</div>
           <div className="delta muted">{share(c[trackCountKey(t.key)])}</div>
         </div>
       ))}
       <div className="kpi">
-        <div className="label">Already labelled</div>
+        <div className="label">
+          Already labelled <TermHint name="label" />
+        </div>
         <div className="value">{fmtNumber(c.recordsLabelled)}</div>
-        <div className="delta muted">decided in an earlier round</div>
+        <div className="delta muted">a reviewer answered these in an earlier round</div>
       </div>
       <div className="kpi">
         <div className="label">Unreviewed</div>
         <div className="value" style={{ color: "var(--amber)" }}>
           {fmtNumber(c.recordsUnreviewed)}
         </div>
-        <div className="delta muted">no decision yet</div>
+        <div className="delta muted">no reviewer has answered these</div>
       </div>
       <div className="kpi">
         <div className="label">Input rows dropped</div>
@@ -231,7 +207,7 @@ function RecordKpis({ c }) {
         >
           {fmtNumber(c.inputRowsDropped)}
         </div>
-        <div className="delta muted">unusable rows in the upload</div>
+        <div className="delta muted">rows the loader could not use</div>
       </div>
     </div>
   );
@@ -248,7 +224,7 @@ function BlockingBudgetPanel({ run, navigate }) {
   // different box on the tab, so the panel says which.
   const training = detail.phase === "training";
   const where = training ? "while pricing the training rules" : "while pricing the scoring rules";
-  const which = training ? "EM training block" : "blocking rule";
+  const which = training ? "training rule" : "blocking rule";
 
   return (
     <div className="card" style={{ borderColor: "var(--ti-red-200, #f3c2c2)", marginBottom: 16 }}>
@@ -269,21 +245,33 @@ function BlockingBudgetPanel({ run, navigate }) {
           <table className="t" style={{ borderRadius: 0, tableLayout: "fixed" }}>
             <thead>
               <tr>
-                <th style={{ width: 70 }}>Rule</th>
+                <th style={{ minWidth: 220 }}>
+                  Blocking rule <TermHint name="blockingRule" />
+                </th>
                 <th>What it blocks on</th>
-                <th style={{ width: 140, textAlign: "right" }}>Pairs</th>
+                <th style={{ width: 140, textAlign: "right" }}>
+                  Pairs <TermHint name="pair" />
+                </th>
               </tr>
             </thead>
             <tbody>
               {rules.map((r, i) => (
                 <tr key={r.id || i}>
-                  <td className="mono">{r.id}</td>
                   <td style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
-                    {r.description || <span className="muted">(no description)</span>}
-                    {r.sql && (
+                    {r.description || <span className="muted">This rule has no description</span>}
+                    {r.id && (
                       <div className="mono muted" style={{ fontSize: 11 }}>
-                        {r.sql}
+                        {r.id}
                       </div>
+                    )}
+                  </td>
+                  <td style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
+                    {r.sql ? (
+                      <span className="mono muted" style={{ fontSize: 11 }}>
+                        {r.sql}
+                      </span>
+                    ) : (
+                      <span className="muted">—</span>
                     )}
                   </td>
                   <td
@@ -342,9 +330,11 @@ function UntrainedComparisonsNote({ count, navigate }) {
 }
 
 // ---------- Contradictions callout ----------
-// A reviewer said two records are not the same and an exact key merged them
-// anyway. That is a rule bug, not a review task, so it gets said loudly.
+// A reviewer said two records are not the same and a match key merged them
+// anyway. That is a config fault, not a review task, so it gets said loudly.
 function ContradictionsPanel({ runId, count }) {
+  const profile = useProfile();
+  const recordPlural = noun(profile, "record_plural");
   const [rows, setRows] = useState(null);
   const [open, setOpen] = useState(false);
 
@@ -369,8 +359,9 @@ function ContradictionsPanel({ runId, count }) {
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <Icons.alert size={15} />
         <span style={{ fontSize: 13 }}>
-          <strong>{fmtNumber(count)}</strong> pair{count === 1 ? "" : "s"} an exact key merged
-          although a reviewer had said they are not the same. A match key is too loose.
+          <strong>{fmtNumber(count)}</strong> <Term name="pair" plural={count !== 1} /> a{" "}
+          <Term name="matchKey" /> merged, although a reviewer had already said they are not the
+          same. One match key is too loose.
         </span>
         <button className="btn sm" style={{ marginLeft: "auto" }} onClick={() => setOpen((v) => !v)}>
           {open ? "Hide" : "Show them"}
@@ -391,9 +382,16 @@ function ContradictionsPanel({ runId, count }) {
               <table className="t" style={{ borderRadius: 0 }}>
                 <thead>
                   <tr>
-                    <th>Records a reviewer kept apart</th>
-                    <th style={{ width: 150 }}>Merged by</th>
-                    <th style={{ width: 160 }}>Group</th>
+                    <th>
+                      {recordPlural.charAt(0).toUpperCase() + recordPlural.slice(1)} a reviewer
+                      kept apart <TermHint name="record" />
+                    </th>
+                    <th style={{ width: 170 }}>
+                      How it was decided <TermHint name="matchKey" />
+                    </th>
+                    <th style={{ width: 160 }}>
+                      Exact group <TermHint name="exactGroup" />
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -405,11 +403,18 @@ function ContradictionsPanel({ runId, count }) {
                           {r.record_id_a} ↔ {r.record_id_b}
                         </div>
                       </td>
-                      <td className="mono" style={{ fontSize: 12 }}>
-                        {(r.key_ids || []).join(", ") || r.key_id || "—"}
+                      <td>
+                        <Provenance
+                          kind="decided_by"
+                          value="exact_key"
+                          detail={(r.key_ids || []).join(", ") || r.key_id || null}
+                          size="sm"
+                        />
                       </td>
-                      <td className="mono" style={{ fontSize: 12 }}>
-                        {r.group_id || "—"}
+                      <td>
+                        <span className="muted mono" style={{ fontSize: 11 }}>
+                          {r.group_id || "—"}
+                        </span>
                       </td>
                     </tr>
                   ))}
@@ -423,15 +428,25 @@ function ContradictionsPanel({ runId, count }) {
   );
 }
 
-/* How the proposed IDs line up with the earlier manual grouping. The backend
-   adds this to score-eval, so the card only appears once it is there. */
+/* How the proposed IDs line up with the earlier grouping. The backend adds
+   this to score-eval, so the card only appears once it is there. */
 const REASON_LABELS = {
-  merged_two_earlier_groups: "Joined two earlier groups",
-  split: "Split an earlier group",
-  collision_re_mint: "Given a new ID after a collision",
+  merged_two_earlier_groups: "Joined two groups the earlier grouping kept apart",
+  split: "Split a group the earlier grouping had joined",
+  collision_re_mint: "Took a new ID after an ID clash",
 };
 
+// A reason the backend adds later must still read as words, never as a key.
+function reasonLabel(key) {
+  if (REASON_LABELS[key]) return REASON_LABELS[key];
+  const words = String(key || "").replace(/_/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "";
+}
+
 function VersusEarlierIds({ scoreEval }) {
+  const profile = useProfile();
+  const earlier = existingLabelName(profile) || "earlier grouping";
+  const recordPlural = noun(profile, "record_plural");
   const v = scoreEval?.versus_existing_entity_id;
   const entities = scoreEval?.entities;
   if (!v && !entities) return null;
@@ -444,8 +459,10 @@ function VersusEarlierIds({ scoreEval }) {
         <h3>The proposed IDs against the earlier ones</h3>
         {entities && (
           <span className="muted" style={{ fontSize: 12 }}>
-            pair precision {entities.pair_precision == null ? "—" : fmtPct(entities.pair_precision, 1)}{" "}
-            · pair recall {entities.pair_recall == null ? "—" : fmtPct(entities.pair_recall, 1)}
+            pair precision <TermHint name="pairPrecision" />{" "}
+            {entities.pair_precision == null ? "—" : fmtPct(entities.pair_precision, 1)}{" "}
+            · pair recall <TermHint name="pairRecall" />{" "}
+            {entities.pair_recall == null ? "—" : fmtPct(entities.pair_recall, 1)}
           </span>
         )}
       </div>
@@ -453,8 +470,9 @@ function VersusEarlierIds({ scoreEval }) {
         {v && (
           <div style={{ fontSize: 13.5 }}>
             <strong>{fmtNumber(v.identical_records)}</strong> of{" "}
-            {fmtNumber(v.labelled_records)} records that already had an ID keep exactly the same
-            grouping. <strong>{fmtNumber(v.different_records)}</strong> are grouped differently.
+            {fmtNumber(v.labelled_records)} {recordPlural} that already had an{" "}
+            <Term name="earlierId" /> keep exactly the same grouping.{" "}
+            <strong>{fmtNumber(v.different_records)}</strong> are grouped differently.
           </div>
         )}
         {reasons.length > 0 && (
@@ -463,13 +481,16 @@ function VersusEarlierIds({ scoreEval }) {
               <thead>
                 <tr>
                   <th style={{ minWidth: 220 }}>Why it differs</th>
-                  <th style={{ width: 110, textAlign: "right" }}>Records</th>
+                  <th style={{ width: 110, textAlign: "right" }}>
+                    {recordPlural.charAt(0).toUpperCase() + recordPlural.slice(1)}{" "}
+                    <TermHint name="record" />
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {reasons.map(([key, n]) => (
                   <tr key={key}>
-                    <td>{REASON_LABELS[key] || key}</td>
+                    <td>{reasonLabel(key)}</td>
                     <td className="mono tnum" style={{ textAlign: "right" }}>
                       {fmtNumber(n)}
                     </td>
@@ -480,8 +501,10 @@ function VersusEarlierIds({ scoreEval }) {
           </div>
         )}
         <p className="muted" style={{ fontSize: 11.5, margin: 0, lineHeight: 1.5 }}>
-          A record can appear under more than one reason, so these numbers do not add up to the
-          records that differ. {v?.circular}
+          Pair precision is the share of the pairs this run joins that the {earlier} had already
+          joined. Pair recall is the share of the pairs the {earlier} joined that this run joins
+          too. One {noun(profile, "record")} can appear under more than one reason, so these
+          numbers do not add up to the {recordPlural} that differ. {v?.circular}
         </p>
       </div>
     </div>
@@ -489,15 +512,17 @@ function VersusEarlierIds({ scoreEval }) {
 }
 
 // ---------- Entity KPI strip ----------
-// The last row on the summary: what stage 5 proposed, and what is still
-// waiting for a person before the run can be published.
+// The last row on the summary: the entity IDs the run proposes, and what is
+// still waiting for a person before the run can be published.
 function EntityKpis({ c, onQueue }) {
   const collisions = c.idCollisions || 0;
   const ties = c.attributeTies || 0;
   return (
     <div className="kpi-grid">
       <div className="kpi">
-        <div className="label">Entities proposed</div>
+        <div className="label">
+          Entities proposed <TermHint name="entity" />
+        </div>
         <div className="value">{fmtNumber(c.entitiesProposed)}</div>
         <div className="delta muted">
           {fmtNumber(c.entitiesNew)} new · {fmtNumber(c.entitiesKept)} kept ·{" "}
@@ -510,18 +535,22 @@ function EntityKpis({ c, onQueue }) {
         style={{ cursor: "pointer" }}
         title="Open the cluster review queue"
       >
-        <div className="label">Withheld groups</div>
+        <div className="label">
+          Withheld clusters <TermHint name="withheldCluster" />
+        </div>
         <div className="value" style={{ color: "var(--amber)" }}>
           {fmtNumber(c.clustersWithheld)}
         </div>
-        <div className="delta muted">the gate did not settle these</div>
+        <div className="delta muted">the gate held these back for a person</div>
       </div>
       <div className="kpi" onClick={onQueue} style={{ cursor: "pointer" }}>
-        <div className="label">Held groups open</div>
+        <div className="label">
+          Held groups <TermHint name="heldGroup" />
+        </div>
         <div className="value" style={{ color: "var(--amber)" }}>
           {fmtNumber(c.heldGroupsOpen)}
         </div>
-        <div className="delta muted">a match key guard stopped these</div>
+        <div className="delta muted">a guard stopped a match key merging these</div>
       </div>
       <div className="kpi">
         <div className="label">Attribute ties</div>
@@ -531,79 +560,96 @@ function EntityKpis({ c, onQueue }) {
         <div className="delta muted">no single value was the most common</div>
       </div>
       <div className="kpi">
-        <div className="label">ID collisions</div>
+        <div className="label">
+          ID clashes <TermHint name="idClash" />
+        </div>
         <div className="value" style={collisions > 0 ? { color: "var(--ti-red)" } : undefined}>
           {fmtNumber(collisions)}
         </div>
         <div className="delta muted">
           {collisions > 0
-            ? "two entities claimed one earlier ID, so one took a new one"
+            ? "two proposed entities claimed one earlier ID, so one took a new ID"
             : "no earlier ID was claimed twice"}
         </div>
       </div>
       <div className="kpi">
-        <div className="label">Decisions made</div>
+        <div className="label">
+          Group decisions <TermHint name="groupDecision" />
+        </div>
         <div className="value">{fmtNumber(c.decisionsTotal)}</div>
-        <div className="delta muted">groups a person has settled</div>
+        <div className="delta muted">clusters and held groups a person has settled</div>
       </div>
     </div>
   );
 }
 
-// One line saying which score decided this run's pairs.
-export function decidedBy(counts) {
+// One line naming the scorer in force for the whole run.
+export function scoredBy(counts) {
   if (!counts?.modelActive) return "Splink score";
   const versions = counts.modelVersion || {};
   const list = Object.values(versions);
   const v = list.length === 1 ? `v${list[0]}` : list.map((n) => `v${n}`).join(" / ");
-  return `Model ${v} (${counts.modelGraded ? "graded" : "cold start"})`;
+  return `Model score ${v} (${counts.modelGraded ? "graded model" : "new model"})`;
 }
 
 // ---------- Scoring KPI strip ----------
-// The third row on the summary, once stage 3 has scored the pairs.
+// The third row on the summary, once the run has scored its pairs.
 function ScoreKpis({ c, onReview, onVetoed }) {
+  const profile = useProfile();
+  const earlier = existingLabelName(profile) || "earlier grouping";
   const disagrees = c.pairsImportDisagrees || 0;
   const vetoed = c.pairsVetoed || 0;
   return (
     <div className="kpi-grid">
       <div className="kpi">
-        <div className="label">Decided by</div>
+        <div className="label">
+          Scored by <TermHint name="scorer" />
+        </div>
         <div className="value" style={{ fontSize: 17 }}>
-          {decidedBy(c)}
+          {scoredBy(c)}
         </div>
         <div className="delta muted">
           {c.modelActive
             ? c.modelGraded
-              ? "the model sets the buckets"
-              : "the model only re-orders the queue"
-            : "no model applied to this run"}
+              ? "this model has been measured against the test set, so it sets the buckets"
+              : "this model has not been measured against the test set, so it only re-orders the review queue"
+            : "no model was applied to this run"}
         </div>
       </div>
       <div className="kpi">
-        <div className="label">Units compared</div>
+        <div className="label">
+          Units compared <TermHint name="unit" />
+        </div>
         <div className="value">{fmtNumber(c.unitsTotal)}</div>
         <div className="delta muted">{fmtNumber(c.pairsScored)} pairs scored</div>
       </div>
       <div className="kpi">
-        <div className="label">Auto-accepted</div>
+        <div className="label">
+          Accepted <TermHint name="bucket" />
+        </div>
         <div className="value" style={{ color: "var(--green)" }}>
           {fmtNumber(c.pairsAccept)}
         </div>
         <div className="delta muted">
-          {fmtNumber(c.pairsDecidedByImport)} of them on an earlier entity ID
+          {fmtNumber(c.pairsDecidedByImport)} of them because both sides already carried the same
+          earlier ID
         </div>
       </div>
       <div className="kpi" onClick={onReview} style={{ cursor: "pointer" }} title="Open the review queue">
-        <div className="label">To review</div>
+        <div className="label">
+          For review <TermHint name="bucket" />
+        </div>
         <div className="value" style={{ color: "var(--amber)" }}>
           {fmtNumber(c.pairsReview)}
         </div>
         <div className="delta muted">open the review queue</div>
       </div>
       <div className="kpi">
-        <div className="label">Rejected</div>
+        <div className="label">
+          Rejected <TermHint name="bucket" />
+        </div>
         <div className="value">{fmtNumber(c.pairsReject)}</div>
-        <div className="delta muted">below the review floor</div>
+        <div className="delta muted">scored below the review line</div>
       </div>
       <div className="kpi">
         <div className="label">Entities after scoring</div>
@@ -611,7 +657,9 @@ function ScoreKpis({ c, onReview, onVetoed }) {
         <div className="delta muted">was {fmtNumber(c.unitsTotal)} units</div>
       </div>
       <div className="kpi">
-        <div className="label">Earlier labels disagree</div>
+        <div className="label">
+          The {earlier} disagrees <TermHint name="earlierGrouping" />
+        </div>
         <div className="value" style={disagrees > 0 ? { color: "var(--amber)" } : undefined}>
           {fmtNumber(disagrees)}
         </div>
@@ -624,64 +672,86 @@ function ScoreKpis({ c, onReview, onVetoed }) {
           className="kpi"
           onClick={onVetoed}
           style={{ cursor: "pointer" }}
-          title="Open the review queue, filtered to the pairs a rule stopped"
+          title="Open the review queue, filtered to the pairs a veto rule stopped"
         >
-          <div className="label">Stopped by rules</div>
+          <div className="label">
+            Stopped by a veto rule <TermHint name="veto" />
+          </div>
           <div className="value" style={{ color: "var(--amber)" }}>
             {fmtNumber(vetoed)}
           </div>
           <div className="delta muted">
             {fmtNumber(c.pairsVetoedFromAccept || 0)} would have been accepted
             {c.vetoConflictsImport
-              ? ` · ${fmtNumber(c.vetoConflictsImport)} the earlier grouping accepted anyway`
+              ? ` · ${fmtNumber(c.vetoConflictsImport)} the ${earlier} accepted anyway`
               : ""}
           </div>
         </div>
       )}
       <div className="kpi">
-        <div className="label">Pair precision</div>
+        <div className="label">
+          Pair precision <TermHint name="pairPrecision" />
+        </div>
         <div className="value">
           {c.scorePairPrecision == null ? "—" : fmtPct(c.scorePairPrecision, 1)}
         </div>
-        <div className="delta muted">of pairs this run joins, the manual work agreed</div>
+        <div className="delta muted">
+          of the pairs this run joins, the share the {earlier} had already joined
+        </div>
       </div>
       <div className="kpi">
-        <div className="label">Pair recall</div>
+        <div className="label">
+          Pair recall <TermHint name="pairRecall" />
+        </div>
         <div className="value">
           {c.scorePairRecall == null ? "—" : fmtPct(c.scorePairRecall, 1)}
         </div>
-        <div className="delta muted">of pairs the manual work joined, this run finds</div>
+        <div className="delta muted">
+          of the pairs the {earlier} joined, the share this run joins too
+        </div>
       </div>
     </div>
   );
 }
 
-// ---------- Exact-key KPI strip ----------
-// The second row on the summary once the exact keys have run: what merged, what
-// is waiting for a human, and how the result sits against the earlier labels.
+// ---------- Match-key KPI strip ----------
+// The second row on the summary once the match keys have run: what merged, what
+// a guard held back, and how the result sits against the earlier grouping.
 function ExactKpis({ c, onConflicts }) {
+  const profile = useProfile();
+  const earlier = existingLabelName(profile) || "earlier grouping";
+  const recordPlural = noun(profile, "record_plural");
+  const recordPluralCap = recordPlural.charAt(0).toUpperCase() + recordPlural.slice(1);
   const conflicts = c.exactConflicts || 0;
   return (
     <div className="kpi-grid">
       <div className="kpi">
-        <div className="label">Entities after exact keys</div>
+        <div className="label">
+          Entities after the match keys <TermHint name="matchKey" />
+        </div>
         <div className="value">{fmtNumber(c.exactEntitiesAfter)}</div>
-        <div className="delta muted">was {fmtNumber(c.recordsTotal)} records</div>
-      </div>
-      <div className="kpi">
-        <div className="label">Records merged</div>
-        <div className="value">{fmtNumber(c.exactMergedRecords)}</div>
         <div className="delta muted">
-          into {fmtNumber(c.exactMergedGroups)} group{c.exactMergedGroups === 1 ? "" : "s"}
+          was {fmtNumber(c.recordsTotal)} {recordPlural}
         </div>
       </div>
       <div className="kpi">
-        <div className="label">Held for review</div>
+        <div className="label">
+          {recordPluralCap} merged <TermHint name="exactGroup" />
+        </div>
+        <div className="value">{fmtNumber(c.exactMergedRecords)}</div>
+        <div className="delta muted">
+          into {fmtNumber(c.exactMergedGroups)} exact group{c.exactMergedGroups === 1 ? "" : "s"}
+        </div>
+      </div>
+      <div className="kpi">
+        <div className="label">
+          Held groups <TermHint name="heldGroup" />
+        </div>
         <div className="value" style={{ color: "var(--amber)" }}>
           {fmtNumber(c.exactHeldGroups)}
         </div>
         <div className="delta muted">
-          {fmtNumber(c.exactHeldRecords)} records a guard stopped
+          {fmtNumber(c.exactHeldRecords)} {recordPlural} a guard stopped merging
         </div>
       </div>
       <div
@@ -690,23 +760,33 @@ function ExactKpis({ c, onConflicts }) {
         style={conflicts > 0 ? { cursor: "pointer" } : undefined}
         title={conflicts > 0 ? "Open the Exact groups tab, filtered to conflicts" : undefined}
       >
-        <div className="label">Conflicts with earlier labels</div>
+        <div className="label">Conflicts with the {earlier}</div>
         <div className="value" style={conflicts > 0 ? { color: "var(--ti-red)" } : undefined}>
           {fmtNumber(conflicts)}
         </div>
         <div className="delta muted">
-          {conflicts > 0 ? "groups joining different entity IDs — open them" : "no group joins two entity IDs"}
+          {conflicts > 0
+            ? "exact groups that join different earlier IDs — open them"
+            : "no exact group joins two earlier IDs"}
         </div>
       </div>
       <div className="kpi">
-        <div className="label">Pair precision</div>
+        <div className="label">
+          Pair precision <TermHint name="pairPrecision" />
+        </div>
         <div className="value">{fmtPct(c.exactPairPrecision, 1)}</div>
-        <div className="delta muted">of pairs these keys join, the manual work agreed</div>
+        <div className="delta muted">
+          of the pairs these match keys join, the share the {earlier} had already joined
+        </div>
       </div>
       <div className="kpi">
-        <div className="label">Pair recall</div>
+        <div className="label">
+          Pair recall <TermHint name="pairRecall" />
+        </div>
         <div className="value">{fmtPct(c.exactPairRecall, 1)}</div>
-        <div className="delta muted">of pairs the manual work joined, these keys find</div>
+        <div className="delta muted">
+          of the pairs the {earlier} joined, the share these match keys find
+        </div>
       </div>
     </div>
   );
@@ -782,6 +862,9 @@ class PanelErrorBoundary extends Component {
 function RunSummary({ run, onReview, onVetoed, onConflicts, onQueue }) {
   const c = run.counts;
   const navigate = useNavigate();
+  const profile = useProfile();
+  const recordPlural = noun(profile, "record_plural");
+  const recordsTab = recordPlural.charAt(0).toUpperCase() + recordPlural.slice(1);
   const [diagData, setDiagData] = useState(null);
   const [labelStats, setLabelStats] = useState(null);
   const [scoreEval, setScoreEval] = useState(null);
@@ -809,8 +892,8 @@ function RunSummary({ run, onReview, onVetoed, onConflicts, onQueue }) {
   if (!c || (!pairs && !records)) {
     return (
       <Empty
-        title="No match data"
-        sub={run.error || "This run did not produce match results."}
+        title="Nothing to summarise"
+        sub={run.error || "This run produced no records and no pairs."}
       />
     );
   }
@@ -833,7 +916,11 @@ function RunSummary({ run, onReview, onVetoed, onConflicts, onQueue }) {
       <div className="card">
         <div className="card-h">
           <Icons.table size={16} />
-          <h3>{exact || pairs ? "What this run did" : "Records loaded"}</h3>
+          <h3>
+            {exact || pairs
+              ? "What this run did"
+              : recordPlural.charAt(0).toUpperCase() + recordPlural.slice(1) + " loaded"}
+          </h3>
           {pairs && (
             <div className="actions">
               <button className="btn primary" onClick={onReview}>
@@ -846,24 +933,28 @@ function RunSummary({ run, onReview, onVetoed, onConflicts, onQueue }) {
           <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.6 }}>
             {pairs ? (
               <>
-                This run read the input file, sorted every record into a track, cleaned it, merged
-                records that share a match key, and scored every pair the blocking rules let
-                through. Open <strong>Review</strong> to answer the uncertain ones. Clustering and
-                durable entity IDs are not built yet, so nothing is published from here.
+                This run read the input file, sorted every {noun(profile, "record")} onto a{" "}
+                <Term name="track" />, cleaned it, merged {recordPlural} that share a{" "}
+                <Term name="matchKey" />, and scored every <Term name="pair" /> the blocking rules
+                let through. Open <strong>Review</strong> to answer the uncertain ones. The{" "}
+                <strong>{recordsTab}</strong> tab holds every one it loaded.
               </>
             ) : exact ? (
               <>
-                This run read the input file, sorted every record into a track, cleaned it with the
-                config's rules, and merged records that share a match key. Open the{" "}
-                <strong>Records</strong> tab to read the records, or <strong>Exact groups</strong>{" "}
-                to see what merged and what a guard held back. Scoring, the review queue and
-                durable entity IDs are not built yet.
+                This run read the input file, sorted every {noun(profile, "record")} onto a{" "}
+                <Term name="track" />, cleaned it with the config's cleaning steps, and merged{" "}
+                {recordPlural} that share a <Term name="matchKey" />. Open the{" "}
+                <strong>{recordsTab}</strong> tab to read them, or{" "}
+                <strong>Exact groups</strong> to see
+                what merged and what a <Term name="guard" /> held back. Scoring and the review
+                queue have not run for this one.
               </>
             ) : (
               <>
-                This run read the input file and sorted every record into a track. Open the{" "}
-                <strong>Records</strong> tab to read them. Matching, the review queue and entity IDs
-                are not built yet.
+                This run read the input file and sorted every {noun(profile, "record")} onto a{" "}
+                <Term name="track" />. Open the <strong>{recordsTab}</strong> tab to read them.
+                Matching
+                and the review queue have not run for this one.
               </>
             )}
           </p>
@@ -880,8 +971,8 @@ function RunSummary({ run, onReview, onVetoed, onConflicts, onQueue }) {
 const SPLINK_CHARTS = [
   {
     file: "match_weights",
-    label: "Match weights",
-    help: "How much each comparison level pushes a pair towards a match or away from one.",
+    label: "How much each level counts",
+    help: "How far each comparison level pushes a pair towards a match, or away from one.",
   },
   {
     file: "m_u_parameters",
@@ -991,18 +1082,14 @@ function RunDiagnostics({ runId, untrained }) {
     );
   }
 
-  const hist = diag.histogram || diag.hist || [];
-  const maxBin = Math.max(...hist, 1);
-  const thresholdHigh = +(diag.thresholds?.threshold_high ?? 0.92);
-  const thresholdReview = +(diag.thresholds?.threshold_review ?? 0.5);
-  const scoreColumn = diag.score_column === "gbt_score" ? "GBT score" : "Splink probability";
-  const pct = (v) => `${Math.max(0, Math.min(1, v)) * 100}%`;
-  // Whatever comparisons the run actually used. There is no stand-in list: made-up
-  // weights from the ROE tool were worse than showing nothing.
-  const features = (diag.features || []).filter((f) => f.lab !== "suffix_norm");
-
-  const confusion = diag.confusion || null;
+  // Which of the two scores this run was read on. Both names are the
+  // glossary's, and they are used only where both could be meant.
+  const scoreName = diag.score_column === "gbt_score" ? "model score" : "Splink score";
   const examples = diag.cleaning_examples || diag.examples || [];
+  // A cleaning example's last column is the cleaned name the match keys use. It
+  // is shown under the profile's own label for that column, never its key.
+  const cleanedLabel =
+    (profile.display_columns || []).find((c) => c.key === "clean_name")?.label || "Cleaned name";
 
   return (
     <div
@@ -1010,9 +1097,9 @@ function RunDiagnostics({ runId, untrained }) {
     >
       <UntrainedComparisonsNote count={untrained} navigate={navigate} />
 
-      {/* The review screen draws this distribution properly: every scored pair by
-          bucket, the lines, the import split, the model score and a brush. One
-          chart, in one place, rather than a second empty one here. */}
+      {/* The review screen draws this distribution properly: every pair by
+          bucket, the lines, the earlier-grouping split, the model score and a
+          brush. One chart, in one place, rather than a second empty one here. */}
       <div className="card">
         <div className="card-h">
           <Icons.spark size={16} />
@@ -1020,9 +1107,11 @@ function RunDiagnostics({ runId, untrained }) {
         </div>
         <div className="card-b" style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <p className="muted" style={{ fontSize: 13, margin: 0, lineHeight: 1.55, flex: "1 1 340px" }}>
-            The review queue draws the whole distribution: every scored pair by bucket, the accept
-            and review lines, whether the earlier labels agree, and the model's score once one has
-            been applied. You can drag a band there to label it.
+            This run is read on the {scoreName}. The review queue draws the whole distribution:
+            every <Term name="pair" /> by <Term name="bucket" />, the{" "}
+            <Term name="acceptLine" /> and the <Term name="reviewLine" />, whether the earlier
+            grouping agrees, and the model score once a model is in force. You can drag a band
+            there to label it.
           </p>
           <button className="btn" onClick={() => navigate(`/runs/${runId}/review`)}>
             <Icons.review size={14} /> Open the review queue
@@ -1030,8 +1119,8 @@ function RunDiagnostics({ runId, untrained }) {
         </div>
       </div>
 
-      {/* GBT model: train / apply / active learning.
-          (Threshold tuning + mark-by-range now live inline on the Review queue.) */}
+      {/* The trained model: train, apply, active learning.
+          (Line tuning and mark-by-band now live inline on the Review queue.) */}
       <ModelPanel runId={runId} />
 
       <SplinkCharts runId={runId} tracks={tracks} />
@@ -1040,7 +1129,9 @@ function RunDiagnostics({ runId, untrained }) {
       {examples.length > 0 && (
         <div className="card">
           <div className="card-h">
-            <h3>Cleaning pipeline &middot; examples</h3>
+            <h3>
+              Cleaning steps &middot; examples <TermHint name="cleaningStep" />
+            </h3>
           </div>
           <div className="card-b" style={{ padding: 0 }}>
             <table className="t" style={{ borderRadius: 0 }}>
@@ -1050,7 +1141,7 @@ function RunDiagnostics({ runId, untrained }) {
                   <th>After whitespace</th>
                   <th>After punctuation</th>
                   <th>After suffix family</th>
-                  <th>Final clean_name</th>
+                  <th>{cleanedLabel}</th>
                 </tr>
               </thead>
               <tbody>
@@ -1255,10 +1346,16 @@ function RunHistory({ runId }) {
 
 // ---------- Live progress panel (for in-progress runs) ----------
 function RunProgress({ runId }) {
-  const { events, currentStage, status, isConnected } =
-    useRunProgress(runId);
+  const { events, status, isConnected } = useRunProgress(runId);
 
   if (!isConnected && events.length === 0) return null;
+
+  // Stages are named, never numbered. The name comes from the newest event
+  // that carries one; an event stream with no names says nothing here.
+  const stageName = [...events]
+    .reverse()
+    .map((e) => e.stage_name || e.stage_label)
+    .find((s) => typeof s === "string" && s.trim());
 
   return (
     <div className="card" style={{ borderColor: "var(--blue)" }}>
@@ -1280,9 +1377,9 @@ function RunProgress({ runId }) {
         </div>
       </div>
       <div className="card-b">
-        {currentStage !== null && (
+        {stageName && (
           <div style={{ marginBottom: 8, fontWeight: 500 }}>
-            Stage {currentStage}
+            Now running: {stageName}
           </div>
         )}
         <div
@@ -1368,6 +1465,8 @@ export default function RunDetailScreen() {
     );
   }
 
+  const recordPlural = noun(profile, "record_plural");
+  const recordsTab = recordPlural.charAt(0).toUpperCase() + recordPlural.slice(1);
   const isRunning =
     run.status === "running" || run.status === "queued";
   const buckets = run.counts;
@@ -1488,7 +1587,7 @@ export default function RunDetailScreen() {
       <div className="tabs">
         {[
           { id: "summary", lab: "Summary" },
-          { id: "records", lab: "Records" },
+          { id: "records", lab: recordsTab },
           ...(exact ? [{ id: "exact", lab: "Exact groups" }] : []),
           ...(entities ? [{ id: "entities", lab: "Entities" }] : []),
           ...(entities ? [{ id: "publish", lab: "Publish & export" }] : []),

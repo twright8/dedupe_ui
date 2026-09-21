@@ -1,11 +1,11 @@
 /* ============================================================
    Config tabs — pieces every tab shares
    ------------------------------------------------------------
-   The Config screen holds one draft ruleset and hands it to each
+   The Config screen holds one draft config and hands it to each
    tab. Everything in here is about reading that draft: which tab a
-   validation error belongs to, which columns a step may read, and
-   the few small inputs (token-list picker, column combo, move
-   buttons) that more than one tab needs.
+   validation error belongs to, which columns a cleaning step may
+   read, and the few small inputs (token-list picker, column combo,
+   move buttons) that more than one tab needs.
    ============================================================ */
 
 import { useState, useEffect, useRef } from "react";
@@ -14,7 +14,7 @@ import { Icons } from "../../components/Icons";
 
 // ---------- draft shape ----------
 
-// A ruleset from the server may be missing sections, and a very old version may
+// A config from the server may be missing sections, and a very old version may
 // not have one at all. Fill the gaps so no tab has to guard every read. Unknown
 // keys are kept, so saving never silently drops something we don't edit yet.
 export function normalizeRuleset(raw) {
@@ -109,7 +109,7 @@ export function pathTail(path) {
 // ---------- small shared components ----------
 
 /* Warnings read exactly like errors, in amber. A warning never blocks a save:
-   it says the rule will work and do less than the author expects. */
+   it says the row will work and do less than the author expects. */
 export function RowWarnings({ warnings, colSpan }) {
   if (!warnings || warnings.length === 0) return null;
   return (
@@ -162,7 +162,7 @@ export function SectionWarnings({ warnings }) {
   );
 }
 
-// The red line under a table row that carries a rule's validation messages.
+// The red line under a table row that carries that row's validation messages.
 export function RowErrors({ errors, colSpan }) {
   if (!errors || errors.length === 0) return null;
   return (
@@ -265,8 +265,10 @@ export function ColumnCombo({ value, onChange, options, placeholder, style }) {
   );
 }
 
-// The description of a rule or a step. It is the line a non-technical reader
-// goes by, so it never truncates: a textarea that grows to fit its text.
+// The description of one row — a track rule, a cleaning step, a derived column
+// rule, a match key, a veto rule or a blocking rule. It is the line a
+// non-technical reader goes by, so it never truncates: a textarea that grows
+// to fit its text.
 export function DescriptionInput({ value, onChange, placeholder }) {
   const ref = useRef(null);
 

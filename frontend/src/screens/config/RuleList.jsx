@@ -1,14 +1,18 @@
 /* ============================================================
    RuleList — an ordered list of "when all of these hold" rules
    ------------------------------------------------------------
-   Track rules and derived-column rules are the same form: an
+   Track rules and derived column rules are the same form: an
    ordered list, each row a description, one to three conditions,
-   and a result. Only three things differ, so they are props: which
-   columns the conditions may read, how the result is edited, and
-   the path validation errors arrive under.
+   and a result. Only a few things differ, so they are props: which
+   columns the conditions may read, how the result is edited, the
+   path validation errors arrive under, and the noun the calling tab
+   uses for one row. That last one matters: "rule" on its own means
+   five different things on the Config screen, so this component
+   never writes it. Every caller supplies its own word.
    ============================================================ */
 
 import { Icons } from "../../components/Icons";
+import { TermHint } from "../../components/Term";
 import {
   DescriptionInput,
   MoveButtons,
@@ -43,7 +47,7 @@ function argKind(op) {
 }
 
 // Switching operator drops arguments the new operator cannot use, so a saved
-// rule never carries a stale `values` list behind a `matches`.
+// row never carries a stale `values` list behind a `matches`.
 export function retypeCondition(cond, op) {
   const kind = argKind(op);
   const next = { column: cond.column || "", op };
@@ -151,7 +155,7 @@ function ConditionRow({ cond, onChange, onRemove, columns, tokenLists, canRemove
 }
 
 /* The "when all of these hold" block on its own, so a match key's condition can
-   use the very same builder as a track rule or a derived-column rule. */
+   use the very same builder as a track rule or a derived column rule. */
 export function ConditionList({ conditions, onChange, columns, tokenLists, emptyNote, max = MAX_CONDITIONS }) {
   const list = Array.isArray(conditions) ? conditions : [];
   return (
@@ -189,12 +193,15 @@ export function ConditionList({ conditions, onChange, columns, tokenLists, empty
  * @param rules        the ordered list
  * @param editRules    (list => list) => void
  * @param columns      [{key, label}] the conditions may read
- * @param tokenLists   the ruleset's token lists
+ * @param tokenLists   the config version's token lists
  * @param errors       validation errors already filtered to this tab
  * @param pathPrefix   e.g. "track_rules" or "derived_columns[0].rules"
+ * @param noun         this tab's word for one row: "track rule",
+ *                     "derived column rule". Never a bare "rule".
+ * @param termName     the glossary key behind that noun, for the "?"
  * @param resultHeader the last column's heading
- * @param renderResult (rule, onChange) => JSX
- * @param makeRule     (existingIds) => a new rule
+ * @param renderResult (row, onChange) => JSX
+ * @param makeRule     (existingIds) => a new row
  */
 export default function RuleList({
   rules,
@@ -203,6 +210,8 @@ export default function RuleList({
   tokenLists,
   errors,
   pathPrefix,
+  noun,
+  termName,
   resultHeader,
   resultWidth = 160,
   renderResult,
@@ -210,8 +219,10 @@ export default function RuleList({
   title,
   subtitle,
   emptyText,
-  descriptionPlaceholder = "What this rule is for, in a sentence",
+  descriptionPlaceholder = `What this ${noun} is for, in a sentence`,
 }) {
+  const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
+
   function updateRule(i, patch) {
     editRules((list) => list.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   }
@@ -239,7 +250,7 @@ export default function RuleList({
             onClick={() => editRules((list) => [...list, makeRule(list.map((r) => r.id))])}
           >
             <Icons.plus size={12} />
-            Add rule
+            Add {noun}
           </button>
         </div>
       </div>
@@ -255,7 +266,9 @@ export default function RuleList({
             <tr>
               <th style={{ width: 34 }}>#</th>
               <th style={{ width: 62 }}>Order</th>
-              <th>Rule</th>
+              <th>
+                {Noun} <TermHint name={termName} />
+              </th>
               <th style={{ width: resultWidth }}>{resultHeader}</th>
               <th style={{ width: 44 }}></th>
             </tr>
@@ -302,7 +315,7 @@ export default function RuleList({
                   <td style={{ verticalAlign: "top", paddingTop: 11 }}>
                     <button
                       className="btn sm ghost"
-                      title="Delete this rule"
+                      title={`Delete this ${noun}`}
                       onClick={() => editRules((list) => list.filter((_, idx) => idx !== i))}
                     >
                       <Icons.x size={12} />

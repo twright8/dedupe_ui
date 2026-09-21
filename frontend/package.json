@@ -1,10 +1,11 @@
 {
-  "name": "roe-linkage-ui",
+  "name": "dedupe-ui",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "check:terms": "node scripts/check-terms.mjs",
+    "build": "npm run check:terms && vite build",
     "preview": "vite preview"
   },
   "dependencies": {

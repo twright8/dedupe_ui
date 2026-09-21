@@ -1,10 +1,11 @@
 /* ============================================================
    RecordsTable — the records one run loaded, one row per record
    ------------------------------------------------------------
-   Every data column comes from the profile (key, label, type), so
-   nothing here knows about donations or PSC. Filtering, sorting and
-   paging all happen on the server; this component only holds the
-   controls' state. Later slices reuse it.
+   Every data column comes from the profile (key, label, type), and
+   the word for a record comes from the profile too, so nothing here
+   knows about donations or PSC. Filtering, sorting and paging all
+   happen on the server; this component only holds the controls'
+   state. Later slices reuse it.
    ============================================================ */
 
 import { useState, useEffect } from "react";
@@ -13,6 +14,8 @@ import { Icons } from "./Icons";
 import { fmtNumber } from "./ProbBar";
 import { Empty } from "./Empty";
 import { Cell, NUMERIC_TYPES } from "./cells";
+import { TermHint } from "./Term";
+import { noun } from "../profileText";
 
 const PER_PAGE = 100;
 
@@ -25,6 +28,8 @@ export default function RecordsTable({ runId, profile }) {
       ? profile.display_columns
       : [{ key: "name", label: "Name", type: "text" }];
   const tracks = profile.tracks || [];
+  const recordWord = noun(profile, "record");
+  const recordPlural = noun(profile, "record_plural");
 
   const [query, setQuery] = useState("");   // what is typed
   const [q, setQ] = useState("");           // what is sent, debounced
@@ -153,7 +158,7 @@ export default function RecordsTable({ runId, profile }) {
           <Icons.search size={14} />
           <input
             className="input"
-            placeholder="Search records..."
+            placeholder={`Search ${recordPlural}...`}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -180,7 +185,7 @@ export default function RecordsTable({ runId, profile }) {
           ))}
         </div>
 
-        <div className="seg" title="Filter by review state">
+        <div className="seg" title="Filter by whether a reviewer has answered">
           {[
             ["all", "All", counts.all],
             ["labelled", "Labelled", counts.labelled],
@@ -210,7 +215,7 @@ export default function RecordsTable({ runId, profile }) {
           <button
             className={"btn" + (showCleaned ? " primary" : "")}
             onClick={() => setShowCleaned((v) => !v)}
-            title="Show the columns the cleaning steps wrote, beside the profile's own"
+            title="Show the columns the cleaning steps wrote, beside the ones the file came with"
           >
             <Icons.table size={14} stroke={showCleaned ? "#fff" : undefined} />
             Cleaned and derived columns
@@ -229,11 +234,11 @@ export default function RecordsTable({ runId, profile }) {
 
       {loading ? (
         <p className="muted pulse" style={{ fontSize: 13.5, padding: 40 }}>
-          Loading records...
+          Loading {recordPlural}...
         </p>
       ) : error ? (
         <Empty
-          title="Failed to load records"
+          title={`Could not load the ${recordPlural}`}
           sub={error}
           action={
             <button className="btn primary" onClick={() => setAttempt((n) => n + 1)}>
@@ -243,11 +248,11 @@ export default function RecordsTable({ runId, profile }) {
         />
       ) : items.length === 0 ? (
         <Empty
-          title="No records found"
+          title={`No ${recordPlural} found`}
           sub={
             filtersOn
-              ? "No record matches these filters. Clear the search or pick another track."
-              : "This run did not load any records."
+              ? `No ${recordWord} matches these filters. Clear the search or pick another track.`
+              : `This run loaded no ${recordPlural}.`
           }
         />
       ) : (
@@ -256,7 +261,9 @@ export default function RecordsTable({ runId, profile }) {
             <table className="t">
               <thead>
                 <tr>
-                  <th style={{ width: 110 }}>Track</th>
+                  <th style={{ width: 110 }}>
+                    Track <TermHint name="track" />
+                  </th>
                   {columns.map((col) => {
                     const numeric = NUMERIC_TYPES.has(col.type);
                     return (
@@ -279,7 +286,9 @@ export default function RecordsTable({ runId, profile }) {
                       </th>
                     );
                   })}
-                  <th style={{ width: 150 }}>Review state</th>
+                  <th style={{ width: 150 }}>
+                    Reviewed? <TermHint name="label" />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -320,8 +329,8 @@ export default function RecordsTable({ runId, profile }) {
                         </span>
                       )}
                       {r.existing_entity_id && (
-                        <div className="mono muted" style={{ fontSize: 11 }}>
-                          {r.existing_entity_id}
+                        <div className="muted" style={{ fontSize: 11 }}>
+                          earlier ID <span className="mono">{r.existing_entity_id}</span>
                         </div>
                       )}
                     </td>
@@ -342,7 +351,7 @@ export default function RecordsTable({ runId, profile }) {
           >
             <span className="muted" style={{ fontSize: 12 }}>
               Showing {fmtNumber(firstShown)}&ndash;{fmtNumber(lastShown)} of{" "}
-              {fmtNumber(total)} record{total === 1 ? "" : "s"}
+              {fmtNumber(total)} {total === 1 ? recordWord : recordPlural}
             </span>
             {totalPages > 1 && (
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>

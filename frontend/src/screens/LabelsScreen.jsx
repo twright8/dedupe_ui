@@ -1,16 +1,16 @@
 /* ============================================================
-   Screen: Label library — the answers that teach and test the matcher
+   Screen: Label library — the answers the model learns from and is graded on
    ----------------------------------------------------------------
    Every label carries three SEPARATE facts (kept distinct on purpose):
-     • Verdict  — Match / Not a match
-     • Source   — who said it: You / Bulk / Group decision / Imported
-     • Role     — what the model does with it: TEACHES (trains) or TESTS (frozen)
+     • Answer   — Match / Not a match
+     • How it was decided — the glossary's one chip, from `provenance`
+     • Which set — the training set, or the test set held back to grade
    A label is a statement about two records (DESIGN.md D10): the pair
    is stored against the two record ids, smaller first, and a later
    label supersedes an earlier one rather than overwriting it.
 
    Filtering, searching and paging all happen on the server, because
-   one decision on a large group writes a label per member and the
+   one group decision writes a label per pair inside it and the
    library runs to hundreds of thousands of rows.
    ============================================================ */
 
@@ -18,35 +18,51 @@ import { useEffect, useMemo, useRef, useState, Fragment } from "react";
 import { api } from "../api";
 import { Icons } from "../components/Icons";
 import { Empty } from "../components/Empty";
+import { Term, TermHint, Provenance, provenanceLabel } from "../components/Term";
 import { fmtDateTime, fmtNumber } from "../components/ProbBar";
+import { provenanceFor } from "../glossary";
+import { noun } from "../profileText";
 import { useProfile } from "../profile";
 
 const PER_PAGE = 100;
 
-// Who produced a label. `provenance` is the wire value.
-const SOURCES = [
-  { key: "manual", label: "You", help: "Answered one pair at a time in the review screen." },
-  { key: "bulk_range", label: "Bulk", help: "Answered by marking a band of scores in one go." },
-  { key: "cluster_merge", label: "Group merge", help: "A decision that a whole group is one thing." },
-  { key: "cluster_split", label: "Group split", help: "A decision that a group is more than one thing." },
-  { key: "import", label: "Imported", help: "Came from an earlier grouping, not from this tool." },
-  { key: "llm", label: "Suggested", help: "Machine-suggested. Review before trusting." },
+/* The filter's options. The words come from the glossary, so the option, the
+   chip in the table and the same value on every other screen all read alike.
+   Four of the six read "Reviewer", so each carries its second line too. */
+const SOURCE_VALUES = [
+  "manual",
+  "bulk_range",
+  "cluster_merge",
+  "cluster_split",
+  "import",
+  "llm",
 ];
 
-function sourceMeta(provenance) {
-  return SOURCES.find((s) => s.key === String(provenance || "").toLowerCase());
-}
+const SOURCE_OPTIONS = SOURCE_VALUES.map((key) => {
+  const meta = provenanceFor("provenance", key);
+  const detail = meta?.detail ? meta.detail.charAt(0).toLowerCase() + meta.detail.slice(1) : null;
+  return { key, label: detail ? `${meta.label} — ${detail}` : meta?.label || key };
+}).filter((o) => o.label);
 
 const GROUP_PROVENANCE = new Set(["cluster_merge", "cluster_split"]);
 
-const KINDS = { merge: "Merged", split: "Split" };
+// What a group decision did. The glossary word for both is "group decision".
+const KIND_VERB = { merge: "merged", split: "split" };
 
-/* One row of the grouped list. A single label comes back in the same shape with
-   no decision id, so both read the same way. */
-function rowTitle(row) {
-  const verb = KINDS[row.kind];
-  if (!verb) return null;
-  return `${verb} ${fmtNumber(row.n_labels)} label${row.n_labels === 1 ? "" : "s"} as one decision`;
+/* The decision's scope is the id of the cluster or held group it covered. The
+   letter says which, so the id never stands on its own. */
+function scopeWords(scope) {
+  const s = String(scope || "");
+  if (/^C-/i.test(s)) return `cluster ${s}`;
+  if (/^H-/i.test(s)) return `held group ${s}`;
+  return s;
+}
+
+/* The one chip for "How it was decided". A value the glossary does not know
+   prints an em dash rather than the wire word. */
+function SourceCell({ value }) {
+  if (!provenanceLabel("provenance", value)) return <span className="muted">—</span>;
+  return <Provenance kind="provenance" value={value} />;
 }
 
 export default function LabelsScreen() {
@@ -56,7 +72,10 @@ export default function LabelsScreen() {
   const [query, setQuery] = useState("");
   const [q, setQ] = useState("");
   const [track, setTrack] = useState("all");
-  const [verdict, setVerdict] = useState("all");
+  // "all", "TRUE" or "FALSE". TRUE/FALSE is the wire value; the screen says
+  // Match and Not a match.
+  const [answer, setAnswer] = useState("all");
+  // "all", "training" or "test".
   const [role, setRole] = useState("all");
   const [source, setSource] = useState("all");
   const [showSuperseded, setShowSuperseded] = useState(false);
@@ -76,8 +95,8 @@ export default function LabelsScreen() {
   const [attempt, setAttempt] = useState(0);
   const [bulkBusy, setBulkBusy] = useState(false);
 
-  // The frozen test set is per track and lives with the model, because the
-  // model is what it grades.
+  // The test set is per track and lives with the model, because the model is
+  // what it grades.
   const [testTrack, setTestTrack] = useState(() => tracks[0]?.key || "person");
   const [evalSet, setEvalSet] = useState(null);
   const [designating, setDesignating] = useState(false);
@@ -106,14 +125,14 @@ export default function LabelsScreen() {
     };
     if (q) p.q = q;
     if (track !== "all") p.track = track;
-    if (verdict !== "all") p.is_match = verdict;
-    if (role !== "all") p.held_out = role === "tests" ? 1 : 0;
+    if (answer !== "all") p.is_match = answer;
+    if (role !== "all") p.held_out = role === "test" ? 1 : 0;
     if (source !== "all") p.provenance = source;
     if (dateFrom) p.created_from = dateFrom;
     if (dateTo) p.created_to = dateTo;
     if (grouped) p.group_by = "decision";
     return p;
-  }, [page, q, track, verdict, role, source, showSuperseded, sort, order, dateFrom, dateTo, grouped]);
+  }, [page, q, track, answer, role, source, showSuperseded, sort, order, dateFrom, dateTo, grouped]);
 
   useEffect(() => {
     let alive = true;
@@ -181,10 +200,11 @@ export default function LabelsScreen() {
     if (
       !window.confirm(
         "Freeze a balanced test set?\n\n" +
-          "This takes up to 200 of your newest answers, an equal number of each verdict, and " +
+          "This takes up to 200 of your newest answers, half Match and half Not a match, and " +
           "freezes them. The model stops learning from them and is graded on them instead.\n\n" +
           "Only answers you gave one at a time, or by marking a band, can be frozen. It never " +
-          "takes more than half of either verdict. Freezing cannot be undone."
+          "takes more than half of the Match answers or half of the Not a match answers. " +
+          "Freezing cannot be undone."
       )
     )
       return;
@@ -206,7 +226,7 @@ export default function LabelsScreen() {
       refresh();
       loadEval();
     } catch (err) {
-      alert(err.message || "Could not change role");
+      alert(err.message || "Could not move that label to the other set");
     } finally {
       setBulkBusy(false);
     }
@@ -220,7 +240,7 @@ export default function LabelsScreen() {
     if (
       !window.confirm(
         "Import adds these labels to the library. A label on a pair that already has one " +
-          "supersedes it, and the old row stays on record. Export first if you want a backup. Continue?"
+          "supersedes it, and the old label is kept. Export first if you want a backup. Continue?"
       )
     )
       return;
@@ -247,7 +267,7 @@ export default function LabelsScreen() {
     }
   }
 
-  const teaches = (counts.active ?? 0) - (counts.held_out ?? 0);
+  const inTraining = (counts.active ?? 0) - (counts.held_out ?? 0);
   const firstShown = total === 0 ? 0 : page * PER_PAGE + 1;
   const lastShown = page * PER_PAGE + items.length;
   // The export takes the same filters, so what downloads is what is listed.
@@ -261,9 +281,11 @@ export default function LabelsScreen() {
         <div>
           <h1 className="page-title">Label library</h1>
           <p className="page-sub">
-            Your Match / Not-a-match answers, one per pair of records. Each one either{" "}
-            <strong>teaches</strong> the matcher or <strong>tests</strong> it, frozen so it can be
-            graded honestly. They re-apply to every later run.
+            Your Match and Not a match answers, one <Term name="label" /> for each{" "}
+            <Term name="pair" /> of {noun(profile, "record_plural")}. Each one sits either in the{" "}
+            <Term name="trainingSet" />, which the model learns from, or in the{" "}
+            <Term name="testSet" />, which is held back so the model can be graded honestly. They
+            re-apply to every later run.
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -291,7 +313,9 @@ export default function LabelsScreen() {
       <div className="card" style={{ marginBottom: 12 }}>
         <div className="card-b" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-            <span className="eyebrow">Test set</span>
+            <span className="eyebrow">
+              Test set <TermHint name="testSet" />
+            </span>
             {tracks.length > 1 && (
               <div className="seg">
                 {tracks.map((t) => (
@@ -308,17 +332,18 @@ export default function LabelsScreen() {
             <span style={{ fontSize: 13 }}>
               {evalSet ? (
                 <>
-                  <strong>{fmtNumber(evalSet.total)}</strong> frozen for testing
+                  <strong>{fmtNumber(evalSet.total)}</strong> labels in the test set
                   {evalSet.total > 0 && (
                     <span className="muted">
                       {" "}
-                      · {evalSet.by_verdict?.TRUE || 0} Match / {evalSet.by_verdict?.FALSE || 0} No
+                      · {evalSet.by_verdict?.TRUE || 0} Match, {evalSet.by_verdict?.FALSE || 0} Not a
+                      match
                     </span>
                   )}
                   <span className="muted">
                     {" "}
-                    · {fmtNumber(evalSet.training)} still teaching ·{" "}
-                    {fmtNumber(evalSet.designatable)} could be frozen
+                    · {fmtNumber(evalSet.training)} labels in the training set ·{" "}
+                    {fmtNumber(evalSet.designatable)} could join the test set
                   </span>
                 </>
               ) : (
@@ -335,26 +360,31 @@ export default function LabelsScreen() {
             </button>
           </div>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            <div className="kpi" style={{ padding: 10, minWidth: 150 }}>
-              <div className="label">Teaches</div>
-              <div className="value" style={{ fontSize: 22 }}>
-                {fmtNumber(teaches)}
+            <div className="kpi" style={{ padding: 10, minWidth: 170 }}>
+              <div className="label">
+                Training set <TermHint name="trainingSet" />
               </div>
-              <div className="delta muted">the model trains on these</div>
+              <div className="value" style={{ fontSize: 22 }}>
+                {fmtNumber(inTraining)}
+              </div>
+              <div className="delta muted">labels the model learns from</div>
             </div>
-            <div className="kpi" style={{ padding: 10, minWidth: 150 }}>
-              <div className="label">Tests</div>
+            <div className="kpi" style={{ padding: 10, minWidth: 170 }}>
+              <div className="label">
+                Test set <TermHint name="testSet" />
+              </div>
               <div className="value" style={{ fontSize: 22, color: "var(--violet)" }}>
                 {fmtNumber(counts.held_out)}
               </div>
-              <div className="delta muted">frozen to grade it</div>
+              <div className="delta muted">labels held back to grade it</div>
             </div>
           </div>
           <p className="muted" style={{ fontSize: 12, margin: 0, lineHeight: 1.5 }}>
-            Only answers you gave one at a time, or by marking a band on the chart, can be frozen. A
-            decision on a whole group and an imported label cannot, because grading on those would
-            flatter the model. Freezing never takes more than half of either verdict, and it cannot
-            be undone.
+            Only answers you gave one at a time, or by marking a band on the chart, can be frozen. A{" "}
+            <Term name="groupDecision" /> and a label from the{" "}
+            <Term name="earlierGrouping" /> cannot, because grading on those would flatter the
+            model. Freezing never takes more than half of the Match answers or half of the Not a
+            match answers, and it cannot be undone.
           </p>
         </div>
       </div>
@@ -365,7 +395,7 @@ export default function LabelsScreen() {
           <Icons.search size={14} />
           <input
             className="input"
-            placeholder="Search names, record ids, notes..."
+            placeholder={`Search names, ${noun(profile, "record")} ids, notes...`}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -393,36 +423,39 @@ export default function LabelsScreen() {
           </div>
         )}
 
-        <div className="seg" title="Filter by verdict">
-          <button className={verdict === "all" ? "on" : ""} onClick={() => pick(setVerdict, "all")}>
+        <div className="seg" title="Filter by answer">
+          <button className={answer === "all" ? "on" : ""} onClick={() => pick(setAnswer, "all")}>
             All
           </button>
-          <button className={verdict === "TRUE" ? "on" : ""} onClick={() => pick(setVerdict, "TRUE")}>
+          <button className={answer === "TRUE" ? "on" : ""} onClick={() => pick(setAnswer, "TRUE")}>
             Match
             <span className="muted" style={{ fontSize: 11 }}>
               &middot; {fmtNumber(counts.true)}
             </span>
           </button>
-          <button className={verdict === "FALSE" ? "on" : ""} onClick={() => pick(setVerdict, "FALSE")}>
-            No
+          <button className={answer === "FALSE" ? "on" : ""} onClick={() => pick(setAnswer, "FALSE")}>
+            Not a match
             <span className="muted" style={{ fontSize: 11 }}>
               &middot; {fmtNumber(counts.false)}
             </span>
           </button>
         </div>
 
-        <div className="seg" title="Does it teach or test the model?">
+        <div className="seg" title="Is the label in the training set or the test set?">
           <button className={role === "all" ? "on" : ""} onClick={() => pick(setRole, "all")}>
-            Any role
+            Both sets
           </button>
-          <button className={role === "teaches" ? "on" : ""} onClick={() => pick(setRole, "teaches")}>
-            Teaches
+          <button
+            className={role === "training" ? "on" : ""}
+            onClick={() => pick(setRole, "training")}
+          >
+            Training set
             <span className="muted" style={{ fontSize: 11 }}>
-              &middot; {fmtNumber(teaches)}
+              &middot; {fmtNumber(inTraining)}
             </span>
           </button>
-          <button className={role === "tests" ? "on" : ""} onClick={() => pick(setRole, "tests")}>
-            Tests
+          <button className={role === "test" ? "on" : ""} onClick={() => pick(setRole, "test")}>
+            Test set
             <span className="muted" style={{ fontSize: 11 }}>
               &middot; {fmtNumber(counts.held_out)}
             </span>
@@ -431,13 +464,13 @@ export default function LabelsScreen() {
 
         <select
           className="select"
-          style={{ width: 170 }}
+          style={{ width: 240 }}
           value={source}
           onChange={(e) => pick(setSource, e.target.value)}
-          title="Filter by who produced the label"
+          title="Filter by how the label was decided"
         >
-          <option value="all">Any source</option>
-          {SOURCES.map((s) => (
+          <option value="all">How it was decided: any</option>
+          {SOURCE_OPTIONS.map((s) => (
             <option key={s.key} value={s.key}>
               {s.label}
               {counts[s.key] != null ? ` (${counts[s.key]})` : ""}
@@ -484,7 +517,7 @@ export default function LabelsScreen() {
         <label
           className="muted"
           style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 5 }}
-          title="Show one row per decision rather than one per label"
+          title="Show one row per group decision rather than one row per label"
         >
           <input
             type="checkbox"
@@ -546,14 +579,16 @@ export default function LabelsScreen() {
                   <tr>
                     <th style={{ width: 30 }}></th>
                     <SortHead k="name" style={{ minWidth: 260 }}>
-                      The decision
+                      The decision <TermHint name="groupDecision" />
                     </SortHead>
-                    <th style={{ width: 110, textAlign: "right" }}>Labels</th>
-                    <SortHead k="provenance" style={{ width: 130 }}>
-                      Source
+                    <th style={{ width: 110, textAlign: "right" }}>
+                      Labels <TermHint name="label" />
+                    </th>
+                    <SortHead k="provenance" style={{ width: 170 }}>
+                      How it was decided
                     </SortHead>
                     <SortHead k="reviewer" style={{ width: 120 }}>
-                      Reviewer
+                      Reviewer <TermHint name="reviewer" />
                     </SortHead>
                     <SortHead k="created_at" style={{ width: 160 }}>
                       Labelled
@@ -562,23 +597,27 @@ export default function LabelsScreen() {
                   </tr>
                 ) : (
                   <tr>
-                    <SortHead k="is_match" style={{ width: 90 }}>
-                      Verdict
+                    <SortHead k="is_match" style={{ width: 110 }}>
+                      Answer <TermHint name="label" />
                     </SortHead>
                     <SortHead k="name" style={{ minWidth: 230 }}>
-                      The pair
+                      The pair <TermHint name="pair" />
                     </SortHead>
-                    <th style={{ width: 110 }}>Track</th>
+                    <th style={{ width: 110 }}>
+                      Track <TermHint name="track" />
+                    </th>
                     <SortHead k="reviewer" style={{ width: 110 }}>
-                      Reviewer
+                      Reviewer <TermHint name="reviewer" />
                     </SortHead>
                     <SortHead k="created_at" style={{ width: 150 }}>
                       Labelled
                     </SortHead>
-                    <SortHead k="provenance" style={{ width: 120 }}>
-                      Source
+                    <SortHead k="provenance" style={{ width: 170 }}>
+                      How it was decided
                     </SortHead>
-                    <th style={{ width: 160 }}>Role</th>
+                    <th style={{ width: 180 }}>
+                      Training or test <TermHint name="testSet" />
+                    </th>
                     <th style={{ minWidth: 200 }}>Notes</th>
                     <th style={{ width: 100 }}>Actions</th>
                   </tr>
@@ -629,7 +668,7 @@ export default function LabelsScreen() {
           >
             <span className="muted" style={{ fontSize: 12 }}>
               Showing {fmtNumber(firstShown)}&ndash;{fmtNumber(lastShown)} of {fmtNumber(total)}{" "}
-              {isGrouped ? "rows" : "labels"}
+              {isGrouped ? "decisions" : "labels"}
               {isGrouped && counts.active != null && (
                 <span> &middot; {fmtNumber(counts.active)} labels in all</span>
               )}
@@ -659,12 +698,12 @@ export default function LabelsScreen() {
 }
 
 /* One row of the grouped list. A group decision expands into its own labels,
-   fetched by decision id and paged like everything else. */
+   fetched by decision id and paged like everything else. A single label comes
+   back in the same shape with no decision id, so both read the same way. */
 function DecisionRow({ row, open, onToggle, tracks, bulkBusy, onRole, onDelete }) {
   const [members, setMembers] = useState(null);
   const [error, setError] = useState(null);
-  const meta = sourceMeta(row.provenance);
-  const title = rowTitle(row);
+  const verb = KIND_VERB[row.kind];
   const names = (row.names || []).join(" · ");
 
   useEffect(() => {
@@ -700,22 +739,27 @@ function DecisionRow({ row, open, onToggle, tracks, bulkBusy, onRole, onDelete }
           ) : null}
         </td>
         <td style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
-          {title ? <strong>{title}</strong> : <strong>{names}</strong>}
-          {title && names && <div style={{ fontSize: 12.5 }}>{names}</div>}
-          <div className="mono muted" style={{ fontSize: 11 }}>
-            {row.decision_scope ? `${row.decision_scope} · ` : ""}
-            {row.n_true} match, {row.n_false} not
+          {verb ? (
+            <strong>
+              One group decision, {verb}, saved as {fmtNumber(row.n_labels)} label
+              {row.n_labels === 1 ? "" : "s"}
+            </strong>
+          ) : (
+            <strong>{names}</strong>
+          )}
+          {verb && names && <div style={{ fontSize: 12.5 }}>{names}</div>}
+          <div className="muted" style={{ fontSize: 11 }}>
+            {row.decision_scope ? `${scopeWords(row.decision_scope)} · ` : ""}
+            {row.n_true} Match, {row.n_false} Not a match
           </div>
         </td>
         <td className="mono tnum" style={{ textAlign: "right" }}>
           {fmtNumber(row.n_labels)}
         </td>
         <td>
-          <span className="tag" title={meta?.help}>
-            {meta?.label || row.provenance || "—"}
-          </span>
+          <SourceCell value={row.provenance} />
         </td>
-        <td>{row.reviewer || "user"}</td>
+        <td>{row.reviewer || "—"}</td>
         <td className="muted" style={{ fontSize: 11.5, whiteSpace: "nowrap" }}>
           {fmtDateTime(row.created_at) || "—"}
         </td>
@@ -744,7 +788,7 @@ function DecisionRow({ row, open, onToggle, tracks, bulkBusy, onRole, onDelete }
               <p style={{ fontSize: 12.5, color: "var(--ti-red)", margin: 0 }}>{error}</p>
             ) : !members ? (
               <p className="muted pulse" style={{ fontSize: 12.5, margin: 0 }}>
-                Loading this decision's labels...
+                Loading the labels in this group decision...
               </p>
             ) : (
               <div className="tbl-wrap">
@@ -764,7 +808,7 @@ function DecisionRow({ row, open, onToggle, tracks, bulkBusy, onRole, onDelete }
                 </table>
                 {members.length >= 100 && (
                   <p className="muted" style={{ fontSize: 11.5, padding: 8, margin: 0 }}>
-                    The first 100 labels of this decision are shown.
+                    The first 100 labels of this group decision are shown.
                   </p>
                 )}
               </div>
@@ -777,18 +821,18 @@ function DecisionRow({ row, open, onToggle, tracks, bulkBusy, onRole, onDelete }
 }
 
 function LabelRow({ label, tracks, bulkBusy, onRole, onDelete, indent }) {
-  const truth = String(label.is_match || "").toUpperCase();
-  const meta = sourceMeta(label.provenance);
-  const tests = !!label.held_out;
+  // TRUE and FALSE are the wire values. They are mapped here and never shown.
+  const isMatch = String(label.is_match || "").toUpperCase() === "TRUE";
+  const inTestSet = !!label.held_out;
   const superseded = label.active === 0 || label.superseded_by;
   const fromGroup = GROUP_PROVENANCE.has(String(label.provenance || "").toLowerCase());
 
   return (
     <tr style={superseded ? { opacity: 0.55 } : undefined}>
       <td>
-        <span className={`tag ${truth === "TRUE" ? "green" : "red"}`}>
+        <span className={`tag ${isMatch ? "green" : "red"}`}>
           <span className="dot" />
-          {truth === "TRUE" ? "Match" : "No"}
+          {isMatch ? "Match" : "Not a match"}
         </span>
         {superseded && (
           <div className="muted" style={{ fontSize: 11 }}>
@@ -813,35 +857,38 @@ function LabelRow({ label, tracks, bulkBusy, onRole, onDelete, indent }) {
       <td className="mono" style={{ fontSize: 12 }}>
         {tracks.find((t) => t.key === label.track)?.label || label.track || "—"}
       </td>
-      <td>{label.reviewer || "user"}</td>
+      <td>{label.reviewer || "—"}</td>
       <td className="muted" style={{ fontSize: 11.5, whiteSpace: "nowrap" }}>
         {fmtDateTime(label.created_at) || "—"}
       </td>
       <td>
-        <span className="tag" title={meta?.help}>
-          {meta?.label || label.provenance || "—"}
-        </span>
+        <SourceCell value={label.provenance} />
       </td>
       <td>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {tests ? (
-            <span className="tag violet" title="Frozen to grade the model">
+          {inTestSet ? (
+            <span className="tag violet" title="Held back from training, and used only to grade the model">
               <span className="dot" />
-              Tests
+              Test set
             </span>
           ) : (
-            <span className="tag" title="The model trains on this label">
+            <span className="tag" title="The model learns from this label">
               <span className="dot" />
-              Teaches
+              Training set
             </span>
           )}
           {!fromGroup && (
             <button
               className="btn sm"
               disabled={bulkBusy}
-              onClick={() => onRole([label.id], tests ? 0 : 1)}
+              onClick={() => onRole([label.id], inTestSet ? 0 : 1)}
+              title={
+                inTestSet
+                  ? "Put this label back in the training set"
+                  : "Hold this label back in the test set"
+              }
             >
-              {tests ? "→ Teaches" : "→ Tests"}
+              {inTestSet ? "→ Training set" : "→ Test set"}
             </button>
           )}
         </div>

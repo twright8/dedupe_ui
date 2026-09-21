@@ -1,26 +1,19 @@
 /* ============================================================
    ModelExplain — why the model scored one pair the way it did
    ------------------------------------------------------------
-   The pair detail carries exact Tree-SHAP contributions. Each one
-   is how far a piece of evidence pushed this pair's score, in
-   log-odds. A positive contribution pushed towards "the same", a
-   negative one away. They are grouped by kind of evidence so the
-   reader can see whether the name did the work or something else.
+   The pair detail carries one number per piece of evidence: how
+   much that piece moved this pair's score. A positive number moved
+   it towards "the same thing", a negative one away. They are
+   grouped by kind of evidence, so the reader can see whether the
+   name did the work or something else. The groups are named and
+   coloured in ModelPanel, so both screens read the same way.
    ============================================================ */
 
 import { useState } from "react";
 import { Icons } from "./Icons";
-import { groupColour } from "./ModelPanel";
-
-const GROUP_LABELS = {
-  splink: "Splink",
-  name: "Name",
-  rarity: "Name rarity",
-  recipients: "Recipients",
-  timing: "Timing",
-  amounts: "Amounts",
-  size: "Size",
-};
+import { Term } from "./Term";
+import { fmtProb } from "./ProbBar";
+import { groupColour, groupLabel } from "./ModelPanel";
 
 const TOP = 8;
 
@@ -54,17 +47,22 @@ export function ModelExplain({ explanation }) {
         <h3>Why the model scored it this way</h3>
         <span className="muted" style={{ fontSize: 12 }}>
           version {explanation.version}
-          {explanation.graded ? "" : " · cold start, so it decides nothing"}
+          {explanation.graded ? null : (
+            <>
+              {" · "}
+              <Term name="newModel" />, so it decides nothing
+            </>
+          )}
         </span>
         <span className="tag" style={{ marginLeft: "auto", fontFamily: "var(--font-mono)" }}>
-          {(explanation.score * 100).toFixed(1)}%
+          score {explanation.score == null ? "—" : fmtProb(explanation.score)}
         </span>
       </div>
       <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         {groups.map((g) => (
           <div key={g.key}>
             <div className="eyebrow" style={{ marginBottom: 4, color: groupColour(g.key) }}>
-              {GROUP_LABELS[g.key] || g.key}
+              {groupLabel(g.key)}
             </div>
             <div className="features">
               {g.rows.map((c) => {
@@ -87,9 +85,9 @@ export function ModelExplain({ explanation }) {
                     </div>
                     <div
                       className="bar"
-                      title={`${positive ? "pushes towards" : "pushes away from"} a match by ${Math.abs(
-                        c.contribution
-                      ).toFixed(3)}`}
+                      title={`${
+                        positive ? "moved the score towards" : "moved the score away from"
+                      } a match by ${Math.abs(c.contribution || 0).toFixed(3)}`}
                     >
                       <i
                         style={{
@@ -101,7 +99,7 @@ export function ModelExplain({ explanation }) {
                     <div className="val">
                       <span style={{ color: positive ? "var(--green)" : "var(--ti-red)" }}>
                         {positive ? "+" : "−"}
-                        {Math.abs(c.contribution).toFixed(2)}
+                        {Math.abs(c.contribution || 0).toFixed(2)}
                       </span>
                     </div>
                   </div>
@@ -120,7 +118,7 @@ export function ModelExplain({ explanation }) {
         )}
 
         <p className="muted" style={{ fontSize: 11.5, margin: 0, lineHeight: 1.55 }}>
-          A green bar pushed this pair towards being the same thing, a red bar away from it. The bars
+          A green bar moved this pair towards being the same thing, a red bar away from it. The bars
           start from what the model expects of any pair and add up to this score.{" "}
           {explanation.known_limit}
         </p>

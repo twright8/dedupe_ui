@@ -7,6 +7,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { Icons } from "../components/Icons";
 import { useProfile } from "../profile";
+import { Term, TermHint } from "../components/Term";
 
 // ---------- Stat mini-card ----------
 function Stat({ label, value }) {
@@ -468,7 +469,7 @@ export default function NewRunScreen() {
 
             <div className="field">
               <label>
-                Auto-accept threshold &nbsp;
+                Accept line <TermHint name="acceptLine" /> &nbsp;
                 <span className="mono" style={{ color: "var(--ink)" }}>
                   {thresh.toFixed(2)}
                 </span>
@@ -482,16 +483,16 @@ export default function NewRunScreen() {
                 onChange={(e) => setThresh(+e.target.value)}
                 className="slider"
               />
-              <div className="muted" style={{ fontSize: 11 }}>
-                Probability &gt;= this is accepted automatically. Default per
-                config:{" "}
+              <div className="muted" style={{ fontSize: 11, lineHeight: 1.5 }}>
+                The score at or above which a pair is accepted without review. This config
+                version's own accept line is{" "}
                 <span className="mono">{defaultThresh.toFixed(2)}</span>.
               </div>
             </div>
 
             <div className="field">
               <label>
-                Review band lower bound &nbsp;
+                Review line <TermHint name="reviewLine" /> &nbsp;
                 <span className="mono" style={{ color: "var(--ink)" }}>
                   {reviewLow.toFixed(2)}
                 </span>
@@ -505,18 +506,18 @@ export default function NewRunScreen() {
                 onChange={(e) => setReviewLow(+e.target.value)}
                 className="slider"
               />
-              <div className="muted" style={{ fontSize: 11 }}>
-                The scorer only emits candidates at or above this floor; lower it and run
-                again to inspect weaker possible matches.
-                Default per config: <span className="mono">{defaultReviewLow.toFixed(2)}</span>.
+              <div className="muted" style={{ fontSize: 11, lineHeight: 1.5 }}>
+                The score below which a pair is rejected without review. Lower it and run again to
+                see weaker possible matches. This config version's own review line is{" "}
+                <span className="mono">{defaultReviewLow.toFixed(2)}</span>.
               </div>
             </div>
 
-            <div className="muted" style={{ fontSize: 11, fontStyle: "italic", lineHeight: 1.5 }}>
-              These two lines are on the <strong>simple matcher's</strong> scale — they set up this run's
-              first pass. When you later train and <strong>apply the trained model</strong>, it derives
-              its <em>own</em> auto-accept / auto-reject lines from your Test set (a different, calibrated
-              scale) — you don't set those here.
+            <div className="muted" style={{ fontSize: 11, lineHeight: 1.5 }}>
+              Both lines are scores from 0 to 1, on the <Term name="splinkScore" />'s scale. They
+              set up this run's first pass. A trained model reads its own accept line and review
+              line off the <Term name="testSet" />, on a scale of its own, and you do not set
+              those here.
             </div>
 
             <div
@@ -525,10 +526,11 @@ export default function NewRunScreen() {
                 borderTop: "1px solid var(--line)",
                 paddingTop: 10,
                 fontSize: 11,
+                lineHeight: 1.5,
               }}
             >
-              Existing labels always re-apply to this run and diagnostics always
-              render &mdash; both are part of every run, not options.
+              Every label already saved is applied to this run, and the run always produces its
+              diagnostics. Both are part of every run, not options.
             </div>
 
             <button

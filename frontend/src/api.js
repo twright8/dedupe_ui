@@ -122,7 +122,7 @@ export const api = {
   },
 
   // --- Scored pairs (stage 3) ---
-  // --- Clusters, entities, publish (stages 4 and 5) ---
+  // --- Clusters, entities, publish ---
   getRunClusters(id, params) {
     const qs = params ? "?" + new URLSearchParams(params).toString() : "";
     return get(`/api/runs/${id}/clusters${qs}`);

@@ -2,9 +2,10 @@
    EntitiesTable — the entity IDs this run proposes
    ------------------------------------------------------------
    One row per proposed entity. Nothing here is written to the
-   durable register until the run is published, so every ID on this
-   tab is a proposal. The ID status says where the ID came from, and
-   the basis says what joined the records in the first place.
+   registry until the run is published, so every ID on this tab is a
+   proposal. Every chip takes its words from the glossary: where the
+   ID came from, how the records were joined, and how one value was
+   set.
    ============================================================ */
 
 import { useState, useEffect, Fragment } from "react";
@@ -13,46 +14,24 @@ import { Icons } from "./Icons";
 import { fmtNumber } from "./ProbBar";
 import { Empty } from "./Empty";
 import { Cell, NUMERIC_TYPES } from "./cells";
+import { Term, TermHint, Provenance, provenanceLabel } from "./Term";
+import { noun } from "../profileText";
 
 const PER_PAGE = 50;
 
-// How the records of an entity came to be together.
-const BASES = [
-  { key: "single", label: "Single", help: "One record on its own. Nothing was merged." },
-  { key: "exact_key", label: "Exact key", help: "A match key merged the records." },
-  {
-    key: "import",
-    label: "Imported label",
-    help: "The records already carried the same ID from an earlier grouping.",
-  },
-  { key: "score", label: "Score", help: "The scorer accepted a pair and joined them." },
-  { key: "human", label: "Human", help: "A reviewer said these records are the same." },
-];
+/* The API values each filter offers, in the order the glossary lists them.
+   The words beside them come from the glossary, never from here. */
+const BASIS_VALUES = ["single", "exact_key", "import", "score", "human"];
+const ID_STATUS_VALUES = ["new", "kept", "survivor", "minted_after_collision"];
 
-// Where the entity's ID came from.
-const ID_STATUSES = [
-  { key: "new", label: "New", tag: "", help: "Nothing in the register claimed these records." },
-  { key: "kept", label: "Kept", tag: "green", help: "One register entity already held them, so its ID stands." },
-  {
-    key: "survivor",
-    label: "Survivor",
-    tag: "blue",
-    help: "Several register entities held them. This ID survives and the others become aliases.",
-  },
-  {
-    key: "minted_after_collision",
-    label: "Re-minted",
-    tag: "amber",
-    help: "Two proposed entities claimed the same earlier ID. This one gave way and took a new ID.",
-  },
-];
-
-const ATTRIBUTE_BASIS = {
-  rule: { label: "Rule", help: "A derived-column rule set this value, which beats a raw value." },
-  majority: { label: "Majority", help: "The most common value among the records." },
-  raw: { label: "Raw", help: "One record, so its own value stands." },
-  tie: { label: "Tie", help: "Two values were equally common, so each record keeps its own." },
-};
+/* A column's own label, from the profile. A column the profile does not name
+   has its underscores opened out, so no raw key reaches the screen. */
+function columnLabel(key, displayColumns) {
+  const found = (displayColumns || []).find((c) => c.key === key);
+  if (found && found.label) return found.label;
+  const words = String(key || "").replace(/_/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "";
+}
 
 export default function EntitiesTable({ runId, profile }) {
   const [query, setQuery] = useState("");
@@ -72,6 +51,9 @@ export default function EntitiesTable({ runId, profile }) {
   const [attempt, setAttempt] = useState(0);
 
   const tracks = profile.tracks || [];
+  const recordWord = noun(profile, "record");
+  const recordPlural = noun(profile, "record_plural");
+  const recordPluralCap = recordPlural.charAt(0).toUpperCase() + recordPlural.slice(1);
   const displayColumns = profile.display_columns || [];
   const priorityKey = (profile.priority_columns || [])[0];
   const priorityColumn = displayColumns.find((c) => c.key === priorityKey);
@@ -134,7 +116,7 @@ export default function EntitiesTable({ runId, profile }) {
           <Icons.search size={14} />
           <input
             className="input"
-            placeholder="Search names, record or entity IDs..."
+            placeholder={`Search names, ${recordWord} IDs or entity IDs...`}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -162,42 +144,40 @@ export default function EntitiesTable({ runId, profile }) {
           </div>
         )}
 
-        <div className="seg" title="What joined the records">
+        <div className="seg" title="How it was decided">
           <button className={basis === "all" ? "on" : ""} onClick={() => pick(setBasis, "all")}>
-            Any basis
+            Any
           </button>
-          {BASES.map((b) => (
+          {BASIS_VALUES.map((value) => (
             <button
-              key={b.key}
-              className={basis === b.key ? "on" : ""}
-              title={b.help}
-              onClick={() => pick(setBasis, b.key)}
+              key={value}
+              className={basis === value ? "on" : ""}
+              onClick={() => pick(setBasis, value)}
             >
-              {b.label}
-              {counts[b.key] != null && (
+              {provenanceLabel("entity_basis", value)}
+              {counts[value] != null && (
                 <span className="muted" style={{ fontSize: 11 }}>
-                  &middot; {fmtNumber(counts[b.key])}
+                  &middot; {fmtNumber(counts[value])}
                 </span>
               )}
             </button>
           ))}
         </div>
 
-        <div className="seg" title="Where the ID came from">
+        <div className="seg" title="Where this ID came from">
           <button className={idStatus === "all" ? "on" : ""} onClick={() => pick(setIdStatus, "all")}>
             Any ID
           </button>
-          {ID_STATUSES.map((s) => (
+          {ID_STATUS_VALUES.map((value) => (
             <button
-              key={s.key}
-              className={idStatus === s.key ? "on" : ""}
-              title={s.help}
-              onClick={() => pick(setIdStatus, s.key)}
+              key={value}
+              className={idStatus === value ? "on" : ""}
+              onClick={() => pick(setIdStatus, value)}
             >
-              {s.label}
-              {counts[s.key] != null && (
+              {provenanceLabel("id_status", value)}
+              {counts[value] != null && (
                 <span className="muted" style={{ fontSize: 11 }}>
-                  &middot; {fmtNumber(counts[s.key])}
+                  &middot; {fmtNumber(counts[value])}
                 </span>
               )}
             </button>
@@ -214,7 +194,7 @@ export default function EntitiesTable({ runId, profile }) {
             value={minSize}
             onChange={(e) => pick(setMinSize, Math.max(1, +e.target.value || 1))}
           />
-          <span className="muted">records</span>
+          <span className="muted">{recordPlural}</span>
         </label>
 
         <select
@@ -228,7 +208,7 @@ export default function EntitiesTable({ runId, profile }) {
             setPage(0);
           }}
         >
-          <option value="size:desc">Most records first</option>
+          <option value="size:desc">{`Most ${recordPlural} first`}</option>
           {priorityColumn && (
             <option value="priority:desc">{priorityColumn.label}, highest first</option>
           )}
@@ -244,8 +224,9 @@ export default function EntitiesTable({ runId, profile }) {
       </div>
 
       <p className="muted" style={{ fontSize: 12, margin: 0 }}>
-        These IDs are a proposal. Nothing is written to the durable register until you publish the
-        run on the <strong>Publish &amp; export</strong> tab.
+        These IDs are a <Term name="proposal" />. Nothing is written to the{" "}
+        <Term name="registry" /> until you publish the run on the{" "}
+        <strong>Publish &amp; export</strong> tab.
       </p>
 
       {loading && !data ? (
@@ -263,21 +244,29 @@ export default function EntitiesTable({ runId, profile }) {
           }
         />
       ) : items.length === 0 ? (
-        <Empty title="No entities match" sub="Clear the filters or lower the record count." />
+        <Empty title="No entities match" sub={`Clear the filters or lower the ${recordWord} count.`} />
       ) : (
         <>
           <div className="tbl-wrap">
             <table className="t">
               <thead>
                 <tr>
-                  <th style={{ width: 130 }}>Entity ID</th>
+                  <th style={{ width: 130 }}>
+                    Entity ID <TermHint name="entityId" />
+                  </th>
                   <th style={{ minWidth: 220 }}>Names</th>
-                  <th style={{ width: 80, textAlign: "right" }}>Records</th>
-                  <th style={{ width: 110 }}>Track</th>
-                  <th style={{ minWidth: 150 }}>Joined by</th>
+                  <th style={{ width: 80, textAlign: "right" }}>
+                    {recordPluralCap} <TermHint name="record" />
+                  </th>
+                  <th style={{ width: 110 }}>
+                    Track <TermHint name="track" />
+                  </th>
+                  <th style={{ minWidth: 150 }}>
+                    How it was decided <TermHint name="entity" />
+                  </th>
                   {attributeKeys.map((k) => (
                     <th key={k} style={{ minWidth: 150 }}>
-                      {k}
+                      {columnLabel(k, displayColumns)} <TermHint name="consensusColumn" />
                     </th>
                   ))}
                   {priorityColumn && (
@@ -288,7 +277,6 @@ export default function EntitiesTable({ runId, profile }) {
               <tbody>
                 {items.map((e) => {
                   const isOpen = open === e.entity_id;
-                  const idMeta = ID_STATUSES.find((s) => s.key === e.id_status);
                   const bases = Object.entries(e.bases || {});
                   return (
                     <Fragment key={e.entity_id}>
@@ -301,13 +289,9 @@ export default function EntitiesTable({ runId, profile }) {
                           <span className="mono" style={{ fontWeight: 600 }}>
                             {e.entity_id}
                           </span>
-                          {idMeta && (
-                            <div style={{ marginTop: 2 }}>
-                              <span className={"tag " + idMeta.tag} title={idMeta.help}>
-                                {idMeta.label}
-                              </span>
-                            </div>
-                          )}
+                          <div style={{ marginTop: 2 }}>
+                            <Provenance kind="id_status" value={e.id_status} size="sm" />
+                          </div>
                         </td>
                         <td style={{ whiteSpace: "normal", overflowWrap: "anywhere", verticalAlign: "top" }}>
                           {(e.names || []).join(" · ")}
@@ -332,42 +316,28 @@ export default function EntitiesTable({ runId, profile }) {
                           {bases.length === 0 ? (
                             <span className="muted">—</span>
                           ) : (
-                            bases.map(([k, n]) => {
-                              const meta = BASES.find((b) => b.key === k);
-                              return (
-                                <span
-                                  key={k}
-                                  className="tag"
-                                  title={meta?.help}
-                                  style={{ marginRight: 4 }}
-                                >
-                                  {meta?.label || k}
-                                  <span className="muted" style={{ marginLeft: 4 }}>
-                                    {fmtNumber(n)}
-                                  </span>
-                                </span>
-                              );
-                            })
+                            bases.map(([k, n]) => (
+                              <span key={k} style={{ marginRight: 4 }}>
+                                <Provenance
+                                  kind="entity_basis"
+                                  value={k}
+                                  detail={fmtNumber(n)}
+                                  size="sm"
+                                />
+                              </span>
+                            ))
                           )}
                         </td>
                         {attributeKeys.map((k) => {
                           const a = (e.attributes || {})[k];
-                          const meta = a && ATTRIBUTE_BASIS[a.basis];
                           return (
                             <td key={k} style={{ whiteSpace: "normal", verticalAlign: "top" }}>
                               {a ? (
                                 <>
                                   {a.value ?? <span className="muted">—</span>}
-                                  {meta && (
-                                    <div style={{ marginTop: 2 }}>
-                                      <span
-                                        className={"tag" + (a.basis === "tie" ? " amber" : "")}
-                                        title={meta.help}
-                                      >
-                                        {meta.label}
-                                      </span>
-                                    </div>
-                                  )}
+                                  <div style={{ marginTop: 2 }}>
+                                    <Provenance kind="basis" value={a.basis} size="sm" />
+                                  </div>
                                 </>
                               ) : (
                                 <span className="muted">—</span>
@@ -394,6 +364,7 @@ export default function EntitiesTable({ runId, profile }) {
                               runId={runId}
                               entityId={e.entity_id}
                               columns={displayColumns}
+                              recordPlural={recordPlural}
                             />
                           </td>
                         </tr>
@@ -435,7 +406,7 @@ export default function EntitiesTable({ runId, profile }) {
 }
 
 // The records inside one entity, with the earlier ID beside the new one.
-function EntityMembers({ runId, entityId, columns }) {
+function EntityMembers({ runId, entityId, columns, recordPlural }) {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
 
@@ -461,7 +432,7 @@ function EntityMembers({ runId, entityId, columns }) {
   if (!detail)
     return (
       <p className="muted pulse" style={{ fontSize: 12.5, margin: 0 }}>
-        Loading the records...
+        Loading the {recordPlural}...
       </p>
     );
 
@@ -482,8 +453,12 @@ function EntityMembers({ runId, entityId, columns }) {
                   {c.label}
                 </th>
               ))}
-              <th style={{ width: 130 }}>Earlier ID</th>
-              <th style={{ width: 130 }}>New ID</th>
+              <th style={{ width: 130 }}>
+                Earlier ID <TermHint name="earlierId" />
+              </th>
+              <th style={{ width: 130 }}>
+                New ID <TermHint name="entityId" />
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -520,7 +495,7 @@ function EntityMembers({ runId, entityId, columns }) {
                       </span>
                     ) : (
                       <span className="muted" style={{ fontSize: 12 }}>
-                        never reviewed
+                        no earlier ID
                       </span>
                     )}
                   </td>
@@ -540,7 +515,7 @@ function EntityMembers({ runId, entityId, columns }) {
       </div>
       {detail.members_truncated && (
         <p className="muted" style={{ fontSize: 11.5, margin: "6px 0 0" }}>
-          Only the first {members.length} records are shown.
+          Only the first {members.length} {recordPlural} are shown.
         </p>
       )}
     </div>

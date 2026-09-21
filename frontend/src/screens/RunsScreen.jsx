@@ -10,7 +10,10 @@ import { fmtNumber, fmtPct, fmtDateTime, timeAgo } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
 import { useProfile } from "../profile";
 import { hasEntityCounts, hasExactCounts, hasPairCounts, hasRecordCounts, trackCountKey } from "../counts";
-import { decidedBy } from "./RunDetailScreen";
+import { Term, TermHint } from "../components/Term";
+import { BUCKET_LABELS } from "../components/DiffHero";
+import { noun } from "../profileText";
+import { scoredBy } from "./RunDetailScreen";
 
 // Old linkage runs report pair buckets; a run that only loaded records does not.
 // The list shows whichever set of numbers the runs actually carry.
@@ -40,6 +43,8 @@ export default function RunsScreen() {
   const navigate = useNavigate();
   const profile = useProfile();
   const tracks = profile.tracks || [];
+  const recordPlural = noun(profile, "record_plural");
+  const recordPluralCap = recordPlural.charAt(0).toUpperCase() + recordPlural.slice(1);
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -126,8 +131,9 @@ export default function RunsScreen() {
         <div>
           <h1 className="page-title">Runs</h1>
           <p className="page-sub">
-            Each run reads one {profile.input?.label || "input file"} and reconciles
-            the records inside it. Labels persist across runs.
+            Each <Term name="run" /> reads one {profile.input?.label || "input file"} and groups
+            the {recordPlural} inside it. Every <Term name="label" /> a reviewer saves is kept and
+            used by the next run.
           </p>
         </div>
         <button
@@ -143,7 +149,9 @@ export default function RunsScreen() {
       {latest && !hasPairCounts(latest.counts) && hasRecordCounts(latest.counts) && (
         <div className="kpi-grid" style={{ marginBottom: 20 }}>
           <div className="kpi">
-            <div className="label">Records (latest)</div>
+            <div className="label">
+              {recordPluralCap} (latest run) <TermHint name="record" />
+            </div>
             <div className="value">{fmtNumber(latest.counts.recordsTotal)}</div>
             <div className="delta muted">
               {fmtNumber(latest.counts.inputRows)} rows in the file
@@ -151,7 +159,9 @@ export default function RunsScreen() {
           </div>
           {tracks.map((t) => (
             <div className="kpi" key={t.key}>
-              <div className="label">{t.label}</div>
+              <div className="label">
+                {t.label} <TermHint name="track" />
+              </div>
               <div className="value">{fmtNumber(latest.counts[trackCountKey(t.key)])}</div>
               <div className="delta muted">
                 {fmtPct(
@@ -160,18 +170,20 @@ export default function RunsScreen() {
                     : 0,
                   1
                 )}{" "}
-                of records
+                of {recordPlural}
               </div>
             </div>
           ))}
           {hasExactCounts(latest.counts) && (
             <div className="kpi">
-              <div className="label">Entities after exact keys</div>
+              <div className="label">
+                Entities after the match keys <TermHint name="matchKey" />
+              </div>
               <div className="value">{fmtNumber(latest.counts.exactEntitiesAfter)}</div>
               <div className="delta muted">
-                {fmtNumber(latest.counts.exactMergedRecords)} records merged
+                {fmtNumber(latest.counts.exactMergedRecords)} {recordPlural} merged
                 {latest.counts.exactHeldGroups
-                  ? `, ${fmtNumber(latest.counts.exactHeldGroups)} held`
+                  ? `, ${fmtNumber(latest.counts.exactHeldGroups)} held groups`
                   : ""}
               </div>
             </div>
@@ -182,7 +194,7 @@ export default function RunsScreen() {
               {fmtNumber(latest.counts.recordsUnreviewed)}
             </div>
             <div className="delta muted">
-              {fmtNumber(latest.counts.recordsLabelled)} already labelled
+              {fmtNumber(latest.counts.recordsLabelled)} {recordPlural} a reviewer has answered
             </div>
           </div>
         </div>
@@ -191,7 +203,9 @@ export default function RunsScreen() {
       {latest && hasPairCounts(latest.counts) && (
         <div className="kpi-grid" style={{ marginBottom: 20 }}>
           <div className="kpi">
-            <div className="label">Pairs to review</div>
+            <div className="label">
+              Pairs for review <TermHint name="bucket" />
+            </div>
             <div className="value" style={{ color: "var(--amber)" }}>
               {fmtNumber(latest.counts.pairsReview)}
             </div>
@@ -203,20 +217,25 @@ export default function RunsScreen() {
           {hasEntityCounts(latest.counts) && (
             <>
               <div className="kpi">
-                <div className="label">Entities proposed</div>
+                <div className="label">
+                  Entities proposed <TermHint name="entity" />
+                </div>
                 <div className="value">{fmtNumber(latest.counts.entitiesProposed)}</div>
                 <div className="delta muted">
-                  from {fmtNumber(latest.counts.recordsTotal)} records and{" "}
+                  from {fmtNumber(latest.counts.recordsTotal)} {recordPlural} and{" "}
                   {fmtNumber(latest.counts.unitsTotal)} units
                 </div>
               </div>
               <div className="kpi">
-                <div className="label">Groups to decide</div>
+                <div className="label">
+                  Waiting for a person <TermHint name="withheldCluster" />
+                </div>
                 <div className="value" style={{ color: "var(--amber)" }}>
                   {fmtNumber(latest.counts.reviewQueue)}
                 </div>
                 <div className="delta muted">
-                  {fmtNumber(latest.counts.decisionsTotal)} already decided
+                  withheld clusters and held groups · {fmtNumber(latest.counts.decisionsTotal)}{" "}
+                  already settled
                 </div>
               </div>
               <div className="kpi">
@@ -279,7 +298,7 @@ export default function RunsScreen() {
           <Icons.search size={14} />
           <input
             className="input"
-            placeholder="Filter by run id, uploader, config..."
+            placeholder="Filter by run ID, who ran it, or config version..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -321,29 +340,31 @@ export default function RunsScreen() {
                 {anyPairs ? (
                   <>
                     <th className="tnum" style={{ textAlign: "right" }}>
-                      Records
+                      {recordPluralCap} <TermHint name="record" />
                     </th>
                     <th className="tnum" style={{ textAlign: "right" }}>
-                      Units
+                      Units <TermHint name="unit" />
                     </th>
                     <th className="tnum" style={{ textAlign: "right" }}>
-                      Accepted
+                      {BUCKET_LABELS.accept} <TermHint name="bucket" />
                     </th>
                     <th className="tnum" style={{ textAlign: "right" }}>
-                      Review
+                      {BUCKET_LABELS.review} <TermHint name="bucket" />
                     </th>
                     <th className="tnum" style={{ textAlign: "right" }}>
-                      Entities
+                      Entities <TermHint name="entity" />
                     </th>
                     <th className="tnum" style={{ textAlign: "right" }}>
-                      To decide
+                      Waiting <TermHint name="withheldCluster" />
                     </th>
-                    <th>Decided by</th>
+                    <th>
+                      Scored by <TermHint name="scorer" />
+                    </th>
                   </>
                 ) : (
                   <>
                     <th className="tnum" style={{ textAlign: "right" }}>
-                      Records
+                      {recordPluralCap} <TermHint name="record" />
                     </th>
                     {tracks.map((t) => (
                       <th
@@ -427,6 +448,9 @@ export default function RunsScreen() {
                         }}
                       >
                         {hasEntityCounts(r.counts) ? fmtNumber(r.counts.reviewQueue) : "—"}
+                      </td>
+                      <td style={{ fontSize: 12.5 }}>
+                        {hasPairCounts(r.counts) ? scoredBy(r.counts) : "—"}
                       </td>
                     </>
                   ) : (

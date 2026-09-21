@@ -2,13 +2,14 @@
    Thresholds & Splink — everything that belongs to one track
    ------------------------------------------------------------
    Blocking rules decide which pairs are compared at all, the
-   comparisons decide how a pair is scored, the EM blocks are used
-   only while the model estimates its own weights, and the pair
-   budget stops a run whose blocking would be ruinous.
+   comparisons decide how a pair is scored, the training blocks are
+   used only while Splink works out its own weights, and the pair
+   budget stops a run whose blocking rules would be ruinous.
    ============================================================ */
 
 import { useState } from "react";
 import { Icons } from "../../components/Icons";
+import { Term, TermHint } from "../../components/Term";
 import {
   COMPARISON_TYPES,
   columnsFromSql,
@@ -145,15 +146,19 @@ function ThresholdChips({ value, onChange }) {
   );
 }
 
-/* ---------- SQL builder, simple or hand-written ---------- */
-function SqlBuilder({ sql, onChange, columnOptions, advanced, setAdvanced }) {
+/* ---------- the rule text: picked from columns, or written by hand ----------
+   The stored form is SQL, where `l.` is the left record and `r.` is the right
+   one. Most rules are a plain list of columns that must be equal, so the
+   picker handles those and the raw text is only ever shown under a label
+   saying what it is. */
+function SqlBuilder({ sql, onChange, columnOptions, advanced, setAdvanced, what }) {
   const parsed = columnsFromSql(sql);
   const isAdvanced = advanced === undefined ? parsed === null : advanced;
 
   function toggle(next) {
     if (!next && parsed === null && String(sql || "").trim()) {
       const ok = confirm(
-        "This rule is hand-written SQL that the simple builder cannot hold. Switching will clear it. Continue?"
+        `This ${what} is written out by hand and the column picker cannot hold it. Switching will clear it. Continue?`
       );
       if (!ok) return;
       onChange("");
@@ -164,13 +169,19 @@ function SqlBuilder({ sql, onChange, columnOptions, advanced, setAdvanced }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {isAdvanced ? (
-        <textarea
-          className="textarea mono"
-          style={{ fontSize: 12.5, minHeight: 46 }}
-          placeholder="l.surname = r.surname AND substr(l.postcode, 1, 3) = substr(r.postcode, 1, 3)"
-          value={sql || ""}
-          onChange={(e) => onChange(e.target.value)}
-        />
+        <>
+          <div className="muted" style={{ fontSize: 11.5 }}>
+            The rule text, written out. <span className="mono">l.</span> is the left record and{" "}
+            <span className="mono">r.</span> is the right one.
+          </div>
+          <textarea
+            className="textarea mono"
+            style={{ fontSize: 12.5, minHeight: 46 }}
+            placeholder="l.surname = r.surname AND substr(l.postcode, 1, 3) = substr(r.postcode, 1, 3)"
+            value={sql || ""}
+            onChange={(e) => onChange(e.target.value)}
+          />
+        </>
       ) : (
         <ColumnChips
           value={parsed || []}
@@ -181,13 +192,13 @@ function SqlBuilder({ sql, onChange, columnOptions, advanced, setAdvanced }) {
       )}
       <label style={{ fontSize: 12, display: "flex", gap: 6, alignItems: "center" }}>
         <input type="checkbox" checked={isAdvanced} onChange={(e) => toggle(e.target.checked)} />
-        <span className="muted">Advanced SQL</span>
-        {!isAdvanced && sql && (
-          <code className="muted" style={{ fontSize: 11.5 }}>
-            {sql}
-          </code>
-        )}
+        <span className="muted">Write the rule text myself</span>
       </label>
+      {!isAdvanced && sql && (
+        <div className="muted" style={{ fontSize: 11.5, overflowWrap: "anywhere" }}>
+          rule text: <code className="mono">{sql}</code>
+        </div>
+      )}
     </div>
   );
 }
@@ -208,7 +219,8 @@ export default function LinkageTrack({
     max_pairs: 0,
   };
   const base = `linkage_settings.tracks.${track}`;
-  // Which rules the user has forced into, or out of, advanced mode this session.
+  // Which rules the user has forced into, or out of, hand-written mode this
+  // session.
   const [advanced, setAdvancedState] = useState({});
   const setAdvanced = (id, value) => setAdvancedState((a) => ({ ...a, [id]: value }));
 
@@ -232,21 +244,23 @@ export default function LinkageTrack({
       {/* Blocking rules */}
       <div className="card" style={{ minWidth: 0 }}>
         <div className="card-h">
-          <h3>Blocking rules</h3>
+          <h3>
+            <Term name="blockingRule" plural cap />
+          </h3>
           <div className="actions">
             <button
               className="btn sm"
               onClick={() => editBlocking((list) => [...list, newBlockingRule()])}
             >
               <Icons.plus size={12} />
-              Add rule
+              Add blocking rule
             </button>
           </div>
         </div>
         <div className="card-b" style={{ paddingBottom: 0 }}>
           <p className="muted" style={{ fontSize: 12.5, margin: 0, lineHeight: 1.5 }}>
-            Only pairs that satisfy at least one blocking rule are compared. Tight rules are fast
-            and may miss matches; loose rules find more and cost more.
+            Only pairs that satisfy at least one blocking rule are compared. A tight blocking rule
+            is fast and may miss matches; a loose one finds more and costs more.
           </p>
         </div>
         {t.blocking_rules.length === 0 ? (
@@ -262,7 +276,9 @@ export default function LinkageTrack({
               <tr>
                 <th style={{ width: 34 }}>#</th>
                 <th style={{ width: 62 }}>Order</th>
-                <th>Rule</th>
+                <th>
+                  Blocking rule <TermHint name="blockingRule" />
+                </th>
                 <th style={{ width: 44 }}></th>
               </tr>
             </thead>
@@ -284,7 +300,7 @@ export default function LinkageTrack({
                     <td style={{ whiteSpace: "normal", minWidth: 0 }}>
                       <DescriptionInput
                         value={r.description}
-                        placeholder="What this rule blocks on, in a sentence"
+                        placeholder="What this blocking rule compares, in a sentence"
                         onChange={(v) =>
                           editBlocking((list) =>
                             list.map((x, j) => (j === i ? { ...x, description: v } : x))
@@ -294,6 +310,7 @@ export default function LinkageTrack({
                       <div style={{ marginTop: 8 }}>
                         <SqlBuilder
                           sql={r.sql}
+                          what="blocking rule"
                           columnOptions={columnOptions}
                           advanced={advanced[r.id]}
                           setAdvanced={(v) => setAdvanced(r.id, v)}
@@ -306,7 +323,7 @@ export default function LinkageTrack({
                     <td style={{ verticalAlign: "top", paddingTop: 11 }}>
                       <button
                         className="btn sm ghost"
-                        title="Delete this rule"
+                        title="Delete this blocking rule"
                         onClick={() => editBlocking((list) => list.filter((_, j) => j !== i))}
                       >
                         <Icons.x size={12} />
@@ -324,9 +341,11 @@ export default function LinkageTrack({
       {/* Comparisons */}
       <div className="card" style={{ minWidth: 0 }}>
         <div className="card-h">
-          <h3>Comparisons</h3>
+          <h3>
+            <Term name="comparison" plural cap />
+          </h3>
           <span className="muted" style={{ fontSize: 12 }}>
-            how a pair that got through blocking is scored
+            how a pair that got through the blocking rules is scored
           </span>
           <div className="actions">
             <button
@@ -350,7 +369,9 @@ export default function LinkageTrack({
               <tr>
                 <th style={{ width: 34 }}>#</th>
                 <th style={{ width: 62 }}>Order</th>
-                <th>Comparison</th>
+                <th>
+                  Comparison <TermHint name="comparison" />
+                </th>
                 <th style={{ width: 44 }}></th>
               </tr>
             </thead>
@@ -461,8 +482,9 @@ export default function LinkageTrack({
                       )}
 
                       {spec?.preserveArgs && Object.keys(c.splink_args || {}).length > 0 && (
-                        <div className="mono muted" style={{ fontSize: 11.5, marginTop: 8 }}>
-                          options kept as saved: {JSON.stringify(c.splink_args)}
+                        <div className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
+                          This comparison carries Splink's own settings. They are kept exactly as
+                          they were saved, and they are not edited here.
                         </div>
                       )}
 
@@ -475,7 +497,7 @@ export default function LinkageTrack({
                           alignItems: "center",
                           marginTop: 8,
                         }}
-                        title="Splink's term-frequency adjustment"
+                        title="A value that is rare in the data counts for more than a common one."
                       >
                         <input
                           type="checkbox"
@@ -488,7 +510,7 @@ export default function LinkageTrack({
                             )
                           }
                         />
-                        Rare values count for more (term frequency)
+                        Rare values count for more
                       </label>
                       )}
                     </td>
@@ -511,11 +533,11 @@ export default function LinkageTrack({
         )}
       </div>
 
-      {/* EM training blocks and the pair budget */}
+      {/* Training blocks and the pair budget */}
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 16 }}>
         <div className="card" style={{ minWidth: 0 }}>
           <div className="card-h">
-            <h3>EM training blocks</h3>
+            <h3>Training blocks</h3>
             <div className="actions">
               <button
                 className="btn sm"
@@ -527,12 +549,13 @@ export default function LinkageTrack({
             </div>
           </div>
           <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
-              Used only while the model estimates its weights.
+            <p className="muted" style={{ fontSize: 12.5, margin: 0, lineHeight: 1.5 }}>
+              Used only while Splink works out its own weights, never when the run scores pairs.
+              Each one holds two columns steady so the others can be measured.
             </p>
             {t.em_blocking_rules.length === 0 ? (
               <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
-                None set. Splink will use its own default.
+                None set. Splink uses its own default.
               </p>
             ) : (
               t.em_blocking_rules.map((sql, i) => (
@@ -540,6 +563,7 @@ export default function LinkageTrack({
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <SqlBuilder
                       sql={sql}
+                      what="training block"
                       columnOptions={columnOptions}
                       advanced={advanced[`em${i}`]}
                       setAdvanced={(v) => setAdvanced(`em${i}`, v)}
@@ -552,7 +576,7 @@ export default function LinkageTrack({
                   </div>
                   <button
                     className="btn sm ghost"
-                    title="Delete this block"
+                    title="Delete this training block"
                     onClick={() =>
                       editTrack({
                         em_blocking_rules: t.em_blocking_rules.filter((_, j) => j !== i),
@@ -569,7 +593,9 @@ export default function LinkageTrack({
 
         <div className="card" style={{ minWidth: 0, alignSelf: "flex-start" }}>
           <div className="card-h">
-            <h3>Pair budget</h3>
+            <h3>
+              Pair budget <TermHint name="pair" />
+            </h3>
           </div>
           <div className="card-b">
             <div className="field">
@@ -589,7 +615,7 @@ export default function LinkageTrack({
                 {t.max_pairs != null && Number.isFinite(+t.max_pairs)
                   ? `${(+t.max_pairs).toLocaleString("en-GB")} pairs. `
                   : ""}
-                A run stops before scoring if the blocking rules would create more pairs than this.
+                A run stops before scoring if the blocking rules would make more pairs than this.
               </div>
             </div>
           </div>

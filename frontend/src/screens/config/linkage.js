@@ -1,12 +1,12 @@
 /* ============================================================
    linkage_settings — reading, normalising and building
    ------------------------------------------------------------
-   The settings that drive Splink live beside the ruleset in every
-   config version. LINKAGE.md is the contract: thresholds and EM
-   settings at the top level, and everything else under
-   tracks.<track>. Older versions kept one flat set of blocking
-   rules and comparisons, so loading a draft converts those into
-   the per-track shape.
+   The settings that drive Splink live beside the rest of every
+   config version. LINKAGE.md is the contract: the three decision
+   lines and the training settings at the top level, and everything
+   else under tracks.<track>. Older versions kept one flat set of
+   blocking rules and comparisons, so loading a draft converts those
+   into the per-track shape.
    ============================================================ */
 
 export const DEFAULT_MAX_PAIRS = 20000000;
@@ -237,7 +237,7 @@ export function normalizeLinkage(raw, trackKeys) {
 
 /* ---------- editing helpers ---------- */
 
-export function newBlockingRule(existingIds) {
+export function newBlockingRule() {
   return { id: freshId("b"), description: "", sql: "" };
 }
 
@@ -254,7 +254,7 @@ export function newComparison(column) {
 
 // Switching comparison type drops the arguments the new type cannot use. The
 // two name comparisons keep whatever they already carry, because their options
-// are Splink's own and this UI does not edit them.
+// are Splink's own and this screen does not edit them.
 export function retypeComparison(c, fn) {
   const spec = comparisonSpec(fn);
   const next = {
@@ -276,8 +276,9 @@ export function retypeComparison(c, fn) {
   return next;
 }
 
-// The three thresholds must stay in order. Moving one pushes the others rather
-// than letting the user save a set that cannot mean anything.
+// The three decision lines must stay in order: candidate floor, then review
+// line, then accept line. Moving one pushes the others rather than letting the
+// user save a set that cannot mean anything.
 export function orderedThresholds(settings, which, value) {
   const candidate = settings.match_probability_threshold_candidate;
   const review = settings.match_probability_threshold_review;

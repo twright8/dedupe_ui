@@ -1,26 +1,30 @@
 /* ============================================================
    ThresholdPanel — the score distribution, brushable
    ------------------------------------------------------------
-   Two distinct controls on one distribution, as in roe_ui:
-   - the two SLIDERS set the accept and review lines, applied to the
-     run by the re-bucket call
-   - dragging across the HISTOGRAM brushes a score window for bulk
+   Two distinct controls on one distribution:
+   - the two SLIDERS set the accept line and the review line, applied
+     to the run by the re-bucket call
+   - dragging across the HISTOGRAM brushes a band of scores for bulk
      labelling (a labelling slice, not a rule)
 
    The series come from GET /pairs/histogram. Bars can be stacked by
-   final bucket, or by whether the imported labels agree, which is
-   how the owner picks a line: a band where the old labels disagree
-   is a band worth reading rather than accepting.
+   final bucket, or by whether the earlier grouping agrees, which is
+   how the owner picks a line: a band where the earlier grouping
+   disagrees is a band worth reading rather than accepting.
    ============================================================ */
 
 import { useRef, useState } from "react";
 import { Icons } from "./Icons";
 import { fmtNumber, fmtPct } from "./ProbBar";
+import { Term, TermHint } from "./Term";
+import { BUCKET_LABELS } from "./DiffHero";
+import { FIGURE_SET_BY_KEY } from "../glossary";
 
+/* The three buckets, in the one vocabulary the whole tool uses. */
 const BUCKET_SERIES = [
-  { key: "accept", label: "auto-accept", colour: "var(--green)" },
-  { key: "review", label: "review", colour: "var(--amber)" },
-  { key: "reject", label: "rejected", colour: "var(--ti-red)" },
+  { key: "accept", label: BUCKET_LABELS.accept, colour: "var(--green)" },
+  { key: "review", label: BUCKET_LABELS.review, colour: "var(--amber)" },
+  { key: "reject", label: BUCKET_LABELS.reject, colour: "var(--ti-red)" },
 ];
 
 function importSeries(earlier) {
@@ -103,9 +107,11 @@ export function ThresholdPanel({
     <div className="card">
       <div className="card-h" style={{ paddingBottom: 8 }}>
         <Icons.bolt size={16} />
-        <h3>Score distribution</h3>
+        <h3>
+          Score distribution <TermHint name="score" />
+        </h3>
         <span className="muted" style={{ fontSize: 12 }}>
-          · every scored pair · drag the chart to label a band
+          · every pair this run scored · drag the chart to label a band
         </span>
         <div className="actions">
           <div className="seg">
@@ -156,7 +162,7 @@ export function ThresholdPanel({
             }}
           >
             <span>
-              This run is read on the trained model's score.
+              This run is read on the <Term name="modelScore" />.
               {model.accept != null && (
                 <>
                   {" "}
@@ -169,8 +175,10 @@ export function ThresholdPanel({
                   It rejects below <span className="mono">{model.reject.toFixed(2)}</span>.
                 </>
               )}{" "}
-              Those two lines come from the answers held back for testing, so they are not sliders.
-              {!model.graded && " This model is a cold start, so it only re-orders the queue."}
+              Those two lines are set from the <Term name="testSet" />, so they are not sliders.
+              {!model.graded &&
+                " This is a new model: it has not been measured against the test set, so it only" +
+                  " re-orders the review queue and cannot move a pair into a different bucket."}
             </span>
             {model.warning && <span style={{ width: "100%" }}>{model.warning}</span>}
             <div className="seg" style={{ marginLeft: "auto" }}>
@@ -307,7 +315,7 @@ export function ThresholdPanel({
           <div style={{ marginTop: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
               <span className="eyebrow" style={{ color: "var(--green)" }}>
-                Auto-accept &ge;
+                Accept line <TermHint name="acceptLine" />
               </span>
               <span className="mono" style={{ fontSize: 12 }}>
                 {threshold.toFixed(2)}
@@ -327,7 +335,7 @@ export function ThresholdPanel({
           <div style={{ marginTop: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
               <span className="eyebrow" style={{ color: "var(--ti-red)" }}>
-                Review floor &ge;
+                Review line <TermHint name="reviewLine" />
               </span>
               <span className="mono" style={{ fontSize: 12 }}>
                 {reviewLow.toFixed(2)}
@@ -356,14 +364,17 @@ export function ThresholdPanel({
             }}
           >
             <span className="muted">
-              <span style={{ color: "var(--ti-red)" }}>reject &lt; {reviewLow.toFixed(2)}</span>
+              <span style={{ color: "var(--ti-red)" }}>
+                Rejected below {reviewLow.toFixed(2)}
+              </span>
               {" · "}
               <span style={{ color: "var(--amber)" }}>
-                review {reviewLow.toFixed(2)}–{threshold.toFixed(2)} ({fmtNumber(counts?.review)})
+                For review {reviewLow.toFixed(2)}–{threshold.toFixed(2)} (
+                {fmtNumber(counts?.review)})
               </span>
               {" · "}
               <span style={{ color: "var(--green)" }}>
-                accept &ge; {threshold.toFixed(2)} ({fmtNumber(counts?.accept)})
+                Accepted at {threshold.toFixed(2)} and above ({fmtNumber(counts?.accept)})
               </span>
             </span>
             <span className="spacer" />
@@ -379,7 +390,7 @@ export function ThresholdPanel({
               disabled={committing || !moved || (onModel && model.graded)}
               title={
                 onModel && model.graded
-                  ? "A graded model sets the lines from its test set"
+                  ? "A graded model has been measured against the test set, and sets the two lines from it"
                   : undefined
               }
             >
@@ -396,8 +407,8 @@ export function ThresholdPanel({
                 </>
               ) : (
                 <>
-                  Drag across the chart to grab a band to label. Moving a line re-buckets the run; it
-                  saves no answers.
+                  Drag across the chart to grab a band to label. Moving a line re-buckets the run.
+                  It saves no answers.
                 </>
               )}
             </div>
@@ -410,69 +421,77 @@ export function ThresholdPanel({
   );
 }
 
-/* How the run scored against the labels that already exist, in the same plain
-   words the Match keys tab uses. */
+/* How the run's grouping compares with the earlier grouping. Every row is one
+   way of measuring the same run, and each says in one line what it leaves in
+   and what it leaves out. */
 function ScoreEvalStrip({ scoreEval, earlier }) {
+  const name = earlier || "earlier grouping";
   const rows = [
     {
       key: "all",
-      label: "Everything the run would publish",
+      label: FIGURE_SET_BY_KEY.all.label,
       value: scoreEval,
-      help: "The exact groups plus every accepted pair.",
+      help: "Every exact group, plus every pair the run accepted, however it was accepted.",
     },
     {
       key: "score_only",
-      label: "The scorer on its own",
+      label: FIGURE_SET_BY_KEY.score_only.label,
       value: scoreEval.score_only,
-      help: "Without the pairs the earlier labels accepted. The honest number for tuning.",
+      help: `Only the pairs the score accepted. Pairs accepted because both sides already carried the same earlier ID are left out, so the ${name} is not marking its own work.`,
     },
     {
-      // Only worth a row once a rule has actually stopped something. With no
-      // vetoes in the ruleset this line repeats the one above it exactly.
+      // Only worth a row once a veto rule has actually stopped something. With
+      // no veto rules in force this line repeats the one above it exactly.
       key: "without_vetoes",
-      label: "The scorer on its own, before the rules",
+      label: FIGURE_SET_BY_KEY.without_vetoes.label,
       value: scoreEval.vetoes?.vetoed > 0 ? scoreEval.without_vetoes?.score_only : null,
-      help: "The same again with every veto rule taken out. The gap between these two lines is what the rules cost in recall and bought in precision.",
+      help: "The same again, with every veto rule taken out. The gap between these two rows is what the veto rules cost in recall and bought in precision.",
     },
     {
       key: "splink_only",
-      label: "The Splink score on its own",
+      label: FIGURE_SET_BY_KEY.splink_only.label,
       value: scoreEval.splink_only,
-      help: "What Splink alone would have decided, with no model.",
+      help: "What the Splink score would have decided on its own, with no model in force.",
     },
     {
       key: "model_only",
-      label: "The model on its own",
+      label: FIGURE_SET_BY_KEY.model_only.label,
       value: scoreEval.model_only,
-      help: "What the model alone would have decided, with no earlier labels laid over it.",
+      help: `What the model score would have decided on its own, with nothing from the ${name} laid over it.`,
     },
     {
       key: "with_human",
-      label: "With the human decisions applied",
+      label: FIGURE_SET_BY_KEY.with_human.label,
       value: scoreEval.with_human,
-      help: "The same, with your TRUE labels joined up and your FALSE labels pulled apart. This is what the run would publish today.",
+      help: "The same, with every pair a reviewer answered Match joined up and every pair answered Not a match pulled apart. This is what the run would publish today.",
     },
     {
       key: "exact_only",
-      label: "The match keys on their own",
+      label: FIGURE_SET_BY_KEY.exact_only.label,
       value: scoreEval.exact_only,
-      help: "Stage 2 alone, for comparison.",
+      help: "Only the match keys, with no scoring at all.",
     },
   ].filter((r) => r.value);
 
   return (
     <div style={{ marginTop: 14, borderTop: "1px solid var(--line)", paddingTop: 12 }}>
       <div className="eyebrow" style={{ marginBottom: 6 }}>
-        Agreement with the {earlier || "earlier grouping"}
+        Agreement with the {name} <TermHint name="earlierGrouping" />
       </div>
       <div className="tbl-wrap">
         <table className="t" style={{ borderRadius: 0 }}>
           <thead>
             <tr>
               <th>Measured on</th>
-              <th style={{ width: 110, textAlign: "right" }}>Pair precision</th>
-              <th style={{ width: 110, textAlign: "right" }}>Pair recall</th>
-              <th style={{ width: 120, textAlign: "right" }}>Entities after</th>
+              <th style={{ width: 110, textAlign: "right" }}>
+                Pair precision <TermHint name="pairPrecision" />
+              </th>
+              <th style={{ width: 110, textAlign: "right" }}>
+                Pair recall <TermHint name="pairRecall" />
+              </th>
+              <th style={{ width: 120, textAlign: "right" }}>
+                Entities after <TermHint name="entity" />
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -499,8 +518,9 @@ function ScoreEvalStrip({ scoreEval, earlier }) {
         </table>
       </div>
       <div className="muted" style={{ fontSize: 11.5, marginTop: 6, lineHeight: 1.5 }}>
-        Precision: of the labelled pairs this run joins, how many the {earlier || "earlier grouping"}{" "}
-        also joined. Recall: of the pairs it joined, how many this run already finds.
+        Pair precision is the share of the pairs this run joins that the {name} had already joined.
+        Pair recall is the share of the pairs the {name} joined that this run joins too. Both count
+        only pairs the {name} has an answer for.
         {scoreEval.conflicts > 0 && (
           <>
             {" "}

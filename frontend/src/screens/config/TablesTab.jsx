@@ -1,11 +1,13 @@
 /* ============================================================
    Config tab: Tables
    ------------------------------------------------------------
-   Two kinds of named table live in a ruleset. A token list is a set
-   of upper-case tokens ("MR", "RT HON"). A lookup maps a raw value
-   to a canonical one, with a fallback for values it does not hold.
-   Rules refer to both by name, so deleting one a rule still uses is
-   allowed here and reported by validation.
+   Two kinds of named table live in a config version. A token list
+   is a set of upper-case tokens ("MR", "RT HON"). A lookup maps a
+   raw value to a canonical one, with a fallback for values it does
+   not hold. Cleaning steps, track rules, derived column rules,
+   match keys and veto rules all refer to these tables by name, so
+   deleting one that is still in use is allowed here and reported by
+   validation.
    ============================================================ */
 
 import { useState } from "react";
@@ -18,7 +20,7 @@ const FALLBACKS = [
   { value: "error", help: "Stop the run and report every unmapped value." },
 ];
 
-// A name a rule can refer to: lower-case, no spaces.
+// A name the other tabs can refer to: lower-case, no spaces.
 function cleanName(name) {
   return String(name || "")
     .trim()
@@ -102,7 +104,12 @@ export default function TablesTab({ ruleset, setRuleset, errors }) {
   }
 
   function deleteTable(kind, name) {
-    if (!confirm(`Delete "${name}"? Rules that still use it will fail validation.`)) return;
+    if (
+      !confirm(
+        `Delete "${name}"? Anything that still uses it — a cleaning step, a track rule, a derived column rule, a match key or a veto rule — will fail validation.`
+      )
+    )
+      return;
     setRuleset((rs) => {
       const copy = { ...rs[kind] };
       delete copy[name];

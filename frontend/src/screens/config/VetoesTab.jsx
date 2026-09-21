@@ -1,20 +1,21 @@
 /* ============================================================
-   Config tab: Vetoes
+   Config tab: Veto rules
    ------------------------------------------------------------
-   A veto is a plain rule about a pair. It stops the scorer
-   accepting something a person would never accept, whatever the
-   score says. Two people born 37 years apart are not one person,
-   even when the name and the postcode agree.
+   A veto rule is a rule about a pair. It stops the tool accepting
+   something a person would never accept, whatever the score says.
+   Two people born 37 years apart are not one person, even when the
+   name and the postcode agree.
 
-   A veto's conditions compare the left side's value with the right
-   side's value of one column. A condition is false when either side
-   is missing, so absent data never triggers a veto.
+   A veto rule's conditions compare the left side's value with the
+   right side's value of one column. A condition is false when
+   either side is missing, so absent data never triggers one.
    ============================================================ */
 
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../api";
 import { Icons } from "../../components/Icons";
+import { Term, TermHint } from "../../components/Term";
 import { fmtNumber, fmtProb } from "../../components/ProbBar";
 import { Empty } from "../../components/Empty";
 import {
@@ -37,8 +38,8 @@ import {
   RunPicker,
 } from "./shared";
 
-// The operators a veto may use, in plain words. `arg` says what the author
-// must supply beside the column.
+// The operators a veto rule may use, in plain words. `arg` says what the
+// author must supply beside the column.
 const OPS = [
   { op: "differs", label: "both present and different", arg: null },
   { op: "abs_diff_gt", label: "numbers more than … apart", arg: "number" },
@@ -212,15 +213,15 @@ export default function VetoesTab({ ruleset, setRuleset, errors, warnings, profi
       <SectionWarnings warnings={errorsOnSection(warnings, "vetoes")} />
 
       <p className="muted" style={{ fontSize: 12.5, margin: 0, lineHeight: 1.6, maxWidth: "80ch" }}>
-        A veto is a rule about a pair of records. It stops the scorer accepting something a person
-        would never accept, whatever the score says. Two people born thirty years apart are not one
-        person, even when the name and the postcode agree. Four things decide a pair, in this order:
-        the score or the model decides first, a veto can overrule that, an earlier grouping can
-        overrule a veto, and your own answer overrules everything.
+        A <Term name="veto" /> is a rule about a pair of records. It stops the tool accepting
+        something a person would never accept, whatever the score says. Two people born thirty
+        years apart are not one person, even when the name and the postcode agree. Four things
+        decide a pair, in this order: the score decides first, a veto rule can overrule the score,
+        the earlier grouping can overrule a veto rule, and your own answer overrules everything.
       </p>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <div className="seg" title="Which track these vetoes apply to">
+        <div className="seg" title="Which track these veto rules apply to">
           {tracks.map((t) => (
             <button key={t.key} className={track === t.key ? "on" : ""} onClick={() => setTrack(t.key)}>
               {t.label}
@@ -233,14 +234,16 @@ export default function VetoesTab({ ruleset, setRuleset, errors, warnings, profi
         <div className="spacer" />
         <button className="btn sm" onClick={addVeto}>
           <Icons.plus size={12} />
-          Add veto
+          Add veto rule
         </button>
       </div>
 
       <div style={EDITOR_GRID}>
         <div className="card" style={{ minWidth: 0 }}>
           <div className="card-h">
-            <h3>Vetoes</h3>
+            <h3>
+              <Term name="veto" plural cap />
+            </h3>
             <span className="muted" style={{ fontSize: 12 }}>
               every condition must hold &middot; a missing value never triggers one
             </span>
@@ -248,7 +251,7 @@ export default function VetoesTab({ ruleset, setRuleset, errors, warnings, profi
           {forTrack.length === 0 ? (
             <div className="card-b">
               <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-                No vetoes for this track. The score and the model decide every pair on their own.
+                No veto rules for this track. The score decides every pair on its own.
               </p>
             </div>
           ) : (
@@ -257,7 +260,9 @@ export default function VetoesTab({ ruleset, setRuleset, errors, warnings, profi
                 <tr>
                   <th style={{ width: 34 }}>#</th>
                   <th style={{ width: 62 }}>Order</th>
-                  <th>Veto</th>
+                  <th>
+                    Veto rule <TermHint name="veto" />
+                  </th>
                   <th style={{ width: 44 }}></th>
                 </tr>
               </thead>
@@ -285,7 +290,7 @@ export default function VetoesTab({ ruleset, setRuleset, errors, warnings, profi
                       <td style={{ whiteSpace: "normal", minWidth: 0 }}>
                         <DescriptionInput
                           value={v.description}
-                          placeholder="What this veto stops, in a sentence"
+                          placeholder="What this veto rule stops, in a sentence"
                           onChange={(text) => updateVeto(index, { description: text })}
                         />
 
@@ -370,7 +375,7 @@ export default function VetoesTab({ ruleset, setRuleset, errors, warnings, profi
                       <td style={{ verticalAlign: "top", paddingTop: 11 }}>
                         <button
                           className="btn sm ghost"
-                          title="Delete this veto"
+                          title="Delete this veto rule"
                           onClick={() => editVetoes((list) => list.filter((_, i) => i !== index))}
                         >
                           <Icons.x size={12} />
@@ -393,7 +398,7 @@ export default function VetoesTab({ ruleset, setRuleset, errors, warnings, profi
 }
 
 /* ============================================================
-   Preview — what the draft's vetoes would stop
+   Preview — what the draft's veto rules would stop
    ============================================================ */
 function VetoPreview({ ruleset }) {
   const navigate = useNavigate();
@@ -452,8 +457,8 @@ function VetoPreview({ ruleset }) {
   if (runs.length === 0) {
     return (
       <Empty
-        title="No scored run to test against"
-        sub="A veto is tested on pairs a run has already scored. Start a run, then come back."
+        title="No scored run to preview against"
+        sub="A veto rule is previewed on pairs a run has already scored. Start a run, then come back."
         action={
           <button className="btn primary" onClick={() => navigate("/runs/new")}>
             <Icons.play size={14} stroke="#fff" /> New run
@@ -469,7 +474,10 @@ function VetoPreview({ ruleset }) {
     <div className="card" style={PREVIEW_CARD_STYLE}>
       <div className="card-h">
         <Icons.bolt size={16} />
-        <h3>What these would stop</h3>
+        <h3>Preview</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          what these veto rules would stop in one run's pairs
+        </span>
         <div className="actions">
           <button className="btn sm" onClick={() => setAttempt((n) => n + 1)} disabled={loading}>
             <Icons.refresh size={12} />
@@ -496,13 +504,13 @@ function VetoPreview({ ruleset }) {
           </div>
         ) : rows.length === 0 ? (
           <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
-            {loading ? "Running the rules..." : "No vetoes to test yet."}
+            {loading ? "Running the veto rules..." : "No veto rules to test yet."}
           </p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 14, opacity: loading ? 0.5 : 1 }}>
             {result?.pairs_total != null && (
               <div className="muted" style={{ fontSize: 11.5 }}>
-                over {fmtNumber(result.pairs_total)} scored pairs
+                over {fmtNumber(result.pairs_total)} pairs this run scored
               </div>
             )}
             {rows.map((v) => {
@@ -513,8 +521,11 @@ function VetoPreview({ ruleset }) {
                   <div style={{ fontSize: 12.5, fontWeight: 600 }}>
                     {v.description || <span className="muted">(no description)</span>}
                   </div>
-                  <div className="mono muted" style={{ fontSize: 11, marginBottom: 6 }}>
-                    {v.id} &middot; {v.action === "reject" ? "reject" : "send to review"}
+                  <div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>
+                    {v.action === "reject" ? "Rejects the pair" : "Sends the pair for review"}{" "}
+                    <span className="mono" style={{ fontSize: 11 }}>
+                      {v.id}
+                    </span>
                   </div>
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                     <span
@@ -532,9 +543,9 @@ function VetoPreview({ ruleset }) {
                     </span>
                   </div>
                   <div className="muted" style={{ fontSize: 11.5 }}>
-                    {fmtNumber(v.pairs_hit)} pairs hit in all
+                    {fmtNumber(v.pairs_hit)} pairs match its conditions in all
                     {v.pairs_hit > 0 && v.accepted_pairs_hit === 0
-                      ? " — every one was already rejected, so this veto is doing nothing"
+                      ? " — every one was already rejected, so this veto rule changes nothing"
                       : ""}
                   </div>
                   {examples.length > 0 && (

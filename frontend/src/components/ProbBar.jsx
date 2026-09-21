@@ -1,9 +1,16 @@
 /* ============================================================
-   ProbBar, BandTag, and formatting helpers
+   ProbBar and the formatting helpers
+   ------------------------------------------------------------
+   The bar colours one score against the run's two lines. Its
+   defaults are the accept line and the review line the diff view
+   uses, so a caller that passes neither draws the same picture.
+
+   A score is always a decimal, never a percentage: fmtProb for a
+   pair's own score, and the same format for a line.
    ============================================================ */
 
-// ---------- Probability bar ----------
-export function ProbBar({ p, w = 60, high = 0.92, review = 0.7 }) {
+// ---------- Score bar ----------
+export function ProbBar({ p, w = 60, high = 0.92, review = 0.5 }) {
   const pct = Math.max(0, Math.min(1, p)) * 100;
   let color = "var(--ti-red)";
   if (p >= high) color = "var(--green)";
@@ -13,17 +20,6 @@ export function ProbBar({ p, w = 60, high = 0.92, review = 0.7 }) {
       <i style={{ width: `${pct}%`, background: color }} />
     </div>
   );
-}
-
-// ---------- Band tag ----------
-export function BandTag({ band, prob, method }) {
-  if (method === "exact") return <span className="tag blue"><span className="dot"/>exact</span>;
-  if (method === "reviewed_true_review") return <span className="tag green"><span className="dot"/>reviewed &#10003;</span>;
-  if (method === "reviewed_true_ambiguous") return <span className="tag green"><span className="dot"/>resolved</span>;
-  if (band === "auto-accept") return <span className="tag green"><span className="dot"/>auto-accept</span>;
-  if (band === "review") return <span className="tag amber"><span className="dot"/>review</span>;
-  if (band === "ambiguous") return <span className="tag violet"><span className="dot"/>ambiguous</span>;
-  return <span className="tag">{band || method}</span>;
 }
 
 // ---------- Formatting helpers ----------

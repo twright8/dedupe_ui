@@ -1,11 +1,12 @@
 /* ============================================================
-   ExactGroupsTable — the groups the match keys made, one per row
+   ExactGroupsTable — what the match keys made, one row each
    ------------------------------------------------------------
-   A group is a set of records the exact keys decided are the same
-   thing. Merged groups went through; held groups hit a guard and
-   wait for a human. Agreement says how the group sits against the
-   labels that already exist. Filtering, sorting and paging happen
-   on the server; this component holds the controls' state.
+   An EXACT GROUP is a set of records a match key put together. A
+   HELD GROUP is a set of records a match key would have put
+   together, stopped by a guard, waiting for a person. Agreement
+   says how the group sits against the earlier grouping, in the
+   glossary's own words. Filtering, sorting and paging happen on the
+   server; this component holds the controls' state.
    ============================================================ */
 
 import { useState, useEffect } from "react";
@@ -14,49 +15,18 @@ import { Icons } from "./Icons";
 import { fmtNumber } from "./ProbBar";
 import { Empty } from "./Empty";
 import { Cell, NUMERIC_TYPES } from "./cells";
+import { Term, TermHint, Provenance, provenanceLabel } from "./Term";
+import { noun, existingLabelName } from "../profileText";
 
 const PER_PAGE = 50;
 
-// How each agreement value reads, and which tag colour carries it.
-const AGREEMENTS = [
-  {
-    key: "consistent",
-    label: "Consistent",
-    tag: "green",
-    help: "Every labelled record in the group already shares one entity ID.",
-  },
-  {
-    key: "conflict",
-    label: "Conflict",
-    tag: "red",
-    help: "The key joins records that carry different existing entity IDs.",
-  },
-  {
-    key: "extends",
-    label: "Extends",
-    tag: "blue",
-    help: "The key joins unreviewed records to one existing entity ID.",
-  },
-  {
-    key: "new",
-    label: "New",
-    tag: "",
-    help: "No record in this group was reviewed before.",
-  },
-];
-
-function agreementOf(key) {
-  return AGREEMENTS.find((a) => a.key === key);
-}
+// The API values the agreement filter offers. Every word beside them comes
+// from the glossary.
+const AGREEMENT_VALUES = ["consistent", "conflict", "extends", "new"];
 
 export function AgreementTag({ value }) {
-  const found = agreementOf(value);
-  if (!found) return <span className="muted">—</span>;
-  return (
-    <span className={"tag " + found.tag} title={found.help}>
-      {found.label}
-    </span>
-  );
+  if (!value) return <span className="muted">—</span>;
+  return <Provenance kind="agreement" value={value} size="sm" />;
 }
 
 /* A guard string in plain words. The two shapes the pipeline writes are
@@ -82,7 +52,7 @@ export function guardReason(guard) {
 }
 
 // ---------- expanded members ----------
-function GroupMembers({ runId, groupId, columns, existingIds }) {
+function GroupMembers({ runId, groupId, columns, existingIds, recordPlural }) {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
 
@@ -112,14 +82,14 @@ function GroupMembers({ runId, groupId, columns, existingIds }) {
   if (!detail) {
     return (
       <p className="muted pulse" style={{ fontSize: 12.5, margin: 0 }}>
-        Loading the records in this group...
+        Loading the {recordPlural} in this group...
       </p>
     );
   }
 
   const members = Array.isArray(detail.members) ? detail.members : [];
-  // More than one distinct ID in a group is exactly what a conflict looks like,
-  // so the ID column is the thing to make obvious. It gets its own last column,
+  // More than one earlier ID in a group is exactly what a conflict looks like,
+  // so that column is the thing to make obvious. It gets its own last column,
   // which means dropping the profile's own copy of it.
   const distinctIds = new Set(
     members.map((r) => r.existing_entity_id).filter(Boolean)
@@ -144,7 +114,7 @@ function GroupMembers({ runId, groupId, columns, existingIds }) {
                   {col.label}
                 </th>
               ))}
-              <th style={{ width: 170 }}>Entity ID</th>
+              <th style={{ width: 170 }}>Earlier ID</th>
             </tr>
           </thead>
           <tbody>
@@ -177,7 +147,7 @@ function GroupMembers({ runId, groupId, columns, existingIds }) {
                     </span>
                   ) : (
                     <span className="muted" style={{ fontSize: 12 }}>
-                      not reviewed
+                      no earlier ID
                     </span>
                   )}
                 </td>
@@ -188,12 +158,12 @@ function GroupMembers({ runId, groupId, columns, existingIds }) {
       </div>
       {detail.members_truncated && (
         <p className="muted" style={{ fontSize: 11.5, margin: 0 }}>
-          Only the first {members.length} records of this group are shown.
+          Only the first {members.length} {recordPlural} of this group are shown.
         </p>
       )}
       {conflicting && (
         <p style={{ fontSize: 12, color: "var(--ti-red)", margin: "4px 0 0" }}>
-          This group joins {distinctIds.size} different entity IDs
+          This group joins {distinctIds.size} different earlier IDs
           {existingIds && existingIds.length ? `: ${existingIds.join(", ")}` : ""}.
         </p>
       )}
@@ -204,6 +174,9 @@ function GroupMembers({ runId, groupId, columns, existingIds }) {
 // ---------- main table ----------
 export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
   const tracks = profile.tracks || [];
+  const recordPlural = noun(profile, "record_plural");
+  const recordPluralCap = recordPlural.charAt(0).toUpperCase() + recordPlural.slice(1);
+  const earlier = existingLabelName(profile) || "earlier grouping";
   const displayColumns =
     profile.display_columns && profile.display_columns.length
       ? profile.display_columns
@@ -371,11 +344,11 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
           ))}
         </div>
 
-        <div className="seg" title="Merged, or held for a human to decide">
+        <div className="seg" title="Merged by a match key, or held back by a guard">
           {[
             ["all", "All", null],
-            ["merged", "Merged", counts.merged],
-            ["held", "Held", counts.held],
+            ["merged", "Exact groups", counts.merged],
+            ["held", "Held groups", counts.held],
           ].map(([id, label, n]) => (
             <button
               key={id}
@@ -392,28 +365,27 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
           ))}
         </div>
 
-        <div className="seg" title="How the group sits against labels that already exist">
+        <div className="seg" title={`Against the ${earlier}`}>
           <button
             className={agreement === "all" ? "on" : ""}
             onClick={() => choose(setAgreement, "all")}
           >
             All
           </button>
-          {AGREEMENTS.map((a) => (
+          {AGREEMENT_VALUES.map((value) => (
             <button
-              key={a.key}
-              className={agreement === a.key ? "on" : ""}
-              onClick={() => choose(setAgreement, a.key)}
-              title={a.help}
+              key={value}
+              className={agreement === value ? "on" : ""}
+              onClick={() => choose(setAgreement, value)}
             >
               <span
-                style={a.key === "conflict" && counts.conflict > 0 ? { color: "var(--ti-red)" } : undefined}
+                style={value === "conflict" && counts.conflict > 0 ? { color: "var(--ti-red)" } : undefined}
               >
-                {a.label}
+                {provenanceLabel("agreement", value)}
               </span>
-              {counts[a.key] != null && (
+              {counts[value] != null && (
                 <span className="muted" style={{ fontSize: 11 }}>
-                  &middot; {fmtNumber(counts[a.key])}
+                  &middot; {fmtNumber(counts[value])}
                 </span>
               )}
             </button>
@@ -426,9 +398,9 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
             style={{ width: 190 }}
             value={keyId}
             onChange={(e) => choose(setKeyId, e.target.value)}
-            title="Filter by the key that made the group"
+            title="Filter by the match key that made the group"
           >
-            <option value="all">Any key</option>
+            <option value="all">Any match key</option>
             {keyOptions.map((k) => (
               <option key={k.id} value={k.id}>
                 {k.name}
@@ -460,8 +432,9 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
       </div>
 
       <p className="muted" style={{ fontSize: 12, margin: 0 }}>
-        These groups come from the exact keys alone. Scoring, the review queue and durable entity
-        IDs are not built yet, so there is nothing to confirm or split here.
+        An <Term name="exactGroup" /> is a set of {recordPlural} a <Term name="matchKey" /> put
+        together. A <Term name="heldGroup" /> is a set a match key would have put together, stopped
+        by a <Term name="guard" />, waiting for a person. Nothing here is scored.
       </p>
 
       {loading ? (
@@ -470,7 +443,7 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
         </p>
       ) : error ? (
         <Empty
-          title="Failed to load exact groups"
+          title="Could not load the exact groups"
           sub={error}
           action={
             <button className="btn primary" onClick={() => setAttempt((n) => n + 1)}>
@@ -480,11 +453,11 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
         />
       ) : items.length === 0 ? (
         <Empty
-          title="No groups found"
+          title="No exact groups found"
           sub={
             filtersOn
-              ? "No group matches these filters. Clear the search or pick another track."
-              : "The exact keys merged nothing in this run. Check the keys on the Config screen."
+              ? "No exact group matches these filters. Clear the search or pick another track."
+              : "The match keys merged nothing in this run. Check the match keys on the Config & rules screen."
           }
         />
       ) : (
@@ -493,12 +466,22 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
             <table className="t" style={{ tableLayout: "fixed" }}>
               <thead>
                 <tr>
-                  <th>Records in the group</th>
+                  <th>
+                    {recordPluralCap} in the group <TermHint name="record" />
+                  </th>
                   <th style={{ width: 60, textAlign: "right" }}>Size</th>
-                  <th style={{ width: 110 }}>Track</th>
-                  <th style={{ width: 120 }}>Keys</th>
-                  <th style={{ width: 120 }}>Agreement</th>
-                  <th style={{ width: 160 }}>Entity IDs</th>
+                  <th style={{ width: 110 }}>
+                    Track <TermHint name="track" />
+                  </th>
+                  <th style={{ width: 140 }}>
+                    Match keys <TermHint name="matchKey" />
+                  </th>
+                  <th style={{ width: 140 }}>
+                    Against the {earlier} <TermHint name="earlierGrouping" />
+                  </th>
+                  <th style={{ width: 160 }}>
+                    Earlier IDs <TermHint name="earlierId" />
+                  </th>
                   {priorityColumn && (
                     <th style={{ width: 110, textAlign: "right" }}>{priorityColumn.label}</th>
                   )}
@@ -530,7 +513,7 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
                         </div>
                         {g.status === "held" && (
                           <div style={{ fontSize: 12, color: "var(--amber)" }}>
-                            Held: {guardReason(g.guard) || "a guard stopped this merge"}
+                            Held group: {guardReason(g.guard) || "a guard stopped this merge"}
                           </div>
                         )}
                       </td>
@@ -543,11 +526,22 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
                       <td
                         style={{ fontSize: 12, whiteSpace: "normal", verticalAlign: "top" }}
                       >
-                        {(g.key_ids || []).map(keyName).join(", ")}
+                        {(g.key_ids || []).map((id) => (
+                          <div key={id}>
+                            {keyName(id)}
+                            {keyName(id) !== id && (
+                              <span className="muted mono" style={{ fontSize: 11, marginLeft: 5 }}>
+                                {id}
+                              </span>
+                            )}
+                          </div>
+                        ))}
                       </td>
                       <td style={{ verticalAlign: "top" }}>
                         {g.status === "held" ? (
-                          <span className="tag amber">Held</span>
+                          <span className="tag amber" title="A guard stopped a match key merging these records">
+                            Held group
+                          </span>
                         ) : (
                           <AgreementTag value={g.agreement} />
                         )}
@@ -555,7 +549,7 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
                       <td style={{ whiteSpace: "normal", verticalAlign: "top" }}>
                         {ids.length === 0 ? (
                           <span className="muted" style={{ fontSize: 12 }}>
-                            none yet
+                            no earlier ID
                           </span>
                         ) : (
                           ids.map((id) => (
@@ -590,6 +584,7 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
                             groupId={g.group_id}
                             columns={displayColumns}
                             existingIds={ids}
+                            recordPlural={recordPlural}
                           />
                         </td>
                       </tr>

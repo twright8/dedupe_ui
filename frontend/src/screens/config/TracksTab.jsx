@@ -1,8 +1,8 @@
 /* ============================================================
    Config tab: Tracks
    ------------------------------------------------------------
-   Track rules decide whether a record is a person or an
-   organisation. They are tried in order; the first rule whose
+   A track rule decides whether a record is a person or an
+   organisation. Track rules are tried in order; the first one whose
    conditions all hold wins, and the default track catches the rest.
    Conditions read the raw profile columns, before any cleaning.
    The preview runs the draft against a real run's records.
@@ -12,6 +12,7 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../api";
 import { Icons } from "../../components/Icons";
+import { Term, TermHint } from "../../components/Term";
 import { fmtNumber } from "../../components/ProbBar";
 import { Empty } from "../../components/Empty";
 import {
@@ -48,8 +49,8 @@ export default function TracksTab({ ruleset, setRuleset, errors, profile }) {
         <SectionErrors errors={sectionErrors} />
 
         <RuleList
-          title="Track rules"
-          subtitle="tried in order · first rule whose conditions all hold wins"
+          title={<Term name="trackRule" plural cap />}
+          subtitle="tried in order · the first track rule whose conditions all hold wins"
           emptyText="No track rules. Every record takes the default track below."
           rules={rules}
           editRules={editRules}
@@ -57,7 +58,9 @@ export default function TracksTab({ ruleset, setRuleset, errors, profile }) {
           tokenLists={ruleset.token_lists}
           errors={errors}
           pathPrefix="track_rules"
-          resultHeader="Track"
+          noun="track rule"
+          termName="trackRule"
+          resultHeader={<>Track <TermHint name="track" /></>}
           makeRule={(ids) => ({
             id: nextId("t", ids),
             description: "",
@@ -84,7 +87,7 @@ export default function TracksTab({ ruleset, setRuleset, errors, profile }) {
           <div className="card-h">
             <h3>Default track</h3>
             <span className="muted" style={{ fontSize: 12 }}>
-              used when no rule above holds
+              used when no track rule above holds
             </span>
           </div>
           <div className="card-b">
@@ -111,7 +114,7 @@ export default function TracksTab({ ruleset, setRuleset, errors, profile }) {
 }
 
 /* ============================================================
-   Preview — the draft's rules run against one run's records
+   Preview — the draft's track rules run against one run's records
    ============================================================ */
 function TrackPreview({ ruleset, tracks }) {
   const navigate = useNavigate();
@@ -178,12 +181,17 @@ function TrackPreview({ ruleset, tracks }) {
   }
 
   const ruleRows = Array.isArray(result?.rules) ? result.rules : [];
+  // The rules send records to a track by key. Show the track's own label.
+  const trackLabel = (key) => (tracks.find((t) => t.key === key) || {}).label || key;
 
   return (
     <div className="card" style={PREVIEW_CARD_STYLE}>
       <div className="card-h">
         <Icons.bolt size={16} />
-        <h3>Track preview</h3>
+        <h3>Preview</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          which track these track rules put each record on
+        </span>
       </div>
       <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <RunPicker runs={runs} runId={runId} setRunId={setRunId} />
@@ -192,6 +200,9 @@ function TrackPreview({ ruleset, tracks }) {
           <p style={{ fontSize: 12.5, color: "var(--ti-red)", margin: 0 }}>{error}</p>
         ) : (
           <>
+            <div className="eyebrow">
+              Records per track <TermHint name="track" />
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               {tracks.map((t) => (
                 <div key={t.key} className="kpi" style={{ padding: 10, opacity: loading ? 0.5 : 1 }}>
@@ -208,15 +219,17 @@ function TrackPreview({ ruleset, tracks }) {
 
             <div>
               <div className="eyebrow" style={{ marginBottom: 6 }}>
-                Hits per rule
+                Records caught, per track rule
               </div>
               {/* Fixed layout plus wrapping cells: a long rule description has
                   to fold inside the card rather than push Hits off its edge. */}
               <table className="t" style={{ borderRadius: 0, tableLayout: "fixed" }}>
                 <thead>
                   <tr>
-                    <th>Rule</th>
-                    <th style={{ width: 64, textAlign: "right" }}>Hits</th>
+                    <th>
+                      Track rule <TermHint name="trackRule" />
+                    </th>
+                    <th style={{ width: 64, textAlign: "right" }}>Records</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -239,12 +252,17 @@ function TrackPreview({ ruleset, tracks }) {
                           }}
                         >
                           {r.id === "default" ? (
-                            <em className="muted">default &rarr; {r.track}</em>
+                            <em className="muted">
+                              no track rule held &rarr; {trackLabel(r.track)}
+                            </em>
                           ) : (
                             <>
                               {r.description || <span className="muted">(no description)</span>}
-                              <div className="mono muted" style={{ fontSize: 11 }}>
-                                {r.id} &rarr; {r.track}
+                              <div className="muted" style={{ fontSize: 11 }}>
+                                puts the record on {trackLabel(r.track)}{" "}
+                                <span className="mono" style={{ fontSize: 11 }}>
+                                  {r.id}
+                                </span>
                               </div>
                             </>
                           )}
@@ -276,7 +294,7 @@ function TrackPreview({ ruleset, tracks }) {
               </table>
               {ruleRows.length > 0 && (
                 <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-                  Click a rule to see up to ten records it caught.
+                  Click a track rule to see up to ten records it caught.
                 </div>
               )}
             </div>

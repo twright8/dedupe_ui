@@ -2,17 +2,18 @@
    Config tab: Derived columns
    ------------------------------------------------------------
    A derived column standardises a category that is often wrong at
-   source (D8a). It has the same form as a track rule — ordered
-   conditions, first match wins — but it runs after cleaning, so its
-   conditions may read a cleaning target such as the padded company
-   number. Where no rule holds, the column takes the value of the
-   "default from" column.
+   source (D8a). Its rules have the same form as a track rule —
+   ordered conditions, first match wins — but they run after
+   cleaning, so a condition may read a cleaning target such as the
+   padded company number. Where no derived column rule holds, the
+   column takes the value of the "default from" column.
    ============================================================ */
 
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../api";
 import { Icons } from "../../components/Icons";
+import { Term, TermHint } from "../../components/Term";
 import { fmtNumber } from "../../components/ProbBar";
 import { Empty } from "../../components/Empty";
 import RuleList, { blankCondition } from "./RuleList";
@@ -42,7 +43,7 @@ function cleanTarget(name) {
     .replace(/^_+|_+$/g, "");
 }
 
-// The values this derived column's rules already use, so the value box can
+// The values this derived column's rules already set, so the value box can
 // offer them rather than make the user retype a long category name.
 function valuesUsed(derived) {
   const seen = new Set();
@@ -85,9 +86,10 @@ export default function DerivedTab({ ruleset, setRuleset, errors, profile }) {
 
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <p className="muted" style={{ fontSize: 12.5, margin: 0, flex: "1 1 320px" }}>
-            Rules are tried in order and the first one that holds sets the value. A record no rule
-            catches takes the value of the "default from" column. The stage also records which rule
-            decided each value.
+            A <Term name="derivedColumn" /> is set by ordered{" "}
+            <Term name="derivedColumnRule" plural />. They are tried in order and the first one
+            that holds sets the value. A record none of them catches takes the value of the
+            "default from" column. The tool also saves which derived column rule set each value.
           </p>
           <button className="btn sm" onClick={addColumn}>
             <Icons.plus size={12} />
@@ -163,7 +165,8 @@ function DerivedColumnCard({
       <div className="card-h">
         <h3 className="mono">{target || "(unnamed column)"}</h3>
         <span className="muted" style={{ fontSize: 12 }}>
-          {(derived.rules || []).length} rule{(derived.rules || []).length === 1 ? "" : "s"}
+          {(derived.rules || []).length}{" "}
+          <Term name="derivedColumnRule" plural={(derived.rules || []).length !== 1} />
         </span>
         <div className="actions">
           <button className="btn sm ghost" title="Delete this derived column" onClick={onDelete}>
@@ -180,7 +183,7 @@ function DerivedColumnCard({
             <label>Column it writes</label>
             <input
               className="input mono"
-              placeholder="status_std"
+              placeholder="column name"
               value={target}
               onChange={(e) => onChange({ target: cleanTarget(e.target.value) })}
               style={targetOk && !clashes ? undefined : { borderColor: "var(--ti-red)" }}
@@ -216,7 +219,7 @@ function DerivedColumnCard({
                 )}
             </select>
             <div className="muted" style={{ fontSize: 11.5 }}>
-              The value a record keeps when no rule below holds.
+              The value a record keeps when no derived column rule below holds.
             </div>
           </div>
         </div>
@@ -256,16 +259,18 @@ function DerivedColumnCard({
       </div>
 
       <RuleList
-        title="Rules"
-        subtitle="tried in order · first rule whose conditions all hold sets the value"
-        emptyText="No rules yet. Every record takes the default value."
+        title={<Term name="derivedColumnRule" plural cap />}
+        subtitle="tried in order · the first one whose conditions all hold sets the value"
+        emptyText="No derived column rules yet. Every record takes the default value."
         rules={derived.rules || []}
         editRules={editRules}
         columns={columnOptions}
         tokenLists={tokenLists}
         errors={errors}
         pathPrefix={`derived_columns[${index}].rules`}
-        resultHeader="Value"
+        noun="derived column rule"
+        termName="derivedColumnRule"
+        resultHeader="Value it sets"
         resultWidth={260}
         makeRule={(ids) => ({
           id: nextId(`${derived.id || "d"}r`, ids),
@@ -380,6 +385,9 @@ function DerivedPreview({ ruleset }) {
       <div className="card-h">
         <Icons.bolt size={16} />
         <h3>Preview</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          what these derived columns would change in one run's records
+        </span>
         <div className="actions">
           <button className="btn sm" onClick={() => setAttempt((n) => n + 1)} disabled={loading}>
             <Icons.refresh size={12} />
@@ -406,7 +414,7 @@ function DerivedPreview({ ruleset }) {
           </div>
         ) : cols.length === 0 ? (
           <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
-            {loading ? "Running the rules..." : "Nothing to show yet."}
+            {loading ? "Running the derived column rules..." : "Nothing to show yet."}
           </p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 16, opacity: loading ? 0.5 : 1 }}>
@@ -437,7 +445,8 @@ function DerivedResult({ col, openRule, setOpenRule }) {
         {col.target}
       </div>
       <div style={{ fontSize: 13, margin: "4px 0 10px" }}>
-        <strong>{fmtNumber(col.changed)}</strong> of {fmtNumber(col.total)} records changed
+        <strong>{fmtNumber(col.changed)}</strong> of {fmtNumber(col.total)} records in this run
+        take a new value in this column
       </div>
 
       {transitions.length > 0 && (
@@ -473,13 +482,15 @@ function DerivedResult({ col, openRule, setOpenRule }) {
       {rules.length > 0 && (
         <div>
           <div className="eyebrow" style={{ marginBottom: 6 }}>
-            Hits per rule
+            Records caught, per derived column rule
           </div>
           <table className="t" style={{ borderRadius: 0, tableLayout: "fixed" }}>
             <thead>
               <tr>
-                <th>Rule</th>
-                <th style={{ width: 64, textAlign: "right" }}>Hits</th>
+                <th>
+                  Derived column rule <TermHint name="derivedColumnRule" />
+                </th>
+                <th style={{ width: 64, textAlign: "right" }}>Records</th>
               </tr>
             </thead>
             <tbody>
@@ -503,12 +514,17 @@ function DerivedResult({ col, openRule, setOpenRule }) {
                       }}
                     >
                       {r.id === "default" ? (
-                        <em className="muted">default &rarr; the "default from" value</em>
+                        <em className="muted">
+                          no derived column rule held &rarr; the "default from" value
+                        </em>
                       ) : (
                         <>
                           {r.description || <span className="muted">(no description)</span>}
-                          <div className="mono muted" style={{ fontSize: 11 }}>
-                            {r.id} &rarr; {r.value}
+                          <div className="muted" style={{ fontSize: 11 }}>
+                            sets {r.value || <span className="muted">(empty)</span>}{" "}
+                            <span className="mono" style={{ fontSize: 11 }}>
+                              {r.id}
+                            </span>
                           </div>
                         </>
                       )}
@@ -545,7 +561,7 @@ function DerivedResult({ col, openRule, setOpenRule }) {
             </tbody>
           </table>
           <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-            Click a rule to see records it caught.
+            Click a derived column rule to see records it caught.
           </div>
         </div>
       )}

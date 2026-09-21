@@ -2,12 +2,17 @@
    Screen: Review queue — table + diff view, threshold control,
    keyboard nav, live re-bucketing, per-comparison explanation
    ------------------------------------------------------------
-   The cockpit keeps roe_ui's shape: brush a band on the histogram,
-   mark the band TRUE or FALSE, fix the exceptions in the list, then
-   save. What changed is the data: both sides of a pair are units of
-   the same dataset, filtering and paging happen on the server, and
-   the evidence a reviewer judges on (DESIGN.md D13a) sits in the
-   diff view under the explanation.
+   The shape of the work: brush a band on the histogram, mark the
+   band Match or Not a match, fix the exceptions in the list, then
+   save. Both sides of a pair are units of the same dataset,
+   filtering and paging happen on the server, and the evidence a
+   reviewer judges on (DESIGN.md D13a) sits in the diff view under
+   the explanation.
+
+   The two answers are Match and Not a match. The API still takes
+   TRUE and FALSE, so those values live in the request bodies and
+   in the state keys, and ANSWER turns them into words at the last
+   moment. Neither value is ever shown.
    ============================================================ */
 
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
@@ -16,7 +21,15 @@ import { api } from "../api";
 import { Icons } from "../components/Icons";
 import { ProbBar, fmtProb, fmtNumber } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
-import { DiffHero, BucketTag, VetoTag, VetoBanner, entityIds } from "../components/DiffHero";
+import {
+  DiffHero,
+  BucketTag,
+  BUCKET_LABELS,
+  VetoTag,
+  VetoBanner,
+  entityIds,
+} from "../components/DiffHero";
+import { Term, TermHint, Provenance, provenanceLabel } from "../components/Term";
 import { PairExplain } from "../components/PairExplain";
 import { PairEvidence } from "../components/PairEvidence";
 import { ModelExplain } from "../components/ModelExplain";
@@ -26,28 +39,51 @@ import { Cell, NUMERIC_TYPES, SYSTEM_COLUMNS, PATTERN_COLUMNS } from "../compone
 import MethodologyNotes from "../components/MethodologyNotes";
 import { useKeyboardNav } from "../hooks/useKeyboardNav";
 import { useProfile } from "../profile";
-import { existingLabelName, hasExistingLabels } from "../profileText";
+import { existingLabelName, hasExistingLabels, noun } from "../profileText";
 
 const PER_PAGE = 50;
 const BULK_LIMIT = 500; // the API's own cap, and the batch size for saving
 
+/* The API's two values, turned into the two words a reviewer reads. This is
+   the only place the mapping happens. */
+const ANSWER = { TRUE: "Match", FALSE: "Not a match" };
+
 // The bucket tabs, in the order a reviewer works through them.
 const BUCKETS = [
-  { id: "review", lab: "Review", count: "review" },
-  { id: "accept", lab: "Auto-accepted", count: "accept" },
-  { id: "reject", lab: "Rejected", count: "reject" },
+  { id: "review", lab: BUCKET_LABELS.review, count: "review" },
+  { id: "accept", lab: BUCKET_LABELS.accept, count: "accept" },
+  { id: "reject", lab: BUCKET_LABELS.reject, count: "reject" },
   { id: "all", lab: "All", count: "all" },
 ];
 
+/* The "How it was decided" filter. Every name comes from the one provenance
+   vocabulary, so a value reads the same here as on the chip beside the pair.
+   The two scorers are named apart because both are on screen at once. A pair
+   a veto rule decided is covered by the wider "stopped by a veto rule"
+   button below, which also catches a vetoed pair the earlier grouping
+   accepted anyway, so it is not repeated here. `optional` marks a filter the
+   run may carry no count for. */
 const DECIDED_BY = [
-  { id: "score", lab: "Score", count: "score", help: "The score alone put this pair where it is." },
+  { id: "score", lab: "Splink score", count: "score", help: "The Splink score alone put this pair where it is." },
+  {
+    id: "model",
+    lab: "Model score",
+    count: "model",
+    optional: true,
+    help: "The model score alone put this pair where it is.",
+  },
   {
     id: "import",
-    lab: "Imported labels",
+    lab: provenanceLabel("decided_by", "import"),
     count: "import",
-    help: "Accepted because both sides already carry the same earlier entity ID.",
+    help: "Accepted because both sides already carry the same earlier ID.",
   },
-  { id: "human", lab: "Human", count: "human", help: "A reviewer decided this pair." },
+  {
+    id: "human",
+    lab: provenanceLabel("decided_by", "human"),
+    count: "human",
+    help: "A person decided this pair.",
+  },
 ];
 
 function isHttpUrl(value) {
@@ -272,7 +308,7 @@ export default function ReviewScreen() {
         .catch((err) => {
           // Put the row back the way it was rather than lie about what is saved.
           setLabels((prev) => ({ ...prev, [pairId]: before ?? undefined }));
-          alert("Could not save that label: " + err.message);
+          alert("Could not save your answer. " + err.message);
         })
         .finally(done);
     },
@@ -310,7 +346,7 @@ export default function ReviewScreen() {
     setBrushHi(hi);
     setBrushOnModel(!!onModelScore);
     setPage(0);
-    // Surface the most-likely-wrong first, as roe_ui does.
+    // Surface the most-likely-wrong first.
     setSort("score");
     setOrder("asc");
   }, []);
@@ -329,9 +365,12 @@ export default function ReviewScreen() {
         `${brushOnModel ? "model" : "Splink"} score: ${brushLo.toFixed(2)}–${brushHi.toFixed(2)}`
       );
     if (track !== "all") parts.push(`track: ${tracks.find((t) => t.key === track)?.label || track}`);
-    if (decidedBy !== "all") parts.push(`decided by: ${decidedBy}`);
-    if (importFilter !== "all") parts.push(`earlier labels: ${importFilter}`);
-    if (vetoed === "yes") parts.push("stopped by a rule");
+    if (decidedBy !== "all")
+      parts.push(
+        `how it was decided: ${DECIDED_BY.find((d) => d.id === decidedBy)?.lab || decidedBy}`
+      );
+    if (importFilter === "disagrees") parts.push("the two earlier IDs differ");
+    if (vetoed === "yes") parts.push("stopped by a veto rule");
     if (held !== "both") parts.push(held === "hide" ? "held groups hidden" : "held groups only");
     if (q) parts.push(`search: "${q}"`);
     return parts;
@@ -417,7 +456,7 @@ export default function ReviewScreen() {
           </div>
         </div>
         <Empty
-          title="No scored pairs for this run"
+          title="No pairs for this run"
           sub={error}
           action={
             <button className="btn primary" onClick={() => navigate(`/runs/${runId}`)}>
@@ -443,10 +482,11 @@ export default function ReviewScreen() {
           )}
           <h1 className="page-title">Review queue</h1>
           <p className="page-sub">
-            {fmtNumber(pendingReview)} pairs the scorer was not sure about.{" "}
-            <strong>Drag a band on the chart</strong> to grab a group of similar scores,{" "}
-            <strong>mark them all</strong> TRUE or FALSE, fix the exceptions in the list, then save.
-            0 means probably not the same, 1 means probably the same.
+            {fmtNumber(pendingReview)} <Term name="pair" plural /> the <Term name="scorer" /> was
+            not sure about. <strong>Drag a band on the chart</strong> to grab a set of similar{" "}
+            <Term name="score" plural />, <strong>mark them all</strong> Match or Not a match, fix
+            the exceptions in the list, then save. A score of 0 means probably not the same thing,
+            1 means probably the same thing.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -494,7 +534,7 @@ export default function ReviewScreen() {
           <Icons.check size={15} />
           <h3 style={{ margin: 0 }}>Label these pairs</h3>
           <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
-            your answers — saved for good, and what teaches the model
+            your answers — saved for good, and what the model learns from
           </span>
         </div>
         <div className="card-b" style={{ paddingTop: 10 }}>
@@ -531,7 +571,7 @@ export default function ReviewScreen() {
               onClick={() => stageSlice("TRUE")}
               disabled={total === 0 || stagingBusy}
             >
-              <Icons.check size={14} /> Mark all TRUE
+              <Icons.check size={14} /> Mark all as {ANSWER.TRUE}
             </button>
             <button
               className="btn lg"
@@ -539,7 +579,7 @@ export default function ReviewScreen() {
               onClick={() => stageSlice("FALSE")}
               disabled={total === 0 || stagingBusy}
             >
-              Mark all FALSE
+              Mark all as {ANSWER.FALSE}
             </button>
             <label
               className="muted"
@@ -558,8 +598,8 @@ export default function ReviewScreen() {
             Nothing saves yet — you'll review and flip the wrong ones first.{" "}
             {brushHi != null && brushHi <= 0.7 ? (
               <>
-                <strong>Low-scoring pairs are usually FALSE</strong> — recording NOs teaches the
-                model the most.
+                <strong>Low-scoring pairs are usually not a match</strong> — the model learns most
+                from the pairs you rule out.
               </>
             ) : (
               <>The model learns most from the uncertain middle, not the confident top.</>
@@ -588,18 +628,18 @@ export default function ReviewScreen() {
               </strong>
               {" ("}
               <span style={{ color: "var(--green)", fontWeight: 600 }}>
-                {Object.values(staged).filter((v) => v === "TRUE").length} TRUE
+                {Object.values(staged).filter((v) => v === "TRUE").length} {ANSWER.TRUE}
               </span>
               {" / "}
               <span style={{ color: "var(--ti-red)", fontWeight: 600 }}>
-                {Object.values(staged).filter((v) => v === "FALSE").length} FALSE
+                {Object.values(staged).filter((v) => v === "FALSE").length} {ANSWER.FALSE}
               </span>
               {") — "}
               <strong>not saved yet.</strong> Flip any wrong ones in the list below, then save.
             </span>
             <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
               <span className="muted" style={{ fontSize: 11 }}>
-                saved for good · becomes train/test data
+                saved for good · joins the training set or the test set
               </span>
               <button className="btn primary" onClick={commitStaged} disabled={committingBulk}>
                 {committingBulk ? "Saving…" : `Save ${fmtNumber(stagedCount)} answers`}
@@ -614,6 +654,10 @@ export default function ReviewScreen() {
 
       {/* Toolbar */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6, flexWrap: "wrap" }}>
+        <span className="muted" style={{ fontSize: 12 }}>
+          Bucket
+          <TermHint name="bucket" />
+        </span>
         <div className="seg">
           {BUCKETS.map((b) => (
             <button
@@ -693,7 +737,10 @@ export default function ReviewScreen() {
           </div>
         )}
 
-        <div className="seg" title="What put this pair in its bucket">
+        <span className="muted" style={{ fontSize: 12 }}>
+          How it was decided
+        </span>
+        <div className="seg" title="What put a pair in its bucket">
           <button
             className={decidedBy === "all" && vetoed === "all" ? "on" : ""}
             onClick={() => {
@@ -703,7 +750,10 @@ export default function ReviewScreen() {
           >
             Any decision
           </button>
-          {DECIDED_BY.filter((d) => d.id !== "import" || showEarlier).map((d) => (
+          {DECIDED_BY.filter(
+            (d) =>
+              (d.id !== "import" || showEarlier) && (!d.optional || counts[d.count] != null)
+          ).map((d) => (
             <button
               key={d.id}
               className={decidedBy === d.id && vetoed === "all" ? "on" : ""}
@@ -719,8 +769,8 @@ export default function ReviewScreen() {
               </span>
             </button>
           ))}
-          {/* Every pair a rule hit, not only the ones a rule decided. A pair the
-              earlier grouping accepted anyway is still stopped by the rule. */}
+          {/* Every pair a veto rule hit, not only the ones a veto rule decided.
+              A pair the earlier grouping accepted anyway is still stopped. */}
           {counts.vetoed > 0 && (
             <button
               className={vetoed === "yes" ? "on" : ""}
@@ -730,13 +780,14 @@ export default function ReviewScreen() {
               }}
               title="A veto rule hit this pair, so the run will not accept it on the score alone."
             >
-              Stopped by a rule
+              Stopped by a veto rule
               <span className="muted" style={{ fontSize: 11 }}>
                 &middot; {fmtNumber(counts.vetoed)}
               </span>
             </button>
           )}
         </div>
+        {counts.vetoed > 0 && <TermHint name="veto" />}
 
         {showEarlier && (
         <button
@@ -747,9 +798,9 @@ export default function ReviewScreen() {
               : {}
           }
           onClick={() => resetPage(setImportFilter, importFilter === "disagrees" ? "all" : "disagrees")}
-          title="Both sides carry an earlier entity ID, and the two differ. A flag, never a decision."
+          title="Both sides carry an earlier ID and the two differ. A flag, never a decision."
         >
-          Earlier labels disagree
+          Earlier IDs differ
           <span className="muted" style={{ marginLeft: 4 }}>
             &middot; {fmtNumber(counts.import_disagrees)}
           </span>
@@ -768,10 +819,17 @@ export default function ReviewScreen() {
           ))}
         </div>
 
-        <div className="seg" title="Pairs whose two sides sit in the same held exact group">
+        <span className="muted" style={{ fontSize: 12 }}>
+          Held groups
+          <TermHint name="heldGroup" />
+        </span>
+        <div
+          className="seg"
+          title="A held group is a set of records a match key would have put together, stopped by a guard. These are the pairs whose two sides sit inside one of them."
+        >
           {[
-            ["hide", "Hide held"],
-            ["only", "Held only"],
+            ["hide", "Hide them"],
+            ["only", "Only them"],
             ["both", "Show both"],
           ].map(([id, lab]) => (
             <button key={id} className={held === id ? "on" : ""} onClick={() => resetPage(setHeld, id)}>
@@ -784,14 +842,14 @@ export default function ReviewScreen() {
       {vetoed === "yes" && counts.veto_conflicts_import > 0 && showEarlier && (
         <p style={{ fontSize: 11.5, margin: "0 0 12px", color: "var(--amber)" }}>
           {fmtNumber(counts.veto_conflicts_import)} of these were put together by the earlier
-          grouping anyway. A rule and the earlier grouping disagree about them.
+          grouping anyway. A veto rule and the earlier grouping disagree about them.
         </p>
       )}
 
       {held === "hide" && (
         <p className="muted" style={{ fontSize: 11.5, margin: "0 0 12px" }}>
-          Pairs inside a held group are decided as a group on the cluster screen, which is not built
-          yet.
+          A <Term name="heldGroup" /> is decided as one group on the cluster screen, not pair by
+          pair here, so its pairs are hidden.
         </p>
       )}
 
@@ -915,14 +973,26 @@ function ReviewTable({
         <thead>
           <tr>
             <th style={{ width: 26 }}></th>
-            <th style={{ minWidth: 230 }}>Left</th>
-            <th style={{ minWidth: 230 }}>Right</th>
-            <th style={{ width: 120 }}>Score</th>
-            <th style={{ width: 150 }}>Bucket</th>
+            <th style={{ minWidth: 230 }}>
+              First unit
+              <TermHint name="unit" />
+            </th>
+            <th style={{ minWidth: 230 }}>Second unit</th>
+            <th style={{ width: 120 }}>
+              Score
+              <TermHint name="score" />
+            </th>
+            <th style={{ width: 150 }}>
+              Bucket
+              <TermHint name="bucket" />
+            </th>
             {priorityColumn && (
               <th style={{ width: 110, textAlign: "right" }}>{priorityColumn.label}</th>
             )}
-            <th style={{ width: 190 }}>Label</th>
+            <th style={{ width: 190 }}>
+              Your answer
+              <TermHint name="label" />
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -970,24 +1040,31 @@ function ReviewTable({
                       {trackLabel(m.track)}
                     </div>
                     {m.usefulness && (
-                      <div className="muted" style={{ fontSize: 11 }}>
-                        useful {(m.usefulness.score * 100).toFixed(0)}
+                      <div
+                        className="muted"
+                        style={{ fontSize: 11 }}
+                        title="How much labelling this pair would teach the model, on a scale of 0 to 1."
+                      >
+                        worth labelling {Number(m.usefulness.score).toFixed(2)} of 1
                       </div>
                     )}
                   </td>
                   <td style={{ verticalAlign: "top", whiteSpace: "normal" }}>
-                    <BucketTag bucket={m.bucket} decidedBy={m.decided_by} />
+                    {/* Where the pair landed, then how it got there. Two
+                        questions, two chips, never one word doing both. */}
+                    <BucketTag bucket={m.bucket} />
+                    <Provenance kind="decided_by" value={m.decided_by} size="sm" />
                     <VetoTag pair={m} />
                     {m.import_disagrees && (
                       <div style={{ marginTop: 3 }}>
-                        <span className="tag amber" title="The two sides carry different earlier entity IDs">
-                          earlier labels disagree
+                        <span className="tag amber" title="The two sides carry different earlier IDs">
+                          earlier IDs differ
                         </span>
                       </div>
                     )}
                     {m.held_group_id && (
-                      <div className="mono muted" style={{ fontSize: 11 }}>
-                        held group {m.held_group_id}
+                      <div className="muted" style={{ fontSize: 11 }}>
+                        held group <span className="mono">{m.held_group_id}</span>
                       </div>
                     )}
                   </td>
@@ -1016,7 +1093,7 @@ function ReviewTable({
                         }
                       >
                         <Icons.check size={12} stroke={effTrue ? "#fff" : "currentColor"} />
-                        TRUE
+                        {ANSWER.TRUE}
                       </button>
                       <button
                         className="btn sm"
@@ -1033,11 +1110,11 @@ function ReviewTable({
                         }
                       >
                         <Icons.x size={12} stroke={effFalse ? "#fff" : "currentColor"} />
-                        FALSE
+                        {ANSWER.FALSE}
                       </button>
                       <button
                         className="btn sm ghost"
-                        title="Notes and a source link for this decision"
+                        title="Notes and a source link for your answer"
                         onClick={() => setNoteFor(noteFor === m.pair_id ? null : m.pair_id)}
                       >
                         <Icons.doc size={12} />
@@ -1085,6 +1162,7 @@ function ReviewTable({
 }
 
 function UnitCell({ unit }) {
+  const profile = useProfile();
   const ids = entityIds(unit);
   return (
     <td style={{ verticalAlign: "top", whiteSpace: "normal", overflowWrap: "anywhere" }}>
@@ -1093,7 +1171,11 @@ function UnitCell({ unit }) {
         <span className="mono muted" style={{ fontSize: 11 }}>
           {unit?.unit_id}
         </span>
-        {unit?.unit_size > 1 && <span className="tag">×{unit.unit_size} records</span>}
+        {unit?.unit_size > 1 && (
+          <span className="tag">
+            ×{unit.unit_size} {noun(profile, "record_plural")}
+          </span>
+        )}
         {ids.map((id) => (
           <span
             key={id}
@@ -1117,7 +1199,7 @@ function LabelNotes({ label, onSave, onClose, compact }) {
   return (
     <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
       <div className="field" style={{ flex: "1 1 260px", minWidth: 0 }}>
-        <label>Notes {compact ? "" : "(saved with the decision)"}</label>
+        <label>Notes {compact ? "" : "(saved with your answer)"}</label>
         <textarea
           className="textarea"
           style={{ minHeight: 52 }}
@@ -1137,7 +1219,7 @@ function LabelNotes({ label, onSave, onClose, compact }) {
         />
         <div className="muted" style={{ fontSize: 11.5, color: urlOk ? undefined : "var(--ti-red)" }}>
           {urlOk
-            ? "Where the evidence for this decision lives — a news story, a register entry."
+            ? "Where the evidence for your answer lives — a news story, a register entry."
             : "That is not an http or https link."}
         </div>
       </div>
@@ -1289,9 +1371,17 @@ function ReviewDiff({
                     {fmtProb(m.match_probability)}
                   </div>
                 </div>
-                {stagedVal === "TRUE" && <span className="tag green">staged</span>}
+                {stagedVal === "TRUE" && (
+                  <span className="tag green" title={`Staged as ${ANSWER[stagedVal]}`}>
+                    staged
+                  </span>
+                )}
                 {stagedVal === "FALSE" && (
-                  <span className="tag" style={{ color: "var(--ti-red)" }}>
+                  <span
+                    className="tag"
+                    style={{ color: "var(--ti-red)" }}
+                    title={`Staged as ${ANSWER[stagedVal]}`}
+                  >
                     staged
                   </span>
                 )}
@@ -1306,6 +1396,16 @@ function ReviewDiff({
       {/* The pair */}
       <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
         <DiffHero pair={pair} high={threshold} review={reviewLow} />
+        {/* The hero's tag says where the pair landed. This says how it got
+            there — the same chip, in the same words, as in the table. */}
+        {pair.decided_by && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span className="muted" style={{ fontSize: 12 }}>
+              How it was decided
+            </span>
+            <Provenance kind="decided_by" value={pair.decided_by} />
+          </div>
+        )}
         <VetoBanner pair={pair} />
         <FocusStrip
           pair={pair}
@@ -1397,6 +1497,7 @@ function CompareRow({ col, left, right, mono }) {
 // profile's own columns lead, in the profile's order; everything cleaning and
 // the derived columns wrote sit in a section that stays shut until asked for.
 function UnitCompare({ pair, columns, displayColumns }) {
+  const profile = useProfile();
   const left = pair?.left || {};
   const right = pair?.right || {};
   const [cleanedOpen, setCleanedOpen] = useState(readOpen);
@@ -1434,7 +1535,7 @@ function UnitCompare({ pair, columns, displayColumns }) {
     <div className="card">
       <div className="card-h">
         <Icons.diff size={16} />
-        <h3>The two records</h3>
+        <h3>The two {noun(profile, "record_plural")}</h3>
         <span className="muted" style={{ fontSize: 12 }}>
           differences are marked
         </span>
@@ -1444,8 +1545,8 @@ function UnitCompare({ pair, columns, displayColumns }) {
           <thead>
             <tr>
               <th style={{ width: 180 }}>Field</th>
-              <th>{left.name || "Left"}</th>
-              <th>{right.name || "Right"}</th>
+              <th>{left.name || "First unit"}</th>
+              <th>{right.name || "Second unit"}</th>
             </tr>
           </thead>
           <tbody>
@@ -1482,7 +1583,7 @@ function UnitCompare({ pair, columns, displayColumns }) {
 }
 
 // ============================================================
-// DiffControls — notes, source link, TRUE/FALSE/clear with keys
+// DiffControls — notes, source link, Match / Not a match / clear, with keys
 // ============================================================
 
 function DiffControls({ pair, label, onLabel, onLabelWithExtra, staged, onStage }) {
@@ -1507,7 +1608,7 @@ function DiffControls({ pair, label, onLabel, onLabelWithExtra, staged, onStage 
             }
           >
             <Icons.check size={14} stroke={effective === "TRUE" ? "#fff" : "currentColor"} />{" "}
-            {staged ? "Stage TRUE" : "Mark TRUE"}
+            {staged ? `Stage as ${ANSWER.TRUE}` : `Mark as ${ANSWER.TRUE}`}
             <span className="kh" style={{ marginLeft: 6 }}>
               <span className="kbd">T</span>
             </span>
@@ -1522,7 +1623,7 @@ function DiffControls({ pair, label, onLabel, onLabelWithExtra, staged, onStage 
             }
           >
             <Icons.x size={14} stroke={effective === "FALSE" ? "#fff" : "currentColor"} />{" "}
-            {staged ? "Stage FALSE" : "Mark FALSE"}
+            {staged ? `Stage as ${ANSWER.FALSE}` : `Mark as ${ANSWER.FALSE}`}
             <span className="kh" style={{ marginLeft: 6 }}>
               <span className="kbd">F</span>
             </span>
@@ -1549,13 +1650,15 @@ function DiffControls({ pair, label, onLabel, onLabelWithExtra, staged, onStage 
 
           {staged && (
             <span className="tag" style={{ borderStyle: "dashed" }}>
-              Staged {staged}; save or discard in the banner above
+              Staged as {ANSWER[staged] || "—"}; save or discard in the banner above
             </span>
           )}
           {label?.reviewer && !staged && (
-            <span className="muted" style={{ fontSize: 11.5 }}>
-              {label.is_match === "TRUE" ? "Match" : "Not a match"} by {label.reviewer}
-              {label.provenance && label.provenance !== "manual" ? ` · ${label.provenance}` : ""}
+            <span className="muted" style={{ fontSize: 11.5, display: "inline-flex", alignItems: "center", gap: 6 }}>
+              {ANSWER[label.is_match] || "—"} by {label.reviewer}
+              {label.provenance && label.provenance !== "manual" && (
+                <Provenance kind="provenance" value={label.provenance} size="sm" />
+              )}
             </span>
           )}
           <span className="spacer" />

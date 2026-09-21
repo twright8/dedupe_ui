@@ -80,7 +80,7 @@ function EventTable({ events, columns, truncated, rowsWord }) {
       </div>
       {truncated && (
         <p className="muted" style={{ fontSize: 11.5, margin: "6px 0 0" }}>
-          Only the first {rows.length} are shown.
+          Only the first {rows.length} {rowsWord} are shown.
         </p>
       )}
     </>
@@ -106,9 +106,11 @@ export function PairEvidence({ pair, eventColumns, profile }) {
       </div>
       <div className="card-b">
         <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 16 }}>
+          {/* Each side is headed by its own name, so neither column needs a
+              word of its own. */}
           {[
-            { side: left, rows: events.left, label: "Left" },
-            { side: right, rows: events.right, label: "Right" },
+            { side: left, rows: events.left },
+            { side: right, rows: events.right },
           ].map((s, i) => (
             <div key={i} style={{ minWidth: 0 }}>
               <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 2 }}>

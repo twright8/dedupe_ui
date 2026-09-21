@@ -4,16 +4,30 @@
    answers, because a human label always wins.
    ============================================================ */
 
-import { Link } from "react-router-dom";
+import { Fragment, useEffect } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { useProfile } from "../profile";
+import { existingLabelName } from "../profileText";
+import {
+  FIGURE_SETS,
+  PROVENANCE,
+  PROVENANCE_PRECEDENCE,
+  PROVENANCE_QUESTION,
+  SUGGESTED,
+  termAnchor,
+  termsAlphabetical,
+} from "../glossary";
 
 // ---- small building blocks -------------------------------------------------
 
-function Stage({ n, tone, title, kicker, tech, labelsHere, children }) {
+/* Stages are named, never numbered. Three numberings were in use at once, so a
+   reader could meet "stage 2" and "stage 4" for the same step. The rail shows
+   the order. The kicker gives the name. */
+function Stage({ tone, title, kicker, tech, labelsHere, children }) {
   return (
     <div className="mth-stage">
       <div className="mth-rail">
-        <div className="mth-node" style={{ "--tone": tone }}>{n}</div>
+        <div className="mth-node" style={{ "--tone": tone }} aria-hidden="true" />
       </div>
       <div className="mth-stage-body">
         <div className="mth-kicker" style={{ color: tone }}>{kicker}</div>
@@ -43,16 +57,6 @@ function Click({ children }) {
   return <span className="mth-click">{children}</span>;
 }
 
-function JobCard({ tone, n, title, children }) {
-  return (
-    <div className="mth-job">
-      <div className="mth-job-n" style={{ color: tone, borderColor: tone }}>{n}</div>
-      <h4 className="mth-job-title">{title}</h4>
-      <p className="mth-job-text">{children}</p>
-    </div>
-  );
-}
-
 // ---- the page --------------------------------------------------------------
 
 export default function MethodologyScreen() {
@@ -61,6 +65,22 @@ export default function MethodologyScreen() {
   const trackA = tracks[0]?.label || "People";
   const trackB = tracks[1]?.label || "Organisations";
   const donations = profile.key === "donations";
+
+  /* The profile's own name for whatever grouping the team made before this
+     tool existed. A profile with none returns null, and every sentence about
+     one is left out rather than invented. */
+  const earlier = existingLabelName(profile);
+  const terms = termsAlphabetical(profile);
+
+  /* A definition popover elsewhere in the app links to one word on this page.
+     The browser does not scroll to a hash that arrives with the page, so do it
+     here, once the list is drawn. */
+  const { hash } = useLocation();
+  useEffect(() => {
+    if (!hash) return;
+    const target = document.getElementById(hash.slice(1));
+    if (target) target.scrollIntoView({ block: "center" });
+  }, [hash]);
 
   return (
     <div className="content mth">
@@ -123,7 +143,7 @@ export default function MethodologyScreen() {
         </p>
 
         <div className="mth-pipe">
-          <Stage n="0" tone="var(--muted)" kicker="Load" title="Read the file">
+          <Stage tone="var(--muted)" kicker="Load" title="Read the file">
             <p>
               In goes one file. The tool reads every row and gives each row a record ID. Out comes
               one record per row, with the columns this profile knows about. You change nothing
@@ -132,7 +152,6 @@ export default function MethodologyScreen() {
           </Stage>
 
           <Stage
-            n="1"
             tone="var(--blue)"
             kicker="Tracks"
             title={`Sort each record into ${trackA} or ${trackB}`}
@@ -151,11 +170,10 @@ export default function MethodologyScreen() {
           </Stage>
 
           <Stage
-            n="2"
             tone="var(--blue)"
             kicker="Cleaning"
             title="Tidy the values into new columns"
-            tech="Config → Cleaning rules"
+            tech="Config → Cleaning steps"
           >
             <p>
               In go the raw columns. Ordered steps write new columns beside them. A step can put
@@ -185,7 +203,6 @@ export default function MethodologyScreen() {
           </Stage>
 
           <Stage
-            n="3"
             tone="var(--blue)"
             kicker="Derived columns"
             title="Standardise a category that is often wrong"
@@ -216,40 +233,40 @@ export default function MethodologyScreen() {
           </Stage>
 
           <Stage
-            n="4"
             tone="var(--green)"
-            kicker="Exact keys"
-            title="Merge the records that plainly agree"
+            kicker="Match keys"
+            title="Put together the records that plainly agree"
             tech="Config → Match keys"
           >
             <p>
               In go the cleaned and derived columns. A match key names one or more columns. Records
-              that hold the same value in every one of those columns form a group. Keys run in
-              order within a track, and groups that share a record are joined into one.
+              that hold the same value in every one of those columns form an exact group. Match
+              keys run in order within a track, and exact groups that share a record are joined
+              into one.
             </p>
             <p>
-              Guards stop a group that looks wrong. A guard can ignore a value that appears on a
-              blocked list, refuse a group over a size limit, refuse a group carrying more
-              different names than you allow, or require the records to agree on a second column
-              as well. If a guard stops a group, the group is held and a person decides it later.
-              Nothing is merged.
+              A guard is a limit on a match key. It stops a set of records that looks wrong. A
+              guard can ignore a value that appears on a blocked list, refuse a set over a size
+              limit, refuse a set carrying more different names than you allow, or require the
+              records to agree on a second column as well. A set of records a guard stopped is a
+              held group. Its records stay separate until a person decides.
             </p>
             <p>
-              Out come the merged groups and the held groups. To read them, open the{" "}
+              Out come the exact groups and the held groups. To read them, open the{" "}
               <Click>Exact groups</Click> tab on the run.
             </p>
           </Stage>
 
           <Stage
-            n="5"
             tone="var(--amber)"
             kicker="Scoring"
             title="Score the pairs that are not obvious"
             tech="Config → Thresholds & Splink"
           >
             <p>
-              In go the results of stage 4. Each merged group counts as one unit. Every other
-              record is a unit on its own. Units are scored within a track, never across two.
+              In go the results of the match keys. Each exact group counts as one unit. Every
+              other record is a unit on its own. Units are scored within a track, never across
+              two.
             </p>
             <p>
               Comparing every unit with every other unit would take far too long. Blocking rules
@@ -268,59 +285,62 @@ export default function MethodologyScreen() {
               name of the open-source engine that does the scoring.
             </p>
             <p>
-              Two lines then sort every scored pair into three buckets. If the score is 0.92 or
-              more, the pair is accepted without review. If the score is between 0.50 and 0.92, the
-              pair goes to you. If the score is below 0.50, the pair is rejected. Both lines are
-              yours to move. Out come the scored pairs. When a trained model is in use, stage 6
+              Two lines then sort every pair into three buckets. A pair at or above the accept
+              line is Accepted without review. A pair between the two lines goes to you: For
+              review. A pair below the review line is Rejected. Both lines are yours to move on
+              the Thresholds tab. The defaults this tool ships with are 0.92 for the accept line
+              and 0.50 for the review line, and your config version may differ. Out come the
+              pairs, each with its score and its bucket. When a trained model is in use, the model
               re-scores them and its score sets the buckets instead.
             </p>
             <p>
-              A veto is a plain rule about a pair that stops the tool accepting something a person
-              would never accept. Two people born thirty years apart are not one person, even when
-              the name and the postcode agree. A veto either sends the pair to you or rejects it,
-              and the reason it gives is shown beside the pair on the review screen. An earlier
-              grouping can still overrule a veto, and your own answer overrules everything.
+              A veto rule is a plain rule about a pair. It stops the tool accepting something a
+              person would never accept. Two people born thirty years apart are not one person,
+              even when the name and the postcode agree. A veto rule either sends the pair to you
+              or rejects it, and the reason it gives is shown beside the pair on the review
+              screen. The earlier grouping can still overrule a veto rule, and your own answer
+              overrules everything.
             </p>
           </Stage>
 
           <Stage
-            n="6"
             tone="var(--violet)"
             kicker="The model"
             title="A trained model re-scores the pairs"
             tech="Diagnostics → Trained model"
           >
             <p>
-              In go the scored pairs. A model learns from the answers people have saved: your own
-              answers, the decisions taken on whole groups, and at a lower weight the earlier manual
-              grouping. Each track has its own model. Out comes a second score for every pair.
+              In go the pairs and their scores. A model learns from the answers people have saved: your own
+              answers, the group decisions taken on whole clusters, and at a lower weight the
+              earlier grouping. Each track has its own model. Out comes a second score for every
+              pair, the model score.
             </p>
             <p>
-              A model that has seen fewer than fifty of your answers is a cold start. It re-orders
-              the review queue so the pairs worth your time come first, and it decides nothing.
+              A model that has seen fewer than fifty of your answers is a new model. It has not
+              been measured against the test set, so it decides nothing. It only re-orders the
+              review queue, to put the pairs worth your time first.
             </p>
             <p>
-              A model becomes graded once it has enough of your answers and a set of answers held
-              back for testing. Only then may it set the buckets, and its accept and reject lines
-              are worked out from that held-back set rather than chosen by hand.
+              A model becomes a graded model once it has enough of your answers and a test set:
+              labels held back from training. Only then may it set the buckets, and its accept
+              line and review line are worked out from the test set rather than chosen by hand.
             </p>
             <p>
               The model can only learn from what it has been told. The earlier grouping was made
-              almost entirely on the name, so it cannot teach the model when two people with one
-              name are different people. Only new answers that say two records are not the same can
-              do that.
+              almost entirely on the name, so it cannot show the model when two people with one
+              name are different people. Only new answers that say two records are not the same
+              can do that.
             </p>
           </Stage>
 
           <Stage
-            n="7"
             tone="var(--ti-red)"
             kicker="Review"
             title="You answer the pairs the tool is unsure about"
             labelsHere="your answers are saved here"
           >
             <p>
-              In go the scored pairs. You mark a pair as a match or as not a match. Your answer
+              In go the pairs and their scores. You mark a pair as a match or as not a match. Your answer
               always wins. It overrides the score, and it overrides every rule.
             </p>
             <p>
@@ -330,10 +350,10 @@ export default function MethodologyScreen() {
               outside the data belongs.
             </p>
             <p>
-              Labels imported from earlier manual work are treated carefully. If both sides of a
-              pair already carry the same earlier ID, the pair is accepted. If the two sides carry
-              different earlier IDs, the pair keeps the bucket its score gave it and is flagged so
-              you can find it. That flag is a signal for sorting. It never decides a pair.
+              The earlier grouping is treated carefully. If both sides of a pair already carry the
+              same earlier ID, the pair is accepted. If the two sides carry different earlier IDs,
+              the pair keeps the bucket its score gave it and is flagged so you can find it. That
+              flag is a signal for sorting. It never decides a pair.
             </p>
             <p>
               Out come your saved answers, which you can read in the <Click>Label library</Click>.
@@ -341,10 +361,9 @@ export default function MethodologyScreen() {
           </Stage>
 
           <Stage
-            n="8"
             tone="var(--violet)"
             kicker="Clusters"
-            title="Join the accepted pairs into groups"
+            title="Join the accepted pairs into clusters"
             tech="Config → Thresholds & Splink"
           >
             <p>
@@ -352,33 +371,35 @@ export default function MethodologyScreen() {
               cluster. A unit with no accepted pair is a cluster on its own.
             </p>
             <p>
-              A gate then checks every cluster of two or more units. A cluster is held back if you
-              have said two of its units are not the same, if one pair inside it scores below 0.20
-              and the cluster may be a chain of weak links, if it holds more than 200 units, or if
-              its records carry more than one earlier ID. A held cluster is rebuilt from your
-              answers and the imported labels only, and it goes to a queue for a person to decide.
+              A gate then checks every cluster of two or more units. A cluster the gate holds back
+              is a withheld cluster, and it goes to a queue for a person to decide. The gate holds
+              a cluster back if you have said two of its units are not the same, if one pair
+              inside it scores very low and the cluster may be a chain of weak links, if it holds
+              more units than the size limit, or if its records carry more than one earlier ID.
+              The limits are settings on the Thresholds tab; this tool ships with 0.20 for a weak
+              link and 200 units for the size limit. A withheld cluster is rebuilt from your
+              answers and the earlier grouping only.
             </p>
             <p>
               Out come the clusters. Each one carries a status that says whether it passed those
-              checks or was held back for a person to look at.
+              checks, or why the gate withheld it.
             </p>
           </Stage>
 
           <Stage
-            n="9"
             tone="var(--violet)"
             kicker="Entity IDs"
-            title="Give each group one ID, then publish"
+            title="Give each cluster one ID, then publish"
           >
             <p>
-              In go the clusters the gate passed. Each one becomes one entity and takes an ID. If
-              its records already belong to one entity, that ID is kept. If they belong to several,
-              one of those IDs survives and the others are retired. If they belong to none, a new
-              ID is made.
+              In go the clusters the gate passed. Each one becomes one entity and takes an entity
+              ID. If its records already belong to one entity, that ID is kept. If they belong to
+              several, one of those IDs survives and the others become retired IDs. If they belong
+              to none, a new ID is made.
             </p>
             <p>
-              A run only proposes. Nothing is written to the durable register until you publish the
-              run. Publishing is a separate step, and it records what changed.
+              A run only proposes. Nothing is written to the registry until you publish the run.
+              Publishing is a separate step, and it records what changed.
             </p>
             <p>
               Out comes the export. It is the original sheet, row for row and column for column,
@@ -389,55 +410,58 @@ export default function MethodologyScreen() {
         </div>
       </section>
 
-      {/* 3 · agreement numbers */}
+      {/* 3 · agreement numbers. A profile with no earlier grouping has nothing
+          to compare against, so the whole section is left out. */}
+      {earlier && (
       <section className="mth-sec">
         <div className="mth-sec-head">
           <span className="mth-sec-n">03</span>
           <h2>How to read the agreement numbers</h2>
         </div>
         <p className="mth-p">
-          The review screen and the run summary report two figures. Both compare this run with the
-          grouping the team did by hand before this tool existed.
+          The review screen and the run summary report two figures. Both compare this run with the{" "}
+          {earlier}.
         </p>
         <p className="mth-p">
           <strong>Pair precision</strong> tells you how often the run is right when it joins two
-          records. It counts only pairs the earlier manual work had judged.
+          records. Of the pairs this run joins, it is the share the {earlier} had already joined.
+          It counts only pairs the {earlier} had judged.
         </p>
         <p className="mth-p">
-          <strong>Pair recall</strong> tells you how much of the earlier manual work the run finds.
-          It counts the pairs the earlier work joined, then reports the share the run joined too.
+          <strong>Pair recall</strong> tells you how much of the {earlier} the run finds. Of the
+          pairs the {earlier} joined, it is the share this run joins too.
         </p>
         <p className="mth-p">
-          The same two figures are worked out three ways. Each is also reported for{" "}
-          {trackA.toLowerCase()} and {trackB.toLowerCase()} separately, so a figure that looks good
-          overall can still be weak on one track.
+          Both figures are worked out seven ways, so that a change can be judged on the part of
+          the method it touched. Each of the seven is also reported for {trackA.toLowerCase()} and{" "}
+          {trackB.toLowerCase()} separately, so a figure that looks good overall can still be weak
+          on one track.
         </p>
-        <div className="mth-jobs">
-          <JobCard tone="var(--ink)" n="1" title="Everything the run would publish">
-            The exact groups plus every accepted pair. This is what the export would contain.
-          </JobCard>
-          <JobCard tone="var(--ti-red)" n="2" title="The scorer on its own">
-            The same figures with one group of pairs left out. Those pairs were accepted because
-            both sides already carried the same earlier ID.
-          </JobCard>
-          <JobCard tone="var(--blue)" n="3" title="The match keys on their own">
-            Stage 4 alone, with no scoring. It shows how far the plain rules get you.
-          </JobCard>
-        </div>
+        <dl className="diff-meta mth-gloss">
+          {FIGURE_SETS.map((f) => (
+            <Fragment key={f.key}>
+              <dt>{f.label}</dt>
+              <dd>{f.definition}</dd>
+            </Fragment>
+          ))}
+        </dl>
         <Callout label="Which one to use when you change a rule">
           Use <strong>the scorer on its own</strong>. A pair accepted because both sides already
           carry the same earlier ID cannot show that the scorer found anything, so leaving those
           pairs in makes every change look better than it is.
         </Callout>
         <Callout accent="var(--amber)" label="What these numbers cannot tell you">
-          The earlier labels were made almost entirely on the name. Reviewers merged 99.6% of
-          pairs of individuals with identical names, even when the two gave to different parties.
-          So the earlier labels cannot show when two people with the same name are different
-          people. A high recall against them is not proof that the tool keeps such people apart.
-          Only new answers that say two records are <strong>not</strong> the same can show that,
-          and those come from you.
+          The {earlier} was made almost entirely on the name.
+          {donations
+            ? " Reviewers merged 99.6% of pairs of individuals with identical names, even when the two gave to different parties."
+            : ""}{" "}
+          So the {earlier} cannot show when two people with the same name are different people. A
+          high recall against it is not proof that the tool keeps such people apart. Only new
+          answers that say two records are <strong>not</strong> the same can show that, and those
+          come from you.
         </Callout>
       </section>
+      )}
 
       {/* 4 · limits */}
       <section className="mth-sec">
@@ -464,9 +488,9 @@ export default function MethodologyScreen() {
           <div className="mth-plane">
             <div className="mth-plane-h">It never rewrites a published ID quietly</div>
             <p>
-              If two published entities are joined, one ID survives and the other is retired. The
-              retired ID becomes an alias of the survivor, so an old ID still leads you to the
-              right record.
+              If two published entities are joined, one entity ID survives and the other is
+              retired. The retired ID still leads to the surviving ID, so an old ID takes you to
+              the right record.
             </p>
           </div>
           <div className="mth-plane">
@@ -480,79 +504,57 @@ export default function MethodologyScreen() {
         </div>
       </section>
 
-      {/* 5 · glossary */}
-      <section className="mth-sec">
+      {/* 5 · how it was decided */}
+      <section className="mth-sec" id="how-decided">
         <div className="mth-sec-head">
           <span className="mth-sec-n">05</span>
+          <h2>How to read &ldquo;how this was decided&rdquo;</h2>
+        </div>
+        <p className="mth-p">
+          Every entity ID, every cluster, every pair and every saved answer carries a chip that
+          says how it was decided. There are six answers. They are listed here weakest first.
+        </p>
+        <ol className="mth-prov">
+          {PROVENANCE.map((item) => (
+            <li key={item.key}>
+              <span className={"tag " + (item.tag || "")}>{item.label}</span>
+              <span>{item.definition}</span>
+            </li>
+          ))}
+        </ol>
+        <p className="mth-p">{PROVENANCE_PRECEDENCE}</p>
+        <Callout label="One chip sits outside the list">
+          <span className="tag dashed">{SUGGESTED.label}</span> {SUGGESTED.definition} It is never
+          ranked against the six above.
+        </Callout>
+        <p className="mth-aside">
+          Three other chips answer a different question and keep their own words. &ldquo;How this
+          value was set&rdquo; is about one column of one entity, not about why two records are
+          together. &ldquo;Where this ID came from&rdquo; is about the entity ID itself.
+          &ldquo;Against the {earlier || "earlier grouping"}&rdquo; is a measurement, not a
+          decision.
+        </p>
+      </section>
+
+      {/* 6 · glossary, generated from src/glossary.js so the page and the app
+          cannot drift apart */}
+      <section className="mth-sec">
+        <div className="mth-sec-head">
+          <span className="mth-sec-n">06</span>
           <h2>Words this tool uses</h2>
         </div>
-        <dl className="diff-meta" style={{ fontSize: 14, gap: "10px 18px", maxWidth: "64ch" }}>
-          <dt>record</dt>
-          <dd>One row of the file you loaded.</dd>
-
-          <dt>unit</dt>
-          <dd>
-            What the scorer compares. A unit is either one merged group of records or one record on
-            its own.
-          </dd>
-
-          <dt>track</dt>
-          <dd>
-            {trackA} or {trackB}. Records are only ever matched with records on the same track.
-          </dd>
-
-          <dt>exact key</dt>
-          <dd>
-            A named set of columns. Records holding the same value in every one of those columns
-            are merged.
-          </dd>
-
-          <dt>guard</dt>
-          <dd>
-            A limit on an exact key. If a group breaks the limit, the group is not merged and a
-            person decides it.
-          </dd>
-
-          <dt>held group</dt>
-          <dd>A group a guard stopped. Its records stay separate until someone decides.</dd>
-
-          <dt>blocking rule</dt>
-          <dd>
-            A rule that says which pairs are worth comparing at all. It saves time and it can hide
-            a match if it is too tight.
-          </dd>
-
-          <dt>score</dt>
-          <dd>
-            A number from 0 to 1 for one pair. It reads as the chance that the two units are the
-            same thing.
-          </dd>
-
-          <dt>bucket</dt>
-          <dd>
-            Where a scored pair lands. A pair is accepted, sent to you for review, or rejected.
-          </dd>
-
-          <dt>veto</dt>
-          <dd>
-            A rule about a pair that stops the tool accepting it, whatever the score says. It sends
-            the pair to you or rejects it, and it says why.
-          </dd>
-
-          <dt>label</dt>
-          <dd>
-            Your saved yes or no on one pair. It can carry a note and a source link, and it beats
-            every score.
-          </dd>
-
-          <dt>cluster</dt>
-          <dd>A set of units joined by accepted pairs. A cluster is a proposal, not a decision.</dd>
-
-          <dt>entity</dt>
-          <dd>
-            One real person or one real organisation, with one ID that stays the same from run to
-            run.
-          </dd>
+        <p className="mth-p">
+          One word per thing. Each word below is the only name this tool uses for it. Wherever a
+          word appears on screen with a dotted underline, its meaning is one hover away, and
+          &ldquo;More&rdquo; brings you here.
+        </p>
+        <dl className="diff-meta mth-gloss">
+          {terms.map((entry) => (
+            <Fragment key={entry.key}>
+              <dt id={termAnchor(entry.key)}>{entry.term}</dt>
+              <dd>{entry.definition}</dd>
+            </Fragment>
+          ))}
         </dl>
       </section>
 
@@ -626,8 +628,8 @@ function MthStyles() {
       .mth-pipe { margin-top: 10px; }
       .mth-stage { display: grid; grid-template-columns: 52px 1fr; gap: 18px; }
       .mth-rail { display: flex; flex-direction: column; align-items: center; }
-      .mth-node { width: 40px; height: 40px; flex: none; border-radius: 50%; display: grid; place-items: center;
-        font: 600 15px/1 var(--font-mono); color: #fff; background: var(--tone);
+      .mth-node { width: 16px; height: 16px; flex: none; border-radius: 50%; margin-top: 8px;
+        background: var(--tone);
         box-shadow: 0 0 0 4px var(--bg), 0 0 0 5px color-mix(in srgb, var(--tone) 35%, transparent); }
       .mth-stage:not(:last-child) .mth-rail::after { content: ""; flex: 1; width: 2px; min-height: 22px;
         background: linear-gradient(var(--line-strong), var(--line)); margin: 6px 0; }
@@ -641,14 +643,6 @@ function MthStyles() {
       .mth-here { font: 600 11px/1.5 var(--font-mono); color: #fff; background: var(--ti-red);
         border-radius: 4px; padding: 2px 9px; }
 
-      /* jobs */
-      .mth-jobs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 6px 0; }
-      .mth-job { border: 1px solid var(--line); border-radius: var(--r-md); padding: 16px; background: var(--surface); }
-      .mth-job-n { width: 28px; height: 28px; border: 2px solid; border-radius: 50%; display: grid; place-items: center;
-        font: 700 13px/1 var(--font-mono); margin-bottom: 10px; }
-      .mth-job-title { font-size: 15px; font-weight: 640; margin: 0 0 6px; }
-      .mth-job-text { font-size: 13px; line-height: 1.55; color: var(--ink-2); margin: 0; }
-
       /* walkthrough */
       .mth-phase { font-size: 16px; font-weight: 660; margin: 26px 0 10px; padding-bottom: 6px;
         border-bottom: 1px solid var(--line); color: var(--ti-red-700); }
@@ -661,11 +655,20 @@ function MthStyles() {
       .mth-click { display: inline-block; font: 500 12.5px/1.5 var(--font-mono); background: var(--ink);
         color: var(--bg); padding: 1px 7px; border-radius: 4px; white-space: nowrap; }
 
+      .mth-prov { list-style: none; margin: 18px 0 0; padding: 0; max-width: 64ch; }
+      .mth-prov > li { display: grid; grid-template-columns: 138px 1fr; gap: 14px;
+        align-items: baseline; padding: 9px 0; border-bottom: 1px dashed var(--line);
+        font-size: 14.5px; line-height: 1.6; color: var(--ink-2); }
+      .mth-prov > li > .tag { justify-self: start; }
+      .mth-gloss { margin-top: 18px; font-size: 14.5px; gap: 10px 18px; max-width: 68ch; }
+      .mth-gloss dt { scroll-margin-top: 80px; font-weight: 600; color: var(--ink); }
+      .mth-gloss dt:target { color: var(--ti-red); }
+
       .mth-foot { display: flex; align-items: center; gap: 14px; padding-top: 30px; flex-wrap: wrap; }
       .mth-foot > span { font-size: 16px; font-weight: 600; }
 
       @media (max-width: 720px) {
-        .mth-two, .mth-planes, .mth-jobs { grid-template-columns: 1fr; }
+        .mth-two, .mth-planes { grid-template-columns: 1fr; }
         .mth-arrow { transform: rotate(90deg); margin: 4px 0; }
       }
     `}</style>

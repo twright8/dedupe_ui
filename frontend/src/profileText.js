@@ -11,7 +11,7 @@
    that has not declared a field yet still reads sensibly.
    ============================================================ */
 
-import { conditionsHold } from "./evidenceFocus";
+import { conditionsHold } from "./evidenceFocus.js";
 
 const FALLBACK_NOUNS = {
   record: "record",
@@ -137,7 +137,7 @@ export function exportDescription(profile) {
   if (typeof value === "string" && value.trim()) return value.trim();
   return (
     "The input file as it came, with the record ID, the entity ID and how that ID was decided " +
-    "added at the end. The Excel file carries a second sheet of aliases and a third naming the " +
-    "run and its config version. The CSV is the first sheet only."
+    "added at the end. The Excel file carries a second sheet of retired IDs and a third naming " +
+    "the run and its config version. The CSV is the first sheet only."
   );
 }

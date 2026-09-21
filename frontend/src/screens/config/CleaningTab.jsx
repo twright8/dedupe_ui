@@ -1,9 +1,10 @@
 /* ============================================================
-   Config tab: Cleaning rules
+   Config tab: Cleaning steps
    ------------------------------------------------------------
-   Each track has its own ordered list of steps. A step reads one
-   column and writes another, and later steps may read what earlier
-   ones wrote. Raw profile columns are never overwritten.
+   Each track has its own ordered list of cleaning steps. A step
+   reads one column and writes another, and later steps may read
+   what earlier ones wrote. Raw profile columns are never
+   overwritten.
    The preview runs the draft — never a saved version — either on
    values the user types or on records from a run.
    ============================================================ */
@@ -11,6 +12,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { api } from "../../api";
 import { Icons } from "../../components/Icons";
+import { Term, TermHint } from "../../components/Term";
 import {
   ColumnCombo,
   DescriptionInput,
@@ -49,6 +51,12 @@ const OPS = [
   { op: "lookup", label: "lookup" },
   { op: "function", label: "function" },
 ];
+
+// The plain words for one op, so the preview never prints the stored key.
+function opLabel(op) {
+  const found = OPS.find((o) => o.op === op);
+  return found ? found.label : String(op || "");
+}
 
 // Arguments that belong to an op. Changing op drops the rest, so a step never
 // carries an argument its op ignores.
@@ -420,7 +428,7 @@ export default function CleaningTab({ ruleset, setRuleset, errors, profile }) {
       <SectionErrors errors={errorsOnSection(errors, prefix)} />
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <div className="seg" title="Which track these steps clean">
+        <div className="seg" title="Which track these cleaning steps clean">
           {tracks.map((t) => (
             <button key={t.key} className={track === t.key ? "on" : ""} onClick={() => setTrack(t.key)}>
               {t.label}
@@ -440,14 +448,16 @@ export default function CleaningTab({ ruleset, setRuleset, errors, profile }) {
       <div style={EDITOR_GRID}>
         <div className="card" style={{ minWidth: 0 }}>
           <div className="card-h">
-            <h3>Cleaning steps</h3>
+            <h3>
+              <Term name="cleaningStep" plural cap />
+            </h3>
             <span className="muted" style={{ fontSize: 12 }}>
-              applied in order &middot; a later step may read an earlier target
+              applied in order &middot; a later step may read the column an earlier one wrote
             </span>
             <div className="actions">
               <button className="btn sm" onClick={addStep}>
                 <Icons.plus size={12} />
-                Add step
+                Add cleaning step
               </button>
             </div>
           </div>
@@ -463,7 +473,9 @@ export default function CleaningTab({ ruleset, setRuleset, errors, profile }) {
                 <tr>
                   <th style={{ width: 34 }}>#</th>
                   <th style={{ width: 62 }}>Order</th>
-                  <th>Step</th>
+                  <th>
+                    Cleaning step <TermHint name="cleaningStep" />
+                  </th>
                   <th style={{ width: 44 }}></th>
                 </tr>
               </thead>
@@ -490,7 +502,7 @@ export default function CleaningTab({ ruleset, setRuleset, errors, profile }) {
                       <td style={{ whiteSpace: "normal", minWidth: 0 }}>
                         <DescriptionInput
                           value={s.description}
-                          placeholder="What this step is for, in a sentence"
+                          placeholder="What this cleaning step is for, in a sentence"
                           onChange={(v) => updateStep(i, { description: v })}
                         />
                         <div
@@ -567,7 +579,7 @@ export default function CleaningTab({ ruleset, setRuleset, errors, profile }) {
                       <td style={{ verticalAlign: "top", paddingTop: 11 }}>
                         <button
                           className="btn sm ghost"
-                          title="Delete this step"
+                          title="Delete this cleaning step"
                           onClick={() => editSteps((list) => list.filter((_, idx) => idx !== i))}
                         >
                           <Icons.x size={12} />
@@ -589,7 +601,7 @@ export default function CleaningTab({ ruleset, setRuleset, errors, profile }) {
 }
 
 /* ============================================================
-   Preview — the draft's steps, value by value
+   Preview — the draft's cleaning steps, value by value
    ============================================================ */
 function CleaningPreview({ ruleset, track, steps, rawColumns }) {
   const [mode, setMode] = useState("values"); // values | run
@@ -695,7 +707,10 @@ function CleaningPreview({ ruleset, track, steps, rawColumns }) {
     <div className="card" style={PREVIEW_CARD_STYLE}>
       <div className="card-h">
         <Icons.bolt size={16} />
-        <h3>Step preview</h3>
+        <h3>Preview</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          what these cleaning steps do to one value, step by step
+        </span>
       </div>
       <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div className="seg">
@@ -752,7 +767,7 @@ function CleaningPreview({ ruleset, track, steps, rawColumns }) {
           </p>
         ) : samples.length === 0 ? (
           <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
-            {loading ? "Running the steps..." : "Nothing to show yet."}
+            {loading ? "Running the cleaning steps..." : "Nothing to show yet."}
           </p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 14, opacity: loading ? 0.5 : 1 }}>
@@ -840,7 +855,7 @@ function SamplePreview({ sample }) {
             }}
           >
             <div className="muted">
-              {i + 1}. {step.op}
+              {i + 1}. {opLabel(step.op)}
               {step.source ? ` on ${step.source}` : ""}
             </div>
             {step.description && (

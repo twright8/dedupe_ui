@@ -12,12 +12,12 @@ export function hasRecordCounts(counts) {
   return !!counts && counts.hasRecords === true;
 }
 
-// Whether the exact-key stage ran and left its numbers behind.
+// Whether the match keys ran and left their numbers behind.
 export function hasExactCounts(counts) {
   return !!counts && counts.hasExact === true;
 }
 
-// Whether stage 5 has proposed entity IDs for this run.
+// Whether the run has proposed an entity ID for every record.
 export function hasEntityCounts(counts) {
   return !!counts && counts.hasEntities === true;
 }

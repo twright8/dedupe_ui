@@ -12,6 +12,8 @@
 import { Cell, NUMERIC_TYPES } from "./cells";
 import { patternSummary } from "./PairEvidence";
 import { evidenceFocusFor, pickColumns } from "../evidenceFocus";
+import { useProfile } from "../profile";
+import { noun } from "../profileText";
 
 // One row of the side-by-side comparison, skipped when neither side has a value.
 function FocusRow({ col, left, right }) {
@@ -43,8 +45,11 @@ function FocusRow({ col, left, right }) {
   );
 }
 
-// One side's events, narrowed and ordered by the focus.
+/* One side's evidence rows, narrowed and ordered by the focus. The word for
+   one of those rows is the profile's own, so the empty line reads "No
+   donations recorded" or "No companies recorded" rather than "No rows". */
 export function FocusEvents({ events, columns, emptyNote }) {
+  const profile = useProfile();
   const rows = Array.isArray(events) ? events : [];
   if (columns.length === 0) {
     return (
@@ -56,7 +61,7 @@ export function FocusEvents({ events, columns, emptyNote }) {
   if (rows.length === 0) {
     return (
       <p className="muted" style={{ fontSize: 12, margin: 0 }}>
-        No individual rows recorded.
+        No {noun(profile, "evidence_row_plural")} recorded.
       </p>
     );
   }
@@ -151,8 +156,8 @@ export function FocusStrip({ pair, profile, showAll, onToggle }) {
             <thead>
               <tr>
                 <th style={{ width: 180 }}>Field</th>
-                <th>{left.name || "Left"}</th>
-                <th>{right.name || "Right"}</th>
+                <th>{left.name || "First unit"}</th>
+                <th>{right.name || "Second unit"}</th>
               </tr>
             </thead>
             <tbody>
@@ -172,7 +177,7 @@ export function FocusStrip({ pair, profile, showAll, onToggle }) {
           ].map((s, i) => (
             <div key={i} style={{ minWidth: 0 }}>
               <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-                {patternSummary(s.side) || "no pattern recorded"}
+                {patternSummary(s.side, profile) || "no summary recorded"}
               </div>
               <FocusEvents
                 events={s.rows}

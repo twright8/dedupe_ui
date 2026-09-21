@@ -1,16 +1,19 @@
 /* ============================================================
    Config tab: Thresholds & Splink
    ------------------------------------------------------------
-   The three decision lines and the EM settings apply to the whole
-   run. Everything else — blocking, comparisons, the EM blocks and
-   the pair budget — belongs to one track, so a track selector sits
-   between the two. LINKAGE.md is the contract; linkage.js holds the
-   reading and normalising, LinkageTrack.jsx the per-track editor.
+   The three decision lines — the accept line, the review line and
+   the candidate floor — and the training settings apply to the
+   whole run. Everything else — blocking rules, comparisons, the
+   training blocks and the pair budget — belongs to one track, so a
+   track selector sits between the two. LINKAGE.md is the contract;
+   linkage.js holds the reading and normalising, LinkageTrack.jsx
+   the per-track editor.
    ============================================================ */
 
 import { useState, useEffect, useRef } from "react";
 import { api } from "../../api";
 import { Icons } from "../../components/Icons";
+import { Term, TermHint } from "../../components/Term";
 import { fmtNumber } from "../../components/ProbBar";
 import LinkageTrack from "./LinkageTrack";
 import { DEFAULT_EM_ITERATIONS, orderedThresholds } from "./linkage";
@@ -22,22 +25,24 @@ import {
   errorsOnSection,
 } from "./shared";
 
-function countBandsFromHistogram(histogram, high, review) {
+// The three buckets a run's scores fall into: Accepted, For review, Rejected.
+function countBucketsFromHistogram(histogram, acceptLine, reviewLine) {
   const hist = Array.isArray(histogram) ? histogram : [];
   const n = hist.length || 20;
   return hist.reduce(
     (acc, count, i) => {
       const mid = (i + 0.5) / n;
-      if (mid >= high) acc.auto_accept += count || 0;
-      else if (mid >= review) acc.review_band += count || 0;
-      else acc.below_floor += count || 0;
+      if (mid >= acceptLine) acc.accepted += count || 0;
+      else if (mid >= reviewLine) acc.forReview += count || 0;
+      else acc.rejected += count || 0;
       return acc;
     },
-    { auto_accept: 0, review_band: 0, below_floor: 0 }
+    { accepted: 0, forReview: 0, rejected: 0 }
   );
 }
 
-// One threshold slider with the sentence that says what it does.
+// One decision line, as a slider, with the sentence that says what it does.
+// Every line is a score, so every one reads as a decimal.
 function ThresholdSlider({ label, value, min, max, onChange, help, colour }) {
   return (
     <div className="field">
@@ -118,9 +123,9 @@ export default function ThresholdsTab({
             lineHeight: 1.5,
           }}
         >
-          This version stored one set of blocking rules and comparisons for the whole run. They
-          have been copied into every track so you can edit each one separately. Nothing changes
-          until you save a new version.
+          This version stored one set of <Term name="blockingRule" plural /> and comparisons for
+          the whole run. They have been copied into every track so you can edit each one
+          separately. Nothing changes until you save a new version.
         </div>
       )}
 
@@ -130,32 +135,44 @@ export default function ThresholdsTab({
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16 }}>
         <div className="card" style={{ minWidth: 0 }}>
           <div className="card-h">
-            <h3>Decision thresholds</h3>
+            <h3>Decision lines</h3>
             <span className="muted" style={{ fontSize: 12 }}>
-              the same three lines for every track
+              the same three lines for every track &middot; each one is a score from 0 to 1
             </span>
           </div>
           <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
             <ThresholdSlider
-              label="Auto-accept"
+              label={
+                <>
+                  Accept line <TermHint name="acceptLine" />
+                </>
+              }
               value={high}
               min="0.5"
               max="0.99"
               onChange={(v) => setThreshold("high", v)}
               colour="var(--green)"
-              help="Pairs at or above this score are merged without review."
+              help="The score at or above which a pair is accepted without review."
             />
             <ThresholdSlider
-              label="Review floor"
+              label={
+                <>
+                  Review line <TermHint name="reviewLine" />
+                </>
+              }
               value={review}
               min="0.05"
               max="0.99"
               onChange={(v) => setThreshold("review", v)}
               colour="var(--amber)"
-              help="Pairs below this are not shown for review."
+              help="The score below which a pair is rejected without review."
             />
             <ThresholdSlider
-              label="Candidate floor"
+              label={
+                <>
+                  Candidate floor <TermHint name="candidateFloor" />
+                </>
+              }
               value={candidate}
               min="0.01"
               max="0.9"
@@ -163,15 +180,15 @@ export default function ThresholdsTab({
               help="The lowest score kept in the run's files. Anything weaker is thrown away."
             />
             <div className="muted" style={{ fontSize: 11.5 }}>
-              The three stay in order: candidate floor ≤ review floor ≤ auto-accept. Moving one
-              pushes the others.
+              The three stay in order: candidate floor, then review line, then accept line. Moving
+              one pushes the others.
             </div>
 
             <hr className="rule" style={{ margin: 0 }} />
 
             <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
-              <div className="field" style={{ width: 150 }}>
-                <label>EM iterations</label>
+              <div className="field" style={{ width: 180 }}>
+                <label>Training rounds</label>
                 <input
                   className="input mono"
                   type="number"
@@ -186,7 +203,7 @@ export default function ThresholdsTab({
                   }
                 />
                 <div className="muted" style={{ fontSize: 11.5 }}>
-                  Rounds the model runs while it estimates its own weights.
+                  How many times Splink goes over the data while it works out its own weights.
                 </div>
               </div>
 
@@ -220,7 +237,7 @@ export default function ThresholdsTab({
                       }))
                     }
                   />
-                  Estimate from the exact rules
+                  Work it out from the match keys
                 </label>
               </div>
             </div>
@@ -231,7 +248,7 @@ export default function ThresholdsTab({
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <div className="seg" title="Which track these rules score">
+        <div className="seg" title="Which track these blocking rules and comparisons belong to">
           {tracks.map((t) => {
             const bad = trackErrorCount(t.key);
             const soft = trackWarningCount(t.key);
@@ -279,7 +296,8 @@ export default function ThresholdsTab({
 }
 
 /* ============================================================
-   What moving the lines would do to the latest completed run
+   Preview — what moving the three lines would do to the latest
+   completed run's pairs
    ============================================================ */
 function ThresholdEffect({ high, review }) {
   const [effect, setEffect] = useState(null);
@@ -304,19 +322,19 @@ function ThresholdEffect({ high, review }) {
             return;
           }
           const hist = payload.diag.histogram || [];
-          const currentHigh = +(payload.diag.thresholds?.threshold_high ?? high);
+          const currentAccept = +(payload.diag.thresholds?.threshold_high ?? high);
           const currentReview = +(payload.diag.thresholds?.threshold_review ?? review);
-          const before = countBandsFromHistogram(hist, currentHigh, currentReview);
-          const after = countBandsFromHistogram(hist, high, review);
+          const before = countBucketsFromHistogram(hist, currentAccept, currentReview);
+          const after = countBucketsFromHistogram(hist, high, review);
           setEffect({
             run_id: payload.latest.id,
             scored: hist.reduce((sum, n) => sum + (n || 0), 0),
-            auto_accept: after.auto_accept,
-            review_band: after.review_band,
-            below_floor: after.below_floor,
-            auto_accept_delta: after.auto_accept - before.auto_accept,
-            review_band_delta: after.review_band - before.review_band,
-            below_floor_delta: after.below_floor - before.below_floor,
+            accepted: after.accepted,
+            forReview: after.forReview,
+            rejected: after.rejected,
+            acceptedDelta: after.accepted - before.accepted,
+            forReviewDelta: after.forReview - before.forReview,
+            rejectedDelta: after.rejected - before.rejected,
           });
         })
         .catch(() => setEffect(null))
@@ -328,61 +346,67 @@ function ThresholdEffect({ high, review }) {
   return (
     <div className="card" style={{ alignSelf: "flex-start", minWidth: 0 }}>
       <div className="card-h">
-        <h3>Effect on current run</h3>
+        <h3>Preview</h3>
         <span className="muted" style={{ fontSize: 12 }}>
-          {effect?.run_id ? `latest complete run: ${effect.run_id}` : "(latest complete run)"}
+          {effect?.run_id
+            ? `where these three lines would put the pairs of run ${effect.run_id}`
+            : "where these three lines would put the latest completed run's pairs"}
         </span>
       </div>
       <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <div className="kpi" style={{ padding: 12 }}>
-            <div className="label">Auto-accept</div>
+            <div className="label">
+              Accepted <TermHint name="bucket" />
+            </div>
             <div className="value" style={{ fontSize: 20 }}>
-              {effectLoading ? "..." : effect ? fmtNumber(effect.auto_accept) : "--"}
+              {effectLoading ? "..." : effect ? fmtNumber(effect.accepted) : "--"}
             </div>
-            {effect?.auto_accept_delta != null && (
-              <div className={`delta ${effect.auto_accept_delta >= 0 ? "up" : "down"}`}>
-                {effect.auto_accept_delta >= 0 ? "+" : ""}
-                {effect.auto_accept_delta}
+            {effect?.acceptedDelta != null && (
+              <div className={`delta ${effect.acceptedDelta >= 0 ? "up" : "down"}`}>
+                {effect.acceptedDelta >= 0 ? "+" : ""}
+                {effect.acceptedDelta} pairs
               </div>
             )}
           </div>
           <div className="kpi" style={{ padding: 12 }}>
-            <div className="label">Review band</div>
+            <div className="label">For review</div>
             <div className="value" style={{ fontSize: 20, color: "var(--amber)" }}>
-              {effect ? fmtNumber(effect.review_band) : "--"}
+              {effect ? fmtNumber(effect.forReview) : "--"}
             </div>
-            {effect?.review_band_delta != null && (
-              <div className={`delta ${effect.review_band_delta >= 0 ? "up" : "down"}`}>
-                {effect.review_band_delta >= 0 ? "+" : ""}
-                {effect.review_band_delta}
+            {effect?.forReviewDelta != null && (
+              <div className={`delta ${effect.forReviewDelta >= 0 ? "up" : "down"}`}>
+                {effect.forReviewDelta >= 0 ? "+" : ""}
+                {effect.forReviewDelta} pairs
               </div>
             )}
           </div>
           <div className="kpi" style={{ padding: 12 }}>
-            <div className="label">Below floor</div>
+            <div className="label">Rejected</div>
             <div className="value" style={{ fontSize: 20, color: "var(--ti-red)" }}>
-              {effectLoading ? "..." : effect ? fmtNumber(effect.below_floor) : "--"}
+              {effectLoading ? "..." : effect ? fmtNumber(effect.rejected) : "--"}
             </div>
-            {effect?.below_floor_delta != null && (
-              <div className={`delta ${effect.below_floor_delta >= 0 ? "down" : "up"}`}>
-                {effect.below_floor_delta >= 0 ? "+" : ""}
-                {effect.below_floor_delta}
+            {effect?.rejectedDelta != null && (
+              <div className={`delta ${effect.rejectedDelta >= 0 ? "down" : "up"}`}>
+                {effect.rejectedDelta >= 0 ? "+" : ""}
+                {effect.rejectedDelta} pairs
               </div>
             )}
           </div>
           <div className="kpi" style={{ padding: 12 }}>
-            <div className="label">Scored candidates</div>
+            <div className="label">
+              Pairs scored <TermHint name="pair" />
+            </div>
             <div className="value" style={{ fontSize: 20 }}>
               {effectLoading ? "..." : effect ? fmtNumber(effect.scored) : "--"}
             </div>
-            <div className="delta muted">from latest run histogram</div>
+            <div className="delta muted">the three counts above add up to this</div>
           </div>
         </div>
-        <div className="muted" style={{ fontSize: 12 }}>
-          Preview uses already-scored candidates from the latest completed run. Changing the lower
-          floor affects what future runs ask Splink to emit; unseen weaker pairs are not estimated
-          here.
+        <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>
+          These counts come from the pairs the latest completed run already scored. Lowering the
+          candidate floor only changes what a future run keeps, so pairs that were never scored
+          are not counted here.
         </div>
         <button className="btn primary">
           <Icons.play size={14} stroke="#fff" />

@@ -1,15 +1,21 @@
 /* ============================================================
-   Screen: Cluster review — one group on the right, the queue on
+   Screen: Cluster review — one cluster on the right, the queue on
    the left, a decision bar at the bottom
    ------------------------------------------------------------
-   Stage 4 joins accepted pairs into clusters and holds back the
-   doubtful ones. This screen is where a person settles them. A
-   decision is stored as ordinary labels, so everything true of a
-   label is true of it: a human answer always wins, and the old
-   answer stays on record.
+   The clustering stage joins accepted pairs into clusters, then
+   holds the doubtful ones back for a person. A cluster it holds
+   back is a withheld cluster, and this screen is where a person
+   settles it. A group decision is stored as ordinary labels, so
+   everything true of a label is true of it: a reviewer's answer
+   always wins, and the old answer stays on record.
+
+   Every word on this screen comes from src/glossary.js. The one
+   thing this file names for itself is the list of reasons the gate
+   withheld a cluster, because that list is not a provenance: it
+   says what the gate found, not who decided.
    ============================================================ */
 
-import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
+import { useState, useEffect, useMemo, useCallback, Fragment } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { Icons } from "../components/Icons";
@@ -20,56 +26,68 @@ import { patternSummary } from "../components/PairEvidence";
 import { FocusEvents } from "../components/FocusStrip";
 import { evidenceFocusFor, pickColumns } from "../evidenceFocus";
 import { guardReason } from "../components/ExactGroupsTable";
+import { Term, TermHint, Provenance } from "../components/Term";
 import { useProfile } from "../profile";
-import { existingLabelName, noun } from "../profileText";
+import { noun } from "../profileText";
 
 const PER_PAGE = 50;
 const PART_NAMES = ["A", "B", "C", "D", "E", "F", "G", "H"];
 
-/* Every status the gate can raise, in the order ENTITIES.md gives them, with
-   the one line each needs so a reviewer knows why the group is here. */
+/* Why the gate withheld a cluster, in the order ENTITIES.md gives them, with
+   the one line each needs so a reviewer knows why the cluster is here.
+
+   This is not "how it was decided". These reasons say what the gate found, so
+   they keep their own list and their own colours. `term` names the glossary
+   entry the legend explains beside each one. */
 const STATUSES = [
   {
     key: "conflict",
     label: "Conflict",
     tag: "red",
     help: "A reviewer has already said two of these records are not the same.",
+    term: "label",
   },
   {
     key: "too_large",
     label: "Too large",
     tag: "amber",
-    help: "The group holds more units than the limit, which usually means a rule is too loose.",
+    help: "This cluster holds more units than the limit. That usually means the accept line is too low, or a match key is too loose.",
+    term: "cluster",
   },
   {
     key: "weak_link",
     label: "Weak link",
     tag: "amber",
-    help: "Two units inside the group scored very low against each other, so it may be a chain.",
+    help: "Two units inside this cluster scored very low against each other, so it may be a chain.",
+    term: "weakLink",
   },
   {
     key: "mixed_ids",
     label: "Mixed earlier IDs",
     tag: "blue",
-    help: "The group joins records that an earlier grouping gave different IDs.",
+    help: "This cluster joins records that the earlier grouping gave different IDs.",
+    term: "mixedEarlierIds",
   },
   {
     key: "held_key",
-    label: "Held by a key",
+    label: "Held by a match key",
     tag: "amber",
-    help: "A guard on a match key stopped this group, so its records are still separate.",
+    help: "A guard on a match key stopped these records being put together, so they are still separate and waiting for a person.",
+    term: "heldGroup",
   },
   {
     key: "cross_track_ids",
     label: "Earlier ID spans tracks",
     tag: "blue",
     help: "An earlier ID covers a person and an organisation. The tool keeps them as two entities.",
+    term: "earlierId",
   },
   {
     key: "attribute_tie",
-    label: "Attribute tie",
+    label: "Value undecided",
     tag: "violet",
-    help: "Two values were equally common, so the standard value could not be settled.",
+    help: "Two values were equally common, so one value for the whole cluster could not be settled.",
+    term: "consensusColumn",
   },
 ];
 
@@ -77,9 +95,25 @@ function statusMeta(key) {
   return STATUSES.find((s) => s.key === key);
 }
 
+/* One chip saying why the cluster is here. A reason this list does not carry
+   still reads as words: the raw field is never printed. */
 export function StatusTag({ status }) {
   const meta = statusMeta(status);
-  if (!meta) return <span className="tag">{status || "ok"}</span>;
+  if (!meta) {
+    const settled = !status || status === "ok";
+    return (
+      <span
+        className={settled ? "tag" : "tag amber"}
+        title={
+          settled
+            ? "The gate settled this cluster on its own. Nothing here needs a person."
+            : "The gate held this cluster back for a person."
+        }
+      >
+        {settled ? "Settled" : "Held back"}
+      </span>
+    );
+  }
   return (
     <span className={"tag " + meta.tag} title={meta.help}>
       {meta.label}
@@ -87,36 +121,82 @@ export function StatusTag({ status }) {
   );
 }
 
-/* The same status in a full sentence, using this cluster's own numbers. */
+/* The same reason in a full sentence, using this cluster's own numbers. It
+   returns elements, not a string, so the words it introduces carry their
+   definitions with them. */
 function statusSentence(status, cluster) {
   const ids = cluster?.existing_entity_ids || [];
   if (status === "mixed_ids") {
-    return `Joins records that carry ${ids.length} different earlier IDs: ${ids.join(" and ")}.`;
+    return (
+      <>
+        This cluster joins records that carry {fmtNumber(ids.length)} different{" "}
+        <Term name="earlierId" plural />: {ids.join(" and ")}.
+      </>
+    );
   }
   if (status === "weak_link") {
     const weakest = (cluster?.weak_pairs || [])[0];
     const score = weakest ? fmtProb(weakest.match_probability) : "very little";
-    return `Two units in this group scored only ${score} against each other, so it may be a chain of weak links.`;
+    return (
+      <>
+        Two units in this cluster scored only {score} against each other, so it may be a chain of{" "}
+        <Term name="weakLink" plural />.
+      </>
+    );
   }
   if (status === "too_large") {
-    return `${fmtNumber(cluster?.n_units)} units in one group is over the limit, which usually means a rule is too loose.`;
+    return (
+      <>
+        {fmtNumber(cluster?.n_units)} units in one cluster is over the limit. That usually means the{" "}
+        <Term name="acceptLine" /> is too low, or a <Term name="matchKey" /> is too loose.
+      </>
+    );
   }
   if (status === "conflict") {
-    return "A reviewer has said two of these records are not the same, so the group was not proposed as one entity.";
+    return (
+      <>
+        A reviewer has said two of these records are not the same, so this cluster was not proposed
+        as one entity.
+      </>
+    );
   }
   if (status === "held_key") {
     const reason = guardReason(cluster?.guard);
-    return reason
-      ? `A guard on a match key stopped this group: ${reason}.`
-      : "A guard on a match key stopped this group, so its records are still separate.";
+    return (
+      <>
+        A <Term name="guard" /> on a match key stopped these records being put together
+        {reason ? `: ${reason}` : ""}. They are a <Term name="heldGroup" />, still separate and
+        waiting for you.
+      </>
+    );
   }
   if (status === "attribute_tie") {
-    return "Two values were equally common, so the standard value could not be settled.";
+    return (
+      <>Two values were equally common, so one value for the whole cluster could not be settled.</>
+    );
   }
   if (status === "cross_track_ids") {
-    return "An earlier ID covers a person and an organisation. The tool keeps them as two entities, and there is nothing to decide here.";
+    return (
+      <>
+        An earlier ID covers a person and an organisation. The tool keeps them as two entities, and
+        there is nothing to decide here.
+      </>
+    );
   }
-  return "";
+  return null;
+}
+
+/* A column's own label, for the times a column key reaches the screen. A key
+   the profile does not name is turned into words, so the stored name never
+   shows. */
+function columnLabel(key, columns) {
+  const hit = (columns || []).find((c) => c.key === key);
+  if (hit?.label) return hit.label;
+  const words = String(key || "")
+    .replace(/_/g, " ")
+    .trim();
+  if (!words) return "This value";
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 // ---------- main screen ----------
@@ -265,20 +345,21 @@ export default function ClusterScreen() {
           )}
           <h1 className="page-title">Cluster review</h1>
           <p className="page-sub">
-            {fmtNumber(total)} group{total === 1 ? "" : "s"} to look at. These are the ones the
-            tool would not settle on its own and nobody has decided yet. Open one, decide whether it
-            is one thing or several, then apply your decisions. Your answers are saved as labels, so
-            they carry over to later runs.
+            {fmtNumber(total)} <Term name="cluster" plural={total !== 1} /> to look at. A{" "}
+            <Term name="withheldCluster" /> is one the tool would not settle on its own. Open one,
+            decide whether it is one thing or several, then apply your decisions. Your answers are
+            saved as <Term name="label" plural />, so they carry over to later runs.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <button className="btn" onClick={() => setShowLegend((v) => !v)}>
-            <Icons.doc size={14} /> What the statuses mean
+            <Icons.doc size={14} /> Why a cluster is held back
           </button>
           {waiting > 0 && (
             <span className="tag amber" title="The counts and the entity IDs are out of date until you apply them">
               <span className="dot" />
-              {waiting} decision{waiting === 1 ? "" : "s"} waiting — apply them to update the entities
+              {fmtNumber(waiting)} decision{waiting === 1 ? "" : "s"} waiting — apply them to update
+              the entities
             </span>
           )}
           <button className="btn primary" onClick={handleRecluster} disabled={reclustering}>
@@ -291,16 +372,27 @@ export default function ClusterScreen() {
       {showLegend && (
         <div className="card" style={{ marginBottom: 12 }}>
           <div className="card-b">
+            <p className="muted" style={{ fontSize: 12.5, margin: "0 0 10px", lineHeight: 1.5 }}>
+              A <Term name="cluster" /> is a set of units joined by accepted pairs. The gate passes
+              most of them without asking. These are the reasons it holds one back instead.
+            </p>
             <dl className="diff-meta" style={{ marginTop: 0, fontSize: 13, gap: "8px 16px" }}>
               {STATUSES.map((s) => (
                 <Fragment key={s.key}>
                   <dt>
                     <span className={"tag " + s.tag}>{s.label}</span>
                   </dt>
-                  <dd>{s.help}</dd>
+                  <dd>
+                    {s.help} {s.term && <TermHint name={s.term} />}
+                  </dd>
                 </Fragment>
               ))}
             </dl>
+            <p className="muted" style={{ fontSize: 12.5, margin: "10px 0 0", lineHeight: 1.5 }}>
+              Two of these are easy to mix up. A <Term name="withheldCluster" /> is a whole cluster
+              the gate would not settle. A <Term name="heldGroup" /> is smaller and comes earlier: a
+              match key would have put those records together, and a guard stopped it.
+            </p>
           </div>
         </div>
       )}
@@ -345,7 +437,13 @@ export default function ClusterScreen() {
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
-        <div className="seg" title="Why the group is in the queue">
+        <span
+          className="muted"
+          style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4 }}
+        >
+          Why it was held back <TermHint name="withheldCluster" />
+        </span>
+        <div className="seg" title="Why the gate would not settle this cluster on its own">
           <button
             className={status === "all" ? "on" : ""}
             onClick={() => {
@@ -402,7 +500,7 @@ export default function ClusterScreen() {
             ))}
           </div>
         )}
-        <div className="seg" title="Groups you have already decided">
+        <div className="seg" title="Clusters you have already decided">
           {[
             ["all", "All"],
             ["no", "Undecided"],
@@ -446,7 +544,7 @@ export default function ClusterScreen() {
         <label
           className="muted"
           style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 5 }}
-          title="Also list the groups the gate settled on its own"
+          title="Also list the clusters the gate settled on its own"
         >
           <input
             type="checkbox"
@@ -456,7 +554,7 @@ export default function ClusterScreen() {
               setPage(0);
             }}
           />
-          Show settled groups too
+          Show settled clusters too
         </label>
         <div className="spacer" />
         <span className="muted" style={{ fontSize: 12 }}>
@@ -471,7 +569,7 @@ export default function ClusterScreen() {
       ) : items.length === 0 ? (
         <Empty
           title="Nothing left in this queue"
-          sub="Every group that matched these filters has been decided, or the gate passed them all."
+          sub="Every cluster that matched these filters has been decided, or the gate settled them all."
         />
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "300px minmax(0, 1fr)", gap: 16, alignItems: "start" }}>
@@ -509,7 +607,8 @@ function ClusterQueue({ items, selected, setSelected, priorityColumn, page, tota
       style={{ maxHeight: "calc(100vh - 180px)", overflow: "auto", position: "sticky", top: 70 }}
     >
       <div className="card-h" style={{ padding: "10px 12px" }}>
-        <span className="eyebrow">Queue</span>
+        <span className="eyebrow">Cluster queue</span>
+        <TermHint name="cluster" />
         <span className="muted" style={{ fontSize: 11, marginLeft: "auto" }}>
           page {page + 1} of {fmtNumber(totalPages)}
         </span>
@@ -531,8 +630,13 @@ function ClusterQueue({ items, selected, setSelected, priorityColumn, page, tota
               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                 <StatusTag status={c.status} />
                 {c.decision && (
-                  <span className="tag green" title={`Decided by ${c.decision.reviewer}`}>
-                    decided
+                  <span
+                    className="tag green"
+                    title={`${
+                      c.decision.kind === "merge" ? "All the same" : "Split into parts"
+                    }, decided by ${c.decision.reviewer}`}
+                  >
+                    Decided
                   </span>
                 )}
               </div>
@@ -612,7 +716,7 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
     : [];
   const eventColumns = detail?.event_columns || profile.event_columns || [];
   // The detail endpoint caps the units it returns. The decision still applies to
-  // the whole group, so the cap is said out loud rather than hidden.
+  // the whole cluster, so the cap is said out loud rather than hidden.
   // n_units is the true size; units_shown is how many the response carries.
   const shownUnits = detail?.units_shown ?? units.length;
   const totalUnits = detail?.n_units ?? shownUnits;
@@ -647,7 +751,7 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
     return Object.values(groups).filter((g) => g.length > 0);
   }, [parts]);
 
-  /* What to pre-fill depends on why the group is here. A guard on distinct
+  /* What to pre-fill depends on why the cluster is here. A guard on distinct
      names splits on that column, a guard on size means one name and one part,
      and mixed earlier IDs split on the ID. */
   function suggestParts() {
@@ -746,7 +850,7 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
       .finally(() => setBusy(false));
   }
 
-  // J and K walk the queue. M, S and U act on the open group.
+  // J and K walk the queue. M, S and U act on the open cluster.
   useEffect(() => {
     function onKey(e) {
       const tag = e.target.tagName;
@@ -770,12 +874,12 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
   }); // re-bound each render so it always sees the current parts
 
   if (error) {
-    return <Empty title="Could not open that group" sub={error} />;
+    return <Empty title="Could not open that cluster" sub={error} />;
   }
   if (!detail) {
     return (
       <p className="muted pulse" style={{ padding: 40 }}>
-        Loading the group...
+        Loading the cluster...
       </p>
     );
   }
@@ -794,7 +898,8 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
             {truncated
               ? `showing ${fmtNumber(shownUnits)} of ${fmtNumber(totalUnits)} units`
               : `${fmtNumber(totalUnits)} units`}{" "}
-            &middot; {fmtNumber(detail.n_records)} records
+            <TermHint name="unit" /> &middot; {fmtNumber(detail.n_records)} records{" "}
+            <TermHint name="record" />
           </span>
           <div className="actions">
             {statuses.map((s) => (
@@ -818,17 +923,35 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
             <AttributeChoice
               key={col}
               column={col}
+              label={columnLabel(col, allColumns)}
               attribute={a}
               busy={busy}
               onSettle={(value, note) => settleAttribute(col, value, note)}
             />
           ))}
           {decision && (
-            <div style={{ fontSize: 12.5 }}>
-              <span className="tag green">decided</span>{" "}
-              {decision.kind === "merge" ? "All the same" : "Split into parts"} by{" "}
-              {decision.reviewer}
-              {decision.notes ? ` · ${decision.notes}` : ""}
+            <div
+              style={{
+                fontSize: 12.5,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                flexWrap: "wrap",
+              }}
+            >
+              <span className="tag green">Decided</span>
+              <span>
+                {decision.kind === "merge" ? "All the same" : "Split into parts"}. That is one{" "}
+                <Term name="groupDecision" />.
+              </span>
+              <Provenance
+                kind="provenance"
+                value={decision.kind === "merge" ? "cluster_merge" : "cluster_split"}
+                detail={decision.reviewer}
+                note={decision.notes || null}
+                size="sm"
+              />
+              {decision.notes && <span className="muted">{decision.notes}</span>}
             </div>
           )}
         </div>
@@ -837,11 +960,11 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
       {/* Units */}
       <div className="card" style={{ minWidth: 0 }}>
         <div className="card-h">
-          <h3>Records in this group</h3>
+          <h3>Records in this cluster</h3>
           <span className="muted" style={{ fontSize: 12 }}>
             {focus && !showAllColumns
               ? `showing what to check for ${focus.label.toLowerCase()}`
-              : "put units in different parts to split the group"}
+              : "put units in different parts to split the cluster"}
           </span>
           <div className="actions">
             {focusColumns.length > 0 && (
@@ -860,9 +983,10 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
         {truncated && (
           <div className="card-b" style={{ paddingTop: 0 }}>
             <p className="muted" style={{ fontSize: 12.5, margin: 0, lineHeight: 1.5 }}>
-              Showing {fmtNumber(shownUnits)} of {fmtNumber(totalUnits)} units. A merge applies to
-              the whole group, listed or not. A split applies to the units you put in a part, and
-              every unit not listed here stays unassigned, which means it gets no label.
+              Showing {fmtNumber(shownUnits)} of {fmtNumber(totalUnits)} <Term name="unit" plural />.
+              A merge applies to the whole cluster, listed or not. A split applies to the units you
+              put in a part, and every unit not listed here stays unassigned, which means it gets no
+              label.
             </p>
           </div>
         )}
@@ -871,8 +995,12 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
             <thead>
               <tr>
                 <th style={{ width: 120 }}>Proposed part</th>
-                <th style={{ minWidth: 200 }}>Unit</th>
-                <th style={{ width: 80, textAlign: "right" }}>Records</th>
+                <th style={{ minWidth: 200 }}>
+                  Unit <TermHint name="unit" />
+                </th>
+                <th style={{ width: 80, textAlign: "right" }}>
+                  Records <TermHint name="record" />
+                </th>
                 {columns.map((c) => (
                   <th
                     key={c.key}
@@ -881,7 +1009,9 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
                     {c.label}
                   </th>
                 ))}
-                <th style={{ width: 150 }}>Earlier ID</th>
+                <th style={{ width: 150 }}>
+                  Earlier ID <TermHint name="earlierId" />
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -994,7 +1124,8 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
           <div className="card-h">
             <h3>How these units are joined</h3>
             <span className="muted" style={{ fontSize: 12 }}>
-              every scored pair inside the group
+              every <Term name="pair" /> inside this cluster, with its <Term name="score" /> and how
+              it was decided
             </span>
           </div>
           <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1007,8 +1138,9 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
                 <span className="mono" style={{ fontWeight: 600, minWidth: 44 }}>
                   {fmtProb(e.match_probability)}
                 </span>
-                {/* A rule stopped this pair, so it joins nothing however high
-                    the score reads. Struck through, with the reason beside it. */}
+                {/* A veto rule stopped this pair, so it joins nothing however
+                    high the score reads. Struck through, with the reason in
+                    the chip beside it. */}
                 <span
                   className="mono muted"
                   style={e.decided_by === "veto" ? { textDecoration: "line-through" } : undefined}
@@ -1016,24 +1148,17 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
                   {e.unit_id_l} &harr; {e.unit_id_r}
                 </span>
                 {e.decided_by === "veto" ? (
-                  <span
-                    className="tag amber"
-                    title={e.veto_reason || "A rule says these two cannot be the same thing."}
-                  >
-                    Stopped by a rule{e.veto_reason ? ": " + e.veto_reason : ""}
-                  </span>
+                  <Provenance
+                    kind="decided_by"
+                    value={e.decided_by}
+                    detail={e.veto_reason || null}
+                    size="sm"
+                  />
                 ) : e.source ? (
-                  <span
-                    className={
-                      "tag " +
-                      (e.source === "human" ? "green" : e.source === "import" ? "blue" : "")
-                    }
-                  >
-                    {e.source === "human" ? "Human" : e.source === "import" ? "Imported label" : "Score"}
-                  </span>
+                  <Provenance kind="edge_source" value={e.source} size="sm" />
                 ) : (
                   <span className="tag" title="This pair was not accepted, so it joins nothing">
-                    not accepted
+                    Not accepted
                   </span>
                 )}
                 <button
@@ -1141,6 +1266,10 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
               <span className="kbd">J</span> / <span className="kbd">K</span> to move
             </span>
           </div>
+          <p className="muted" style={{ fontSize: 11.5, margin: 0, lineHeight: 1.5 }}>
+            Either answer is one <Term name="groupDecision" />. It is saved as labels on the pairs
+            inside this cluster, and a label beats every score and every veto rule.
+          </p>
           {notesOpen && (
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
               <div className="field" style={{ flex: "1 1 260px", minWidth: 0 }}>
@@ -1171,8 +1300,8 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
 
 /* A consensus column the run could not settle. The reviewer picks one of the
    competing values, and the answer is stored against every record, so it holds
-   even when a later run groups those records differently. */
-function AttributeChoice({ column, attribute, busy, onSettle }) {
+   even when a later run clusters those records differently. */
+function AttributeChoice({ column, label, attribute, busy, onSettle }) {
   const [note, setNote] = useState("");
   const [open, setOpen] = useState(false);
   const values = Object.entries(attribute.values || {});
@@ -1180,11 +1309,9 @@ function AttributeChoice({ column, attribute, busy, onSettle }) {
 
   return (
     <div style={{ fontSize: 12.5 }}>
-      <span className="mono muted">{column}</span>{" "}
-      <strong>{attribute.value ?? "—"}</strong>{" "}
-      <span className={"tag" + (tie ? " amber" : "")} title="How the value was settled">
-        {attribute.basis}
-      </span>
+      <span className="muted">{label || columnLabel(column)}</span>{" "}
+      <TermHint name="consensusColumn" /> <strong>{attribute.value ?? "—"}</strong>{" "}
+      <Provenance kind="basis" value={attribute.basis} size="sm" />
       {values.length > 0 && (
         <span className="muted">
           {" "}
@@ -1214,8 +1341,9 @@ function AttributeChoice({ column, attribute, busy, onSettle }) {
           }}
         >
           <div className="muted" style={{ fontSize: 11.5 }}>
-            Your choice is stored against every record in this group. It beats a rule and it beats
-            the majority. The group leaves the queue at the next recluster.
+            Your choice is stored against every record in this cluster. It beats a derived column
+            rule and it beats the most common value. The cluster leaves the queue at the next
+            recluster.
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             {values.map(([v, n]) => (
@@ -1252,11 +1380,12 @@ function AttributeChoice({ column, attribute, busy, onSettle }) {
 }
 
 function UnitMembers({ unit, columns }) {
+  const profile = useProfile();
   const members = unit.members || [];
   if (members.length === 0) {
     return (
       <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
-        No member records returned.
+        No {noun(profile, "record_plural")} returned for this unit.
       </p>
     );
   }
@@ -1265,7 +1394,9 @@ function UnitMembers({ unit, columns }) {
       <table className="t" style={{ borderRadius: 0 }}>
         <thead>
           <tr>
-            <th style={{ width: 140 }}>Record</th>
+            <th style={{ width: 140 }}>
+              Record <TermHint name="record" />
+            </th>
             {columns.map((c) => (
               <th key={c.key} style={{ textAlign: NUMERIC_TYPES.has(c.type) ? "right" : "left" }}>
                 {c.label}
@@ -1297,7 +1428,7 @@ function UnitMembers({ unit, columns }) {
       </table>
       {unit.members_truncated && (
         <p className="muted" style={{ fontSize: 11.5, padding: 8, margin: 0 }}>
-          Only the first {members.length} records are shown.
+          Only the first {fmtNumber(members.length)} {noun(profile, "record_plural")} are shown.
         </p>
       )}
     </div>
