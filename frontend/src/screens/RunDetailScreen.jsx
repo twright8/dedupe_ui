@@ -536,7 +536,7 @@ function EntityKpis({ c, onQueue }) {
         title="Open the cluster review queue"
       >
         <div className="label">
-          Withheld clusters <TermHint name="withheldCluster" />
+          Clusters for review <TermHint name="withheldCluster" />
         </div>
         <div className="value" style={{ color: "var(--amber)" }}>
           {fmtNumber(c.clustersWithheld)}

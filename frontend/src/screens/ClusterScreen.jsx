@@ -4,7 +4,7 @@
    ------------------------------------------------------------
    The clustering stage joins accepted pairs into clusters, then
    holds the doubtful ones back for a person. A cluster it holds
-   back is a withheld cluster, and this screen is where a person
+   back is a cluster for review, and this screen is where a person
    settles it. A group decision is stored as ordinary labels, so
    everything true of a label is true of it: a reviewer's answer
    always wins, and the old answer stays on record.

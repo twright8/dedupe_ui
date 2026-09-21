@@ -33,7 +33,7 @@ says so: prefer changing the words on screen.
 | **score bucket** | The bucket the score alone gives, before any rule, earlier grouping or label moves it. | raw bucket | `score_bucket` | Review filters, `score_eval.json` |
 | **accept line** | The score at or above which a pair is accepted without review. | auto-accept threshold, threshold_high, high line | `match_probability_threshold_high` | Config → Thresholds, New run |
 | **review line** | The score below which a pair is rejected without review. | review floor, review band lower bound, threshold_review | `match_probability_threshold_review` | Config → Thresholds, New run |
-| **candidate floor** | The lowest score kept in the run's files. Anything weaker is thrown away. | candidate threshold | `match_probability_threshold_candidate` | Config → Thresholds |
+| **lowest score kept** | The lowest score kept in the run's files. Anything weaker is thrown away. | candidate threshold | `match_probability_threshold_candidate` | Config → Thresholds |
 | **veto** (vetoes) | A rule about a pair that stops the tool accepting it, whatever the score says. It sends the pair for review or rejects it, and it says why. | stopped by a rule, blocked pair, rule | `ruleset.vetoes[]`, `vetoed_by`, `veto_reason` | Config → Vetoes, Review, Cluster review |
 | **blocking rule** (blocking rules) | A rule that says which pairs are worth comparing at all. | block, candidate rule | `linkage_settings.blocking_rules[]` | Config → Thresholds & Splink |
 | **comparison** (comparisons) | How one column is compared inside a pair. | feature (in the Config sense) | `linkage_settings.comparisons[]`, `gamma_<column>` | Config → Thresholds & Splink |
@@ -43,7 +43,7 @@ says so: prefer changing the words on screen.
 | **earlier grouping** | The grouping the team made before this tool existed. The profile names it; donations calls it the earlier manual grouping, PSC has none. | imported labels, existing labels, earlier manual work, earlier labels, the manual work | `existing_entity_id`, label provenance `import`, `decided_by = import` | Review filters, run summary, Cluster review |
 | **earlier ID** (earlier IDs) | The ID a record already carried from the earlier grouping. | existing entity ID, DonorIDStandardTR, old ID | `existing_entity_id`, `existing_entity_ids`, `n_existing_ids` | Cluster review column, Review chips |
 | **cluster** (clusters) | A set of units joined by accepted pairs. A cluster is a proposal, not a decision. | group (on the cluster screen), component, candidate entity | `cluster_id`, `clusters.parquet` | Cluster review |
-| **withheld cluster** (withheld clusters) | A cluster the gate held back for a person, because it conflicts, is too large, may be a chain, or mixes earlier IDs. | held cluster, flagged cluster | `withheld`, cluster `status` | Cluster review |
+| **cluster for review** (clusters for review) | A cluster the gate held back for a person, because it conflicts, is too large, may be a chain, or mixes earlier IDs. | held cluster, flagged cluster | `withheld`, cluster `status` | Cluster review |
 | **entity** (entities) | One real person or one real organisation, with one ID that stays the same from run to run. | proposed entity, merged group, final group | `entities.parquet`, registry `entities` | Entities tab, export |
 | **entity ID** (entity IDs) | The ID an entity carries. | EntityID, standard ID, final ID | `entity_id`, export `EntityID` | Entities tab, export |
 | **proposal** | What a run produces: one entity ID per record, not yet written anywhere durable. | draft entities, candidate IDs | `scope = proposal`, `entities.parquet` | Publish & export |
@@ -171,3 +171,10 @@ rank.
 6. **The run summary's "Decided by" means something else again.** It names the
    scorer in force for the whole run, not the authority on one pair. Rename it
    **Scored by**.
+
+### Word choices Tom confirmed on 2026-09-21
+
+- **unit** stays. A unit can be one record on its own, so "grouped record" would be wrong for most of them. The hover definition explains it.
+- **cluster for review** replaces "withheld cluster", which looked too much like "held group" and meant something different. A held group was stopped by a match key's guard. A cluster for review was stopped by the gate.
+- **lowest score kept** replaces "candidate floor".
+- **bucket** stays, shown rarely. The words a reviewer sees are "Accepted", "For review" and "Rejected".

@@ -187,7 +187,7 @@ export default function PublishPanel({ runId, run, profile }) {
           }}
         >
           <span>
-            {fmtNumber(queue)} withheld cluster{queue === 1 ? " or held group is" : "s or held groups are"}{" "}
+            {fmtNumber(queue)} {queue === 1 ? "cluster for review or held group is" : "clusters for review or held groups are"}{" "}
             still waiting for a person. Publishing now keeps their records apart. You can publish
             again once they are settled.
           </span>

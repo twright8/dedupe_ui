@@ -2,7 +2,7 @@
    Config tab: Thresholds & Splink
    ------------------------------------------------------------
    The three decision lines — the accept line, the review line and
-   the candidate floor — and the training settings apply to the
+   the lowest score kept — and the training settings apply to the
    whole run. Everything else — blocking rules, comparisons, the
    training blocks and the pair budget — belongs to one track, so a
    track selector sits between the two. LINKAGE.md is the contract;
@@ -170,7 +170,7 @@ export default function ThresholdsTab({
             <ThresholdSlider
               label={
                 <>
-                  Candidate floor <TermHint name="candidateFloor" />
+                  Lowest score kept <TermHint name="candidateFloor" />
                 </>
               }
               value={candidate}
@@ -180,7 +180,7 @@ export default function ThresholdsTab({
               help="The lowest score kept in the run's files. Anything weaker is thrown away."
             />
             <div className="muted" style={{ fontSize: 11.5 }}>
-              The three stay in order: candidate floor, then review line, then accept line. Moving
+              The three stay in order: lowest score kept, then review line, then accept line. Moving
               one pushes the others.
             </div>
 
@@ -405,7 +405,7 @@ function ThresholdEffect({ high, review }) {
         </div>
         <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>
           These counts come from the pairs the latest completed run already scored. Lowering the
-          candidate floor only changes what a future run keeps, so pairs that were never scored
+          lowest score kept only changes what a future run keeps, so pairs that were never scored
           are not counted here.
         </div>
         <button className="btn primary">

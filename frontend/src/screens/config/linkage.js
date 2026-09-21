@@ -276,7 +276,7 @@ export function retypeComparison(c, fn) {
   return next;
 }
 
-// The three decision lines must stay in order: candidate floor, then review
+// The three decision lines must stay in order: lowest score kept, then review
 // line, then accept line. Moving one pushes the others rather than letting the
 // user save a set that cannot mean anything.
 export function orderedThresholds(settings, which, value) {

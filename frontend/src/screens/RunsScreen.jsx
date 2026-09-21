@@ -234,7 +234,7 @@ export default function RunsScreen() {
                   {fmtNumber(latest.counts.reviewQueue)}
                 </div>
                 <div className="delta muted">
-                  withheld clusters and held groups · {fmtNumber(latest.counts.decisionsTotal)}{" "}
+                  clusters for review and held groups · {fmtNumber(latest.counts.decisionsTotal)}{" "}
                   already settled
                 </div>
               </div>
