@@ -93,6 +93,21 @@ DEFAULT_PAIR_BATCH = 500_000
 MODEL_BATCH_ENV = "MODEL_BATCH_PAIRS"
 DEFAULT_MODEL_BATCH = 2_000_000
 
+# Asking Splink for every blocking rule in one `predict` builds one comparison
+# table the size of their sum, and Splink holds both sides' values for every
+# comparison in it until `write_predictions` drops them again. On PSC's full
+# snapshot that is 94.7 million comparisons at about 370 bytes each — more than
+# 35 GB of DuckDB spill, past the cap, and the run dies (`PSC_HANDOVER.md`,
+# section 105). Predicting one rule at a time makes exactly the same pairs in
+# six passes of about a sixth the width.
+#
+# It is not free: each pass re-reads the input table and writes its own file,
+# and the files are then concatenated. So it turns on only where it is needed —
+# when the blocking budget has priced the track above this many pairs.
+# Donations, at a few hundred thousand, keeps the single pass.
+ROUTE_BY_ROUTE_ENV = "PREDICT_ROUTE_BY_ROUTE_ABOVE"
+DEFAULT_ROUTE_BY_ROUTE_ABOVE = 5_000_000
+
 
 def _positive_int(name: str, fallback: int) -> int:
     try:
@@ -110,6 +125,11 @@ def pair_batch_rows() -> int:
 def model_batch_pairs() -> int:
     """Pairs per model-scoring batch, from ``MODEL_BATCH_PAIRS``."""
     return _positive_int(MODEL_BATCH_ENV, DEFAULT_MODEL_BATCH)
+
+
+def route_by_route_above() -> int:
+    """Priced pairs above which a track predicts one blocking rule at a time."""
+    return _positive_int(ROUTE_BY_ROUTE_ENV, DEFAULT_ROUTE_BY_ROUTE_ABOVE)
 
 
 class BlockingBudgetError(RuntimeError):
@@ -422,8 +442,27 @@ def count_uncontrolled_pairs(rows: pd.DataFrame, rule: dict, track: str,
         con.close()
 
 
+def control_cache_key(rows: pd.DataFrame, rule: dict, track: str) -> tuple:
+    """What makes two calls for the same control the same question.
+
+    The track, the rule, the control, how many rows were handed over, and the
+    dtype of every column the control reads. The dtypes belong in the key
+    because the generated SQL inlines the oversized key VALUES as text, and the
+    text a column yields depends on its type — see ``cast_numeric_columns``.
+    Two frames that disagree there must not share an answer.
+    """
+    control = linkage.block_control(rule) or {}
+    columns = sorted(set(linkage.sql_columns(rule.get("sql") or ""))
+                     | {c for c in (control.get("refine_with") or [])
+                        if isinstance(c, str)})
+    dtypes = tuple((c, str(rows[c].dtype)) for c in columns if c in rows.columns)
+    return (track, rule.get("id") or "", rule.get("sql") or "",
+            json.dumps(control, sort_keys=True), int(len(rows)), dtypes)
+
+
 def controlled_rules(rows: pd.DataFrame, rules: list[dict], track: str,
-                     temp_dir=None, progress_callback=None) -> list[dict]:
+                     temp_dir=None, progress_callback=None,
+                     cache: dict | None = None) -> list[dict]:
     """The blocking rules with their hot-key controls built into the SQL.
 
     A rule with no ``max_block_size`` comes back exactly as it went in, which is
@@ -434,23 +473,43 @@ def controlled_rules(rows: pd.DataFrame, rules: list[dict], track: str,
 
     The oversized key values are measured from *rows*, so this has to be handed
     the same units Splink is about to score.
+
+    *cache* is a plain dict a caller may keep for the length of one stage. The
+    same control is measured twice in a run — once by the blocking budget,
+    which has to price what will actually happen, and once by ``train_track``,
+    which has to build the SQL Splink will use — and the measurement is a GROUP
+    BY over every unit in the track: about 50 seconds a rule on PSC's 11.2
+    million person units, or seven minutes of a run spent asking a question
+    whose answer cannot have changed.
     """
     if not any(linkage.block_control(rule) for rule in rules):
         return rules
-    con = duckdb_conn.connect(temp_dir)
+    con = None
     try:
         out = []
         for rule in rules:
             if linkage.block_control(rule) is None:
                 out.append(rule)
                 continue
-            out.append({**rule, "sql": linkage.controlled_sql(con, rows, rule, track)})
+            key = control_cache_key(rows, rule, track) if cache is not None else None
+            cached = key is not None and key in cache
+            if cached:
+                sql = cache[key]
+            else:
+                if con is None:
+                    con = duckdb_conn.connect(temp_dir)
+                sql = linkage.controlled_sql(con, rows, rule, track)
+                if key is not None:
+                    cache[key] = sql
+            out.append({**rule, "sql": sql})
             # An EM entry written as plain SQL has no id of its own.
             _step(f"  {track}/{rule.get('id') or 'em'}: "
-                  f"{linkage.control_description(rule)}", progress_callback)
+                  f"{linkage.control_description(rule)}"
+                  f"{' (already measured)' if cached else ''}", progress_callback)
         return out
     finally:
-        con.close()
+        if con is not None:
+            con.close()
 
 
 def _budget_rows(units, track: str, config: dict) -> pd.DataFrame:
@@ -459,14 +518,20 @@ def _budget_rows(units, track: str, config: dict) -> pd.DataFrame:
     *units* is the frame or the path to ``units.parquet``. A path is read one
     track's projection at a time, so pricing sixteen million units costs the
     half-dozen columns the rules name rather than all sixty.
+
+    The numeric-difference columns are cast here for the same reason
+    ``_splink_frame`` casts them: the budget has to price the rule against the
+    values the rule will meet, and a control measured on ``1985`` does not
+    match a frame that spells it ``1985.0``. Casting both frames the same way
+    also lets one measurement serve both (``ControlCache``).
     """
     columns = budget_columns(config)
     if isinstance(units, (str, Path)):
         frame = read_unit_projection(units, columns + ["track"])
-        return units_module.track_units(frame, track)
+        return cast_numeric_columns(units_module.track_units(frame, track), config)
     rows = units_module.track_units(units, track)
     keep = [c for c in columns if c in rows.columns]
-    return rows[keep] if keep else rows
+    return cast_numeric_columns((rows[keep] if keep else rows).copy(), config)
 
 
 def blocking_budget_report(
@@ -474,6 +539,7 @@ def blocking_budget_report(
     settings: dict,
     db_api,
     progress_callback=None,
+    cache: dict | None = None,
 ) -> tuple[dict, "BlockingBudgetError | None"]:
     """``(report, failure)``: pairs per blocking rule, per track, against its budget.
 
@@ -495,8 +561,9 @@ def blocking_budget_report(
         # The budget is priced on what the rules will ACTUALLY do, so a rule
         # with a hot-key control is counted after the control, not before it.
         # A budget that prices the uncontrolled rule is not a budget.
-        priced = controlled_rules(rows, rules, track,
-                                  progress_callback=progress_callback) \
+        priced = controlled_rules(rows, rules, track, temp_dir=temp,
+                                  progress_callback=progress_callback,
+                                  cache=cache) \
             if len(rows) > 1 else rules
         counted = []
         for rule, controlled in zip(rules, priced):
@@ -547,8 +614,9 @@ def blocking_budget_report(
         # for the same reason a prediction rule is: the budget has to price
         # what will actually run. PSC's person em1 is 582,535,879 training
         # pairs uncontrolled and 43,054,672 with `drop` over 60.
-        em_priced = controlled_rules(rows, em_entries, track,
-                                     progress_callback=progress_callback) \
+        em_priced = controlled_rules(rows, em_entries, track, temp_dir=temp,
+                                     progress_callback=progress_callback,
+                                     cache=cache) \
             if len(rows) > 1 else em_entries
         for index, (entry, controlled) in enumerate(zip(em_entries, em_priced), start=1):
             sql = controlled["sql"]
@@ -632,10 +700,28 @@ def _splink_frame(rows: pd.DataFrame, config: dict,
             keep.append(column)
     frame = rows[keep].copy()
     frame["unit_id"] = frame["unit_id"].astype(str)
-    # `custom.NumericDifferenceAtThresholds` compares numbers, and the cleaning
-    # engine writes text: `dob_year_clean` is a string of digits. Cast here, in
-    # the frame Splink sees, so `units.parquet` keeps what was filed and the
-    # review screen and the vetoes still read it (docs/LINKAGE.md).
+    return cast_numeric_columns(frame, config)
+
+
+def cast_numeric_columns(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """The numeric-difference columns as numbers, in place, and the frame back.
+
+    ``custom.NumericDifferenceAtThresholds`` compares numbers and the cleaning
+    engine writes text: ``dob_year_clean`` is a string of digits. The cast
+    happens in the frame Splink sees, so ``units.parquet`` keeps what was filed
+    and the review screen and the vetoes still read it (docs/LINKAGE.md).
+
+    **Every frame a hot-key control is measured on has to have had this done to
+    it too**, which is why it is a function rather than four lines inside
+    ``_splink_frame``. The control inlines its oversized key values into the
+    blocking SQL as text, and the text a column gives depends on its type:
+    ``dob_year_clean`` held as a string spells its keys ``1985`` and the same
+    column held as a float spells them ``1985.0``. A control measured on one
+    and applied to the other matches nothing, so its ``NOT IN`` is always true
+    and the control silently does nothing at all. That is not a small mistake —
+    on the PSC person track it is the difference between 94.7 million
+    comparisons and 1.46 billion (``PSC_HANDOVER.md``, section 106).
+    """
     for column in linkage.numeric_columns(config):
         if column in frame.columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
@@ -662,8 +748,16 @@ def train_track(
     track: str,
     run_dir: Path,
     progress_callback=None,
+    priced_pairs: int | None = None,
+    control_cache: dict | None = None,
 ):
-    """Train a Splink model on one track's units and return ``(linker, pairs)``."""
+    """Train a Splink model on one track's units and predict.
+
+    Returns ``(linker, predictions_path, pairs, routes)``. *priced_pairs* is
+    what the blocking budget counted for this track; above
+    ``PREDICT_ROUTE_BY_ROUTE_ABOVE`` the prediction runs one blocking rule at a
+    time. *routes* describes what each blocking rule produced either way.
+    """
     from splink import Linker, SettingsCreator
 
     prior = settings.get("probability_two_random_records_match")
@@ -675,11 +769,17 @@ def train_track(
         link_type="dedupe_only",
         unique_id_column_name="unit_id",
         comparisons=[linkage.build_comparison(c) for c in linkage.comparisons(config)],
+        # The control is measured on `frame`, not on `rows`, because `frame` is
+        # what Splink will apply the generated SQL to and the two do not spell
+        # their key values the same way (`cast_numeric_columns`). Measuring it
+        # on `rows` left every PSC route that blocks on `dob_year_clean` — four
+        # of the six — with a control that matched nothing and did nothing.
         blocking_rules_to_generate_predictions=[
             linkage.build_blocking_rule(r["sql"])
-            for r in controlled_rules(rows, linkage.blocking_rules(config), track,
+            for r in controlled_rules(frame, linkage.blocking_rules(config), track,
                                       temp_dir=Path(run_dir) / "duckdb_tmp",
-                                      progress_callback=progress_callback)
+                                      progress_callback=progress_callback,
+                                      cache=control_cache)
         ],
         max_iterations=int(settings.get("em_iterations", linkage.DEFAULT_EM_ITERATIONS)),
         # Splink only emits the gamma columns — which agreement level each
@@ -730,7 +830,8 @@ def train_track(
     # block are never made rather than made and thrown away.
     for rule in controlled_rules(frame, linkage.em_entries(config), track,
                                  temp_dir=run_dir / "duckdb_tmp",
-                                 progress_callback=progress_callback):
+                                 progress_callback=progress_callback,
+                                 cache=control_cache):
         rule = rule["sql"]
         _step(f"  EM on {rule}...", progress_callback)
         t0 = time.time()
@@ -743,21 +844,31 @@ def train_track(
             _step(f"  WARNING: EM on {rule} failed ({exc}); keeping the current m.",
                   progress_callback)
 
-    _step(f"  Predicting down to {candidate}...", progress_callback)
-    t0 = time.time()
-    predictions = linker.inference.predict(threshold_match_probability=candidate)
     path = Path(run_dir) / PREDICTIONS_FILENAME.format(track=track)
-    n_pairs = write_predictions(linker, predictions, path)
+    n_rules = len(kwargs["blocking_rules_to_generate_predictions"])
+    limit = route_by_route_above()
+    by_route = priced_pairs is not None and priced_pairs > limit and n_rules > 1
+    _step(f"  Predicting down to {candidate}, "
+          + (f"one blocking rule at a time ({n_rules} of them)" if by_route
+             else f"all {n_rules} blocking rule(s) in one pass")
+          + (f" — {priced_pairs:,} priced pairs against a limit of {limit:,}"
+             if priced_pairs is not None else ""),
+          progress_callback)
+    t0 = time.time()
+    predict = predict_route_by_route if by_route else predict_one_pass
+    n_pairs, routes = predict(linker, candidate, path,
+                              temp_dir=Path(run_dir) / "duckdb_tmp",
+                              progress_callback=progress_callback)
     _step(f"  {n_pairs:,} candidate pairs ({time.time() - t0:.1f}s)",
           progress_callback)
-    return linker, path, n_pairs
+    return linker, path, n_pairs, routes
 
 
 #: Everything the pairs file keeps out of a prediction, besides the gammas.
 PREDICTION_COLUMNS = ("unit_id_l", "unit_id_r", "match_probability", "match_weight")
 
 
-def prediction_columns(names) -> list[str]:
+def prediction_columns(names, extra=()) -> list[str]:
     """The prediction columns worth carrying, out of everything Splink emits.
 
     Splink is asked to retain the matching columns and the intermediate
@@ -772,7 +883,8 @@ def prediction_columns(names) -> list[str]:
     So they are dropped in SQL, on the way out of DuckDB, and never become
     Python objects at all.
     """
-    keep = [c for c in PREDICTION_COLUMNS if c in names]
+    keep = [c for c in extra if c in names]
+    keep += [c for c in PREDICTION_COLUMNS if c in names]
     keep += sorted(c for c in names if c.startswith("gamma_"))
     return keep
 
@@ -794,7 +906,7 @@ def release_linker(linker) -> None:
     gc.collect()
 
 
-def write_predictions(linker, predictions, path) -> int:
+def write_predictions(linker, predictions, path, extra=()) -> int:
     """Splink's prediction table straight to parquet, without touching pandas.
 
     Splink predicts through DuckDB and already has the answer in a table, so the
@@ -805,11 +917,119 @@ def write_predictions(linker, predictions, path) -> int:
     con = linker._db_api._con
     table = predictions.physical_name
     names = [row[0] for row in con.execute(f'SELECT * FROM "{table}" LIMIT 0').description]
-    columns = ", ".join(f'"{c}"' for c in prediction_columns(names))
+    columns = ", ".join(f'"{c}"' for c in prediction_columns(names, extra))
     con.execute(
-        f'COPY (SELECT {columns} FROM "{table}") TO \'{path}\' (FORMAT PARQUET)'
+        f'COPY (SELECT {columns} FROM "{table}") TO {_path_literal(path)} '
+        "(FORMAT PARQUET)"
     )
     return int(con.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0])
+
+
+def _path_literal(path) -> str:
+    """A filesystem path as a SQL string literal."""
+    return "'" + str(path).replace("'", "''") + "'"
+
+
+def predict_one_pass(linker, candidate: float, path, extra=(), temp_dir=None,
+                     progress_callback=None) -> tuple[int, list[dict]]:
+    """Every blocking rule in one ``predict``. ``(pairs, routes)``.
+
+    This is the path every run took before PSC's full snapshot, and the one
+    every run under ``PREDICT_ROUTE_BY_ROUTE_ABOVE`` still takes.
+    """
+    predictions = linker.inference.predict(threshold_match_probability=candidate)
+    con = linker._db_api._con
+    table = predictions.physical_name
+    routes = [
+        {"match_key": int(key), "pairs": int(pairs)}
+        for key, pairs in con.execute(
+            f'SELECT match_key, count(*) FROM "{table}" GROUP BY 1 ORDER BY 1'
+        ).fetchall()
+    ]
+    n_pairs = write_predictions(linker, predictions, path, extra)
+    return n_pairs, routes
+
+
+def predict_route_by_route(linker, candidate: float, path, extra=(), temp_dir=None,
+                           progress_callback=None) -> tuple[int, list[dict]]:
+    """One blocking rule per ``predict``, then the files joined. ``(pairs, routes)``.
+
+    **This makes the same pairs as ``predict_one_pass``, with the same scores,
+    the same gammas and the same route attribution**, and the reason is that
+    the rule objects are the trained model's own, untouched.
+
+    Splink deduplicates across blocking rules while it blocks: rule *n* carries
+    ``AND NOT (rule 0 OR rule 1 OR ... OR rule n-1)``, so a pair is produced by
+    the first rule that matches it and by no other. Both that clause and the
+    ``match_key`` column come from one place —
+    ``BlockingRule.preceding_rules``, which ``match_key`` is simply the length
+    of. Handing ``predict`` a list of one *rule object* rather than a list of
+    one *rule* therefore changes nothing about what that rule does: its
+    preceding rules are still the five in front of it, its SQL is
+    byte-for-byte the branch of the ``UNION ALL`` it would have been, and its
+    ``match_key`` is still its own index. Splink itself does this, in
+    ``estimate_u.py``.
+
+    What does change is how much is alive at once. The comparison table is one
+    rule's pairs rather than six rules' pairs, and it is copied out and dropped
+    before the next rule starts, so the DuckDB spill is the largest single
+    route instead of the sum of them.
+    """
+    settings = linker._settings_obj
+    rules = list(settings._blocking_rules_to_generate_predictions)
+    path = Path(path)
+    parts: list[Path] = []
+    routes: list[dict] = []
+    try:
+        for rule in rules:
+            key = rule.match_key
+            part = path.with_name(f"{path.stem}.route{key}{path.suffix}")
+            settings._blocking_rules_to_generate_predictions = [rule]
+            t0 = time.time()
+            predictions = linker.inference.predict(
+                threshold_match_probability=candidate)
+            pairs = write_predictions(linker, predictions, part, extra)
+            # The prediction table is the wide one — both sides' values for
+            # every comparison. Dropping it here is what hands the spill back
+            # before the next route asks for its own.
+            try:
+                predictions.drop_table_from_database_and_remove_from_cache()
+            except Exception:  # noqa: BLE001 — tidying up must not lose a run
+                pass
+            parts.append(part)
+            routes.append({"match_key": int(key), "pairs": int(pairs),
+                           "seconds": round(time.time() - t0, 1)})
+            _step(f"    route {key}: {pairs:,} pairs "
+                  f"({routes[-1]['seconds']:.1f}s)", progress_callback)
+    finally:
+        settings._blocking_rules_to_generate_predictions = rules
+
+    total = concat_predictions(parts, path, temp_dir)
+    for part in parts:
+        part.unlink(missing_ok=True)
+    return total, routes
+
+
+def concat_predictions(parts: list[Path], path: Path, temp_dir=None) -> int:
+    """The per-route prediction files as one file, and its row count.
+
+    ``read_parquet`` over a list of files refuses a schema mismatch, which is
+    exactly the check worth making here: every route must have produced the
+    same columns, or the pairs file would have a shape that depends on which
+    route a pair came from.
+    """
+    if not parts:
+        return 0
+    con = duckdb_conn.connect(temp_dir)
+    try:
+        files = ", ".join(_path_literal(part) for part in parts)
+        con.execute(f"COPY (SELECT * FROM read_parquet([{files}])) "
+                    f"TO {_path_literal(path)} (FORMAT PARQUET)")
+        return int(con.execute(
+            f"SELECT count(*) FROM read_parquet({_path_literal(path)})"
+        ).fetchone()[0])
+    finally:
+        con.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1798,14 +2018,23 @@ def run_stage_3_score(
         _step(f"  Cleared {freed / 2**30:.1f} GB of spill left by an earlier run",
               progress_callback)
 
+    # Measuring a hot-key control is a GROUP BY over every unit in the track,
+    # and the budget and the training both need the answer. One dict, kept for
+    # the length of the stage, so it is measured once.
+    control_cache: dict = {}
     with _phase(f"Checking the blocking budget (DuckDB capped at {memory_limit()})",
                 progress_callback):
         budget_api = _db_api(temp_dir)
         report, failure = blocking_budget_report(units_path, settings, budget_api,
-                                                 progress_callback)
-    (run_dir / BLOCKING_REPORT_FILENAME).write_text(
-        json.dumps(report, indent=2), encoding="utf-8"
-    )
+                                                 progress_callback,
+                                                 cache=control_cache)
+
+    def _write_report() -> None:
+        (run_dir / BLOCKING_REPORT_FILENAME).write_text(
+            json.dumps(report, indent=2), encoding="utf-8"
+        )
+
+    _write_report()
     if failure is not None:
         raise failure
 
@@ -1824,10 +2053,29 @@ def run_stage_3_score(
                   progress_callback)
             continue
 
+        priced = (report.get("tracks", {}).get(track) or {}).get("total")
         with _phase(f"Scoring {track} ({len(rows):,} units)", progress_callback):
-            linker, path, n_pairs = train_track(rows, config, settings, ruleset,
-                                                track, run_dir, progress_callback)
+            linker, path, n_pairs, routes = train_track(
+                rows, config, settings, ruleset, track, run_dir,
+                progress_callback, priced_pairs=priced,
+                control_cache=control_cache,
+            )
         predictions[track] = path
+        # Which route made which pairs, so a reader can see what each blocking
+        # rule actually bought rather than only what it was priced at.
+        rule_ids = [r["id"] for r in linkage.blocking_rules(config)]
+        for route in routes:
+            key = route["match_key"]
+            if 0 <= key < len(rule_ids):
+                route["id"] = rule_ids[key]
+        if track in report.get("tracks", {}):
+            report["tracks"][track]["prediction"] = {
+                "path": ("route_by_route"
+                         if any("seconds" in r for r in routes) else "one_pass"),
+                "pairs": int(n_pairs),
+                "routes": routes,
+            }
+            _write_report()
         model_path = run_dir / MODEL_FILENAME.format(track=track)
         linker.misc.save_model_to_json(str(model_path), overwrite=True)
         untrained.extend(inspect_trained_model(model_path, track, progress_callback))
