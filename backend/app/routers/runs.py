@@ -878,9 +878,19 @@ def get_diagnostics(run_id: str):
         except Exception:
             top_rules = []
 
+    # Which score this run is bucketed on, and the word for it. One definition,
+    # in `pairs_reader`, so the model panel need not fetch a histogram to learn
+    # one word. The chart's own column wins when it read a file of its own.
+    scored = pairs_reader.score_column_for(str(run_dir))
+    if parquet_path.exists():
+        scored = {**scored, "score_column": score_column,
+                  "score_column_label": pairs_reader.SCORE_COLUMNS.get(
+                      score_column, {}).get("label", scored["score_column_label"])}
     return {
         "histogram": histogram,
-        "score_column": score_column,
+        "score_column": scored["score_column"],
+        "score_column_label": scored["score_column_label"],
+        "scorer": scored["scorer"],
         "feature_weights": feature_weights,
         "thresholds": thresholds,
         "band_counts": band_counts,

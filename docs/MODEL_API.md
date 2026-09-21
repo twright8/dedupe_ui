@@ -73,6 +73,14 @@ version with no `model` key trains on the defaults.
 
 Everything the top of the model panel needs in one call.
 
+`scorer` is `splink` or `model` — which score a pair of this track would be
+decided on right now. `score_column` is the column that score lives in, and
+`score_column_label` is the one word for it ("Splink score" or "Model score").
+The same three fields are on `GET /api/runs/{id}/diagnostics` and on
+`GET /api/runs/{id}/pairs/histogram`, from one definition in
+`services/pairs_reader.score_column_for`, so the panel never has to fetch a
+histogram to learn one word.
+
 ### Response
 
 ```json
@@ -82,11 +90,14 @@ Everything the top of the model panel needs in one call.
   "active_version": 2,
   "latest_version": 3,
   "can_auto_accept": false,
+  "scorer": "model",
+  "score_column": "gbt_score",
+  "score_column_label": "Model score",
   "training": null,
   "warnings": [
     {
       "code": "cold_start",
-      "message": "Trained on imported labels only — 0 human labels, and 50 are needed. The model re-orders the review queue and cannot decide a pair."
+      "message": "This is a new model, trained on the earlier grouping alone — 0 reviewer answers, and 50 are needed. It re-orders the review queue and cannot decide a pair."
     }
   ],
   "active": {
@@ -559,10 +570,14 @@ already had, so a label never falls out of the test set by being looked at again
   "track": "person",
   "total": 40,
   "by_verdict": { "TRUE": 22, "FALSE": 18 },
+  "by_answer": { "Match": 22, "Not a match": 18 },
   "training": 61,
   "designatable": 61
 }
 ```
+
+`by_answer` is the same two numbers under the words a reviewer reads, so no
+screen has to know that TRUE means Match.
 
 `total` is the frozen set. `training` is every other active label of this track.
 `designatable` is how many of those could still be frozen: only a reviewer's own
@@ -572,12 +587,12 @@ was never confirmed in this UI (D11) — grading on either would flatter the mod
 
 ### `POST /api/model/{track}/test-set/designate`
 
+Two ways to ask. **The tool chooses** — the newest answers, balanced between the
+two answers:
+
 ```json
 { "n": 200 }
 ```
-
-Freezes up to `n` labels, balanced between TRUE and FALSE, newest first.
-Response:
 
 ```json
 {
@@ -586,18 +601,56 @@ Response:
   "track": "person",
   "total": 40,
   "by_verdict": { "TRUE": 22, "FALSE": 18 },
+  "by_answer": { "Match": 22, "Not a match": 18 },
   "training": 61,
   "designatable": 47
 }
 ```
 
-Two rules, both carried over from `roe_ui` and both earned:
+**The reviewer chooses**, by id. This is what the Label library needs: the old
+two-dataset tool had a `POST /api/labels/role` that moved chosen labels between
+the training set and the test set, and nothing here could do that. This is that,
+and only that — `label_ids` wins over `n` when both are sent:
 
-- **Never more than half of either verdict.** Designating a test set must not
-  empty the training pool. With twelve TRUE labels a call takes six, whatever
-  `n` says.
-- **Additive.** A second call tops the set up rather than replacing it, so a
-  number already quoted stays quotable.
+```json
+{ "label_ids": [412, 418, 431] }
+```
+
+```json
+{
+  "frozen": [412, 418],
+  "refused": [
+    { "label_id": 431, "reason": "Freezing this would leave fewer than half the Match answers to train on" }
+  ],
+  "track": "person",
+  "total": 42,
+  "by_verdict": { "TRUE": 23, "FALSE": 19 },
+  "by_answer": { "Match": 23, "Not a match": 19 },
+  "training": 59,
+  "designatable": 45
+}
+```
+
+`frozen` are the ids now in the test set. `refused` says which were not and why,
+one row each, in words a reviewer can act on. Nothing is refused silently.
+
+**400** when a named id is not in the library:
+`{"detail": "No label 99999 in the library"}`.
+
+The three rules hold whichever way an answer is chosen:
+
+- **Only a reviewer's own answer.** `manual` and `bulk_range` and nothing else.
+  A machine-written answer, an imported one and a group decision are refused
+  with "Only an answer a reviewer saved one at a time, or from a band of
+  scores, can go in the test set".
+- **Never more than half of either answer.** Designating a test set must not
+  empty the training pool. With twelve Match answers a call takes six, whatever
+  `n` or `label_ids` says, and the cap counts what is already frozen, so two
+  calls cannot do what one call is refused.
+- **Freezing is permanent.** There is no unfreeze, no endpoint that takes an
+  answer back out, and no service function that sets `held_out` back to 0 — a
+  figure quoted off a frozen test set has to stay quotable. A second call tops
+  the set up rather than replacing it.
 
 ---
 

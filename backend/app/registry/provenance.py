@@ -424,6 +424,35 @@ def write_collisions(connection, run_id: str, collisions: list[dict]) -> int:
 # ---------------------------------------------------------------------------
 
 
+def counts_by_source(db_path: str, entity_id: str,
+                     run_id: str | None = None) -> dict[str, int]:
+    """``{source: n}`` over every link, not just the page a reader was sent.
+
+    A step says how many links of its kind there are. With a capped page that
+    number has to come from the whole table, or a big entity would report a
+    smaller merge than it had.
+    """
+    sql = ("SELECT source, count(*) AS n FROM entity_edges WHERE entity_id = ?")
+    params: list = [str(entity_id)]
+    if run_id:
+        sql += " AND run_id = ?"
+        params.append(run_id)
+    sql += " GROUP BY source"
+    return {row["source"]: int(row["n"])
+            for row in query_db(db_path, sql, tuple(params))}
+
+
+def count_edges(db_path: str, entity_id: str, run_id: str | None = None) -> int:
+    """How many links this entity has, whatever a page of them shows."""
+    sql = "SELECT count(*) AS n FROM entity_edges WHERE entity_id = ?"
+    params: list = [str(entity_id)]
+    if run_id:
+        sql += " AND run_id = ?"
+        params.append(run_id)
+    rows = query_db(db_path, sql, tuple(params))
+    return int(rows[0]["n"]) if rows else 0
+
+
 def edges_of(db_path: str, entity_id: str, run_id: str | None = None,
              limit: int = 2000) -> list[dict]:
     """The stored links inside one entity, strongest kind last."""
@@ -444,7 +473,8 @@ def _rank(edge: dict) -> int:
 
 
 def chain(edges: list[dict], members: list[dict] | None = None,
-          id_status: str | None = None, entity_id: str | None = None) -> list[dict]:
+          id_status: str | None = None, entity_id: str | None = None,
+          totals: dict[str, int] | None = None) -> list[dict]:
     """The same links as an ordered list of steps a person can read.
 
     Weakest first, so the list reads as the story of the merge: a match key put
@@ -467,17 +497,22 @@ def chain(edges: list[dict], members: list[dict] | None = None,
     by_source: dict[str, list[dict]] = {}
     for edge in edges:
         by_source.setdefault(str(edge.get("source") or "score"), []).append(edge)
+    # A capped page may hold no example of a kind of link the entity has. The
+    # step still belongs in the story, with its true count and no examples.
+    for source in (totals or {}):
+        by_source.setdefault(source, [])
 
     for source in sorted(by_source, key=lambda s: _rank({"source": s})):
         group = by_source[source]
         mapped = vocabulary.provenance_for("edge_source", source) or {}
+        n_links = (totals or {}).get(source, len(group))
         steps.append({
             "order": len(steps),
             "source": source,
             "label": mapped.get("label") or source,
             "definition": mapped.get("definition"),
-            "text": _sentence(source, group),
-            "n_links": len(group),
+            "text": _sentence(source, group, n_links),
+            "n_links": n_links,
             "examples": [_example(edge) for edge in group[:5]],
         })
 
@@ -494,8 +529,8 @@ def chain(edges: list[dict], members: list[dict] | None = None,
     return steps
 
 
-def _sentence(source: str, edges: list[dict]) -> str:
-    n = len(edges)
+def _sentence(source: str, edges: list[dict], n_links: int | None = None) -> str:
+    n = len(edges) if n_links is None else n_links
     links = f"{n:,} link{'' if n == 1 else 's'}"
     if source == "exact_key":
         names = sorted({str(e.get("match_key") or e.get("match_key_id") or "")

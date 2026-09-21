@@ -27,6 +27,7 @@ from app.model import features as feature_lib
 from app.model import jobs, references as reference_lib, store
 from app.profiles import get_profile
 from app.profiles.base import TRACK_KEYS
+from app.services import pairs_reader
 from app.services.audit_logger import log_event
 
 logger = logging.getLogger(__name__)
@@ -112,12 +113,21 @@ def model_status(track: str):
     versions = [store.summary(track, v) for v in reversed(store.list_versions(track))]
     versions = [v for v in versions if v]
     active = store.active_summary(track)
+    # Which score an active model would put on a pair, in the one word the
+    # screens use. The panel used to fetch a histogram for this.
+    scorer = "model" if store.get_active(track) is not None else "splink"
     return {
         "track": track,
         "label": _track_label(track),
         "active_version": store.get_active(track),
         "latest_version": store.latest_version(track),
         "can_auto_accept": store.can_auto_accept(track),
+        "scorer": scorer,
+        "score_column": pairs_reader.MODEL_SCORE_COLUMN if scorer == "model"
+        else "match_probability",
+        "score_column_label": pairs_reader.SCORE_COLUMNS[
+            pairs_reader.MODEL_SCORE_COLUMN if scorer == "model"
+            else "match_probability"]["label"],
         "training": jobs.latest(track),
         "warnings": _warnings_for(active),
         "active": active,
@@ -289,6 +299,12 @@ def activate(track: str, body: ActivateRequest | None = None,
 
 class DesignateRequest(BaseModel):
     n: int = 200
+    # Freeze these answers, rather than letting the tool choose. The library
+    # used to move chosen labels between the training set and the test set by
+    # id, and nothing here could do that. The rules are the same either way:
+    # only a reviewer's own answers, never more than half of either answer,
+    # and freezing is permanent — there is no unfreeze.
+    label_ids: Optional[list[int]] = None
 
 
 @router.get("/{track}/test-set")
@@ -307,17 +323,45 @@ def get_test_set(track: str):
 @router.post("/{track}/test-set/designate")
 def designate_test_set(track: str, body: DesignateRequest | None = None,
                        user: str = Depends(current_user)):
-    """Freeze up to `n` of this track's human labels as the test set."""
+    """Move answers into this track's test set, and never out of it again.
+
+    Two ways to ask. With ``n`` the tool chooses: the newest answers, balanced
+    between Match and Not a match. With ``label_ids`` the reviewer chooses, one
+    or many, which is what the Label library needs.
+
+    Both keep the same three rules. Only an answer a reviewer saved one at a
+    time or from a band of scores may be frozen. Never more than half of either
+    answer, so the training pool cannot be emptied. And **freezing is
+    permanent**: there is no way to take an answer back out, because a figure
+    quoted off a frozen test set has to stay quotable.
+    """
     from app.services import pair_labels
 
     track = _track(track)
+    if body is not None and body.label_ids:
+        try:
+            result = pair_labels.freeze_labels(
+                _db_path(), body.label_ids, track=track
+            )
+        except pair_labels.LabelError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        log_event(
+            _db_path(), user=user or "unknown", kind="model",
+            description=(f"Froze {len(result['frozen'])} chosen {track} answer(s) "
+                         f"into the test set "
+                         f"({len(result['refused'])} refused)"),
+            metadata={"track": track, "frozen": result["frozen"],
+                      "refused": result["refused"], "total": result["total"]},
+        )
+        return result
+
     result = pair_labels.designate_test_set(
         _db_path(), n=(body.n if body else 200), track=track
     )
     log_event(
         _db_path(), user=user or "unknown", kind="model",
-        description=(f"Designated {result['designated']} {track} label(s) as the "
-                     f"frozen test set ({result['left_for_training']} left to train on)"),
+        description=(f"Designated {result['designated']} {track} answer(s) as the "
+                     f"test set ({result['left_for_training']} left to train on)"),
         metadata={"track": track, **result},
     )
     return result

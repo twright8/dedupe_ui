@@ -604,6 +604,42 @@ def _model_path(run_dir: str, track: str) -> Path:
     return Path(run_dir) / f"splink_model_{track}.json"
 
 
+#: The two scores a run can be bucketed on, and the words for them
+#: (`docs/GLOSSARY.md`: "Splink score" and "model score").
+SCORE_COLUMNS = {
+    "match_probability": {"scorer": "splink", "label": "Splink score"},
+    MODEL_SCORE_COLUMN: {"scorer": "model", "label": "Model score"},
+}
+
+
+def score_column_for(run_dir: str) -> dict:
+    """Which score this run is bucketed on, as a column and as a word.
+
+    One definition, read by the pairs histogram, the diagnostics and the model
+    panel, so none of them has to fetch a histogram to learn one word. It reads
+    the run's own ``model_state.json``, which is what says whether a model was
+    applied to *this* run — not which model is active now.
+    """
+    state = {}
+    path = Path(run_dir) / "model_state.json"
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    tracks = state.get("tracks") if isinstance(state.get("tracks"), dict) else {}
+    versions = {str(track): detail.get("version")
+                for track, detail in (tracks or {}).items()
+                if isinstance(detail, dict) and detail.get("version") is not None}
+    applied = bool(state.get("applied")) and bool(versions)
+    column = MODEL_SCORE_COLUMN if applied else "match_probability"
+    return {
+        "score_column": column,
+        "score_column_label": SCORE_COLUMNS[column]["label"],
+        "scorer": SCORE_COLUMNS[column]["scorer"],
+        "model_version": versions or None,
+    }
+
+
 def comparison_levels(run_dir: str, track: str) -> dict:
     """``{column: {gamma: {label, m, u, match_weight}}}`` from the trained model.
 

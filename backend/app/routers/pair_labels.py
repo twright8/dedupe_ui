@@ -8,6 +8,7 @@ units and their names are; everything here is about the library as a whole.
 The contract is written out in ``docs/PAIRS_API.md``.
 """
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -18,6 +19,8 @@ from app.auth import current_user
 from app.db import query_db
 from app.services import pair_labels
 from app.services.audit_logger import log_event
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/labels", tags=["labels"])
 
@@ -123,6 +126,76 @@ def export_labels(
         stream(), media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=pair_labels.csv"},
     )
+
+
+@router.delete("/{label_id}")
+def delete_label(label_id: int, user_name: str = Depends(current_user)):
+    """Withdraw one answer from the library, keeping the row on record.
+
+    Append-only: the row stays and ``active`` goes to 0. A label a group
+    decision wrote is refused with a message naming the decision — those are
+    undone as a unit from the cluster screen.
+
+    The run the answer was saved against has its counts and its evaluation
+    redone, exactly as the run-scoped delete does, so the run screen does not
+    go on showing numbers that included this answer.
+    """
+    db_path = _db_path()
+    try:
+        label = pair_labels.withdraw_label_by_id(db_path, label_id)
+    except pair_labels.LabelError as exc:
+        # 404 when there is no such label, 409 when there is one and it may not
+        # be withdrawn on its own.
+        message = str(exc)
+        status = 404 if message.startswith("No label") else 409
+        raise HTTPException(status_code=status, detail=message)
+
+    answer = pair_labels.ANSWER_LABELS.get(
+        str(label["is_match"]).upper(), label["is_match"])
+    log_event(
+        db_path, user=user_name or "unknown", kind="label",
+        description=(f"Withdrew the '{answer}' answer on "
+                     f"{label['record_id_a']} and {label['record_id_b']}"),
+        metadata={"label_id": label["id"], "run_id": label.get("run_id"),
+                  "record_id_a": label["record_id_a"],
+                  "record_id_b": label["record_id_b"],
+                  "is_match": label["is_match"],
+                  "provenance": label.get("provenance")},
+    )
+
+    counts = _recount(db_path, label.get("run_id"))
+    return {
+        "label_id": label["id"],
+        "record_id_a": label["record_id_a"],
+        "record_id_b": label["record_id_b"],
+        "pair_id": f"{label['record_id_a']}|{label['record_id_b']}",
+        "is_match": label["is_match"],
+        "answer": answer,
+        "run_id": label.get("run_id"),
+        "counts": counts,
+    }
+
+
+def _recount(db_path: str, run_id) -> dict | None:
+    """Redo the run's counts and evaluation after a label left the library.
+
+    The same work the run-scoped delete does. A label with no run, or whose run
+    folder is gone, simply has nothing to redo.
+    """
+    if not run_id:
+        return None
+    run_dir = _data_dir() / "runs" / str(run_id)
+    if not (run_dir / "pairs.parquet").is_file():
+        return None
+    from app.routers.runs import _normalize_counts, _refresh_after_labels
+
+    try:
+        return _normalize_counts(
+            _refresh_after_labels(db_path, str(run_dir), str(run_id))
+        )
+    except Exception:  # noqa: BLE001 — a stale count must not fail the withdrawal
+        logger.exception("Could not redo the counts for run %s", run_id)
+        return None
 
 
 def _latest_complete_run(db_path: str) -> str | None:

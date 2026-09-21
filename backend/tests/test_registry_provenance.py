@@ -406,3 +406,43 @@ def test_an_unknown_entity_is_a_404(client, db_path, data_dir):
     assert client.get("/api/registry/entities/NOPE/provenance").status_code == 404
     assert client.get(
         f"/api/runs/{RUN_ID}/entities/NOPE/provenance").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# How many links are there, really
+# ---------------------------------------------------------------------------
+
+
+def test_both_endpoints_say_the_true_number_of_links(client, db_path, data_dir):
+    run_dir = seed_run(db_path, data_dir)
+    cluster(db_path, run_dir)
+    summary = publish(client)["summary"]
+    entity_id = _entity_id(db_path)
+
+    for url in (f"/api/runs/{RUN_ID}/entities/{entity_id}/provenance",
+                f"/api/registry/entities/{entity_id}/provenance"):
+        body = client.get(url).json()
+        assert body["n_edges"] == summary["edges"], url
+        assert body["n_edges"] == len(body["edges"]), url
+        assert body["edges_truncated"] is False, url
+        # The steps add up to the total, so a reader summing them and a reader
+        # reading n_edges get the same answer.
+        assert sum(step["n_links"] for step in body["steps"]) == body["n_edges"], url
+
+
+def test_a_capped_page_says_so_and_still_counts_every_link(client, db_path,
+                                                           data_dir):
+    run_dir = seed_run(db_path, data_dir)
+    cluster(db_path, run_dir)
+    total = publish(client)["summary"]["edges"]
+    entity_id = _entity_id(db_path)
+    assert total > 1, "this test needs an entity with several links"
+
+    for url in (f"/api/runs/{RUN_ID}/entities/{entity_id}/provenance?limit=1",
+                f"/api/registry/entities/{entity_id}/provenance?limit=1"):
+        body = client.get(url).json()
+        assert len(body["edges"]) == 1, url
+        assert body["n_edges"] == total, url
+        assert body["edges_truncated"] is True, url
+        # The steps still describe the whole merge, not the one link shown.
+        assert sum(step["n_links"] for step in body["steps"]) == total, url

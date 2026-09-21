@@ -556,6 +556,14 @@ the join log the steps were written from, one row per link, with only the
 fields that kind of link fills in. `question` and `precedence` are the words to
 print above the list; they come from `GET /api/vocabulary`.
 
+`n_edges` is how many links the entity has. `edges` is one page of them, capped
+by `limit`, and `edges_truncated` says whether anything was left out. `steps`
+always describes the **whole** merge: `n_links` on a step is the true count even
+when the page is capped, and a step appears for every kind of link the entity
+has, with no `examples` when the page holds none of that kind. So
+`sum(steps[].n_links)` equals `n_edges`, and neither has to be guessed from the
+other.
+
 ### `GET /api/runs/{id}/entities/{entity_id}/provenance`
 
 Built from the run's own files. `limit` (default 2000, max 20000) caps `edges`;
@@ -571,6 +579,8 @@ A real response, from the donations run `run_2026_09_18a`, entity `833`
   "run_id": "run_2026_09_18a",
   "config_version": 1,
   "n_records": 86,
+  "n_edges": 95,
+  "edges_truncated": false,
   "id_status": "new",
   "id_status_label": "New",
   "question": "How it was decided",
@@ -644,6 +654,8 @@ entity's ID was claimed twice.
   "created_run": "run_2026_09_18a",
   "runs": ["run_2026_09_18a"],
   "n_records": 86,
+  "n_edges": 95,
+  "edges_truncated": false,
   "id_status": "new",
   "id_status_label": "New",
   "question": "How it was decided",

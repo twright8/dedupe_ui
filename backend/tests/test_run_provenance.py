@@ -392,3 +392,74 @@ def test_adopting_a_run_is_audited(tmp_path, db_path):
     rows = query_db(db_path, "SELECT * FROM audit_log WHERE kind = 'run'")
     assert any("Adopted run psc_full" in (row["description"] or "") for row in rows)
     assert any(row["user_name"] == "Tom" for row in rows)
+
+
+# ---------------------------------------------------------------------------
+# One word for which score decided, wherever it is asked for
+# ---------------------------------------------------------------------------
+
+
+def test_the_score_column_and_its_word_come_from_the_runs_own_state(tmp_path):
+    from app.services import pairs_reader
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    # No model applied.
+    answer = pairs_reader.score_column_for(run_dir)
+    assert answer == {"score_column": "match_probability",
+                      "score_column_label": "Splink score",
+                      "scorer": "splink", "model_version": None}
+
+    (run_dir / "model_state.json").write_text(json.dumps({
+        "applied": True,
+        "tracks": {"person": {"version": 3, "graded": True}},
+    }), encoding="utf-8")
+    answer = pairs_reader.score_column_for(run_dir)
+    assert answer["score_column"] == "gbt_score"
+    assert answer["score_column_label"] == "Model score"
+    assert answer["scorer"] == "model"
+    assert answer["model_version"] == {"person": 3}
+
+
+def test_a_model_that_was_taken_off_reads_as_splink_again(tmp_path):
+    from app.services import pairs_reader
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "model_state.json").write_text(json.dumps({
+        "applied": False, "tracks": {},
+    }), encoding="utf-8")
+    assert pairs_reader.score_column_for(run_dir)["scorer"] == "splink"
+
+
+def test_the_diagnostics_say_which_score_without_a_histogram(client, db_path,
+                                                             data_dir):
+    from app.db import write_db
+
+    write_db(db_path,
+             "INSERT INTO runs (id, status, threshold_high, threshold_review) "
+             "VALUES (?,?,?,?)", ("run_d", "complete", 0.92, 0.5))
+    (data_dir / "runs" / "run_d").mkdir(parents=True)
+
+    body = client.get("/api/runs/run_d/diagnostics").json()
+    assert body["score_column"] == "match_probability"
+    assert body["score_column_label"] == "Splink score"
+    assert body["scorer"] == "splink"
+
+
+def test_the_model_panel_says_which_score_without_a_histogram(client):
+    body = client.get("/api/model/person").json()
+    assert body["scorer"] == "splink"
+    assert body["score_column"] == "match_probability"
+    assert body["score_column_label"] == "Splink score"
+
+
+def test_the_words_are_the_vocabularys(client):
+    """The three places must agree, and agree with GET /api/vocabulary."""
+    from app import vocabulary
+    from app.services import pairs_reader
+
+    served = {entry["value"]: entry["label"]
+              for entry in vocabulary.as_dict()["fields"]["scorer"]["values"]}
+    for column, meta in pairs_reader.SCORE_COLUMNS.items():
+        assert served[meta["scorer"]] == meta["label"], column

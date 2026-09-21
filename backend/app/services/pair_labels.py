@@ -739,6 +739,127 @@ def withdraw_decision(db_path: str, scope: str) -> dict | None:
     return {**decision, "labels_withdrawn": decision["n_labels"]}
 
 
+def withdraw_label_by_id(db_path: str, label_id: int) -> dict:
+    """Deactivate one active label by its id, keeping the row.
+
+    Append-only, like every other write here: the row stays and ``active``
+    goes to 0, so who said what is never lost.
+
+    A label that a group decision wrote is refused. Those are one answer about
+    a whole cluster, written as a star of labels sharing a ``decision_id``;
+    pulling one out would leave the decision half-undone and the screen unable
+    to say so. The cluster screen undoes them as a unit.
+    """
+    rows = query_db(db_path, "SELECT * FROM pair_labels WHERE id = ?", (int(label_id),))
+    if not rows:
+        raise LabelError(f"No label {label_id} in the library")
+    label = dict(rows[0])
+    if not label["active"]:
+        raise LabelError(
+            f"Label {label_id} was already withdrawn, so there is nothing to undo"
+        )
+    if label.get("decision_id"):
+        kind = {v: k for k, v in DECISION_PROVENANCES.items()}.get(
+            label.get("provenance"), "group")
+        scope = label.get("decision_scope") or "a cluster"
+        raise LabelError(
+            f"This answer is part of one {kind} decision about {scope} "
+            f"(decision {label['decision_id']}). Undo the whole decision on the "
+            "cluster screen; a single pair cannot be taken out of it."
+        )
+    write_db(db_path, "UPDATE pair_labels SET active = 0 WHERE id = ?",
+             (label["id"],))
+    return label
+
+
+def freeze_labels(db_path: str, label_ids, track: str | None = None) -> dict:
+    """Move named labels into the test set, keeping the rules ``designate`` keeps.
+
+    The library used to let a reviewer move chosen labels between the training
+    set and the test set by id. ``designate_test_set`` picks them itself, so
+    there was no way to say "freeze these ones". This is that, and only that.
+
+    The three rules hold whichever way a label is chosen:
+
+    * only a reviewer's own answer, one at a time or from a brushed band, may
+      be frozen. A machine-written one and a group decision may not.
+    * never more than half of either answer, so freezing can never empty the
+      training pool.
+    * freezing is permanent. There is no unfreeze, because a number quoted off
+      a frozen set has to stay quotable.
+    """
+    wanted = [int(value) for value in (label_ids or [])]
+    if not wanted:
+        raise LabelError("Name at least one label to freeze")
+    marks = ",".join("?" * len(wanted))
+    rows = query_db(
+        db_path, f"SELECT * FROM pair_labels WHERE id IN ({marks})", tuple(wanted)
+    )
+    found = {int(row["id"]): dict(row) for row in rows}
+    missing = [value for value in wanted if value not in found]
+    if missing:
+        raise LabelError(f"No label {missing[0]} in the library")
+
+    refused: list[dict] = []
+    candidates: list[dict] = []
+    for value in wanted:
+        label = found[value]
+        if not label["active"]:
+            refused.append({"label_id": value, "reason": "This answer was withdrawn"})
+        elif label["held_out"]:
+            refused.append({"label_id": value,
+                            "reason": "This answer is already in the test set"})
+        elif label["provenance"] not in TEST_SET_PROVENANCES:
+            refused.append({
+                "label_id": value,
+                "reason": ("Only an answer a reviewer saved one at a time, or from "
+                           "a band of scores, can go in the test set"),
+            })
+        elif track is not None and label["track"] != track:
+            refused.append({"label_id": value,
+                            "reason": f"This answer is not on the {track} track"})
+        else:
+            candidates.append(label)
+
+    # Never more than half of either answer. The cap counts what is already
+    # frozen, so two calls cannot do what one call is refused.
+    marks = ", ".join("?" * len(TEST_SET_PROVENANCES))
+    where = f"active = 1 AND provenance IN ({marks})"
+    params: list = list(TEST_SET_PROVENANCES)
+    if track is not None:
+        where += " AND track = ?"
+        params.append(track)
+
+    frozen: list[int] = []
+    for verdict in VERDICTS:
+        row = query_db(
+            db_path,
+            f"""SELECT count(*) AS total,
+                       count(*) FILTER (WHERE held_out = 1) AS held
+                FROM pair_labels WHERE {where} AND upper(is_match) = ?""",
+            tuple([*params, verdict]),
+        )[0]
+        room = max(0, int(row["total"]) // 2 - int(row["held"]))
+        mine = [label for label in candidates
+                if str(label["is_match"]).upper() == verdict]
+        for label in mine[:room]:
+            write_db(db_path, "UPDATE pair_labels SET held_out = 1 WHERE id = ?",
+                     (label["id"],))
+            frozen.append(int(label["id"]))
+        for label in mine[room:]:
+            refused.append({
+                "label_id": int(label["id"]),
+                "reason": (f"Freezing this would leave fewer than half the "
+                           f"{ANSWER_LABELS[verdict]} answers to train on"),
+            })
+
+    return {"frozen": frozen, "refused": refused, **test_set(db_path, track)}
+
+
+#: The two answers in the words a reviewer reads, for a message.
+ANSWER_LABELS = {value: meta["label"] for value, meta in vocabulary.ANSWER.items()}
+
+
 def withdraw_label(db_path: str, a, b) -> dict | None:
     """Deactivate the active decision on a pair, keeping the row. None if there is none."""
     left, right = pair_key(a, b)

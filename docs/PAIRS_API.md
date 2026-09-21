@@ -922,6 +922,48 @@ whose ids are unknown is **rejected and reported**, never quietly dropped:
 }
 ```
 
+## `DELETE /api/labels/{label_id}`
+
+Withdraw one answer from the library. Append-only: the row stays and `active`
+goes to 0, so who said what is never lost.
+
+```json
+{
+  "label_id": 412,
+  "record_id_a": "1", "record_id_b": "2",
+  "pair_id": "1|2",
+  "is_match": "TRUE",
+  "answer": "Match",
+  "run_id": "run_2026_09_18a",
+  "counts": { "labelsTotal": 755, "labelsTrue": 601, "…": 0 }
+}
+```
+
+`answer` is the word a reviewer reads; `is_match` is the stored value.
+
+`counts` is the run's counts after the answer was taken out, in the same shape
+`GET /api/runs/{id}` returns — the endpoint redoes them exactly as the
+run-scoped delete does, so the run screen cannot go on showing numbers that
+included this answer. It is `null` when the label names no run, or when that
+run's folder is gone.
+
+**404** when there is no label with that id:
+`{"detail": "No label 99999 in the library"}`.
+
+**409** when there is one and it may not be withdrawn on its own:
+
+- already withdrawn — `{"detail": "Label 412 was already withdrawn, so there is nothing to undo"}`
+- part of a group decision — the message names the decision and where to undo it:
+
+```json
+{ "detail": "This answer is part of one merge decision about C-1 (decision d-9f3a2c). Undo the whole decision on the cluster screen; a single pair cannot be taken out of it." }
+```
+
+A group decision is one answer about a whole cluster, written as a star of
+labels sharing a `decision_id`. Pulling one out would leave the decision
+half-undone and no screen able to say so, so it is refused and
+`DELETE /api/runs/{id}/clusters/{cluster_id}/decision` undoes the lot.
+
 ## `GET /api/runs/{id}/contradictions`
 
 A **contradiction** is a FALSE label whose two records an exact match key has

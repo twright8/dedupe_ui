@@ -647,13 +647,17 @@ def run_entity_provenance(run_id: str, entity_id: str,
             detail=f"Run {run_id} proposes no entity '{entity_id}'",
         )
 
-    edges = [
+    built = [
         dict(zip(registry_provenance.EDGE_COLUMNS, row))
         for row in registry_provenance.build_edges(
             run_dir, Path(run_dir) / "config", _db_path(), run_id, mine,
             config_version=run.get("config_version"),
         )
-    ][:limit]
+    ]
+    # `n_edges` is the true total. `edges` is one page of it, so a reader is
+    # never left summing `steps[].n_links` to guess how much was left out.
+    n_edges = len(built)
+    edges = built[:limit]
     members = [
         {"record_id": row["record_id"],
          "entity_basis": row.get("entity_basis"),
@@ -674,8 +678,10 @@ def run_entity_provenance(run_id: str, entity_id: str,
         "id_status_label": (vocabulary.ID_ORIGIN.get(str(id_status or "")) or {}).get("label"),
         "question": vocabulary.PROVENANCE_QUESTION,
         "precedence": vocabulary.PROVENANCE_PRECEDENCE,
-        "steps": registry_provenance.chain(edges, members, id_status, str(entity_id)),
+        "steps": registry_provenance.chain(built, members, id_status, str(entity_id)),
+        "n_edges": n_edges,
         "edges": edges,
+        "edges_truncated": n_edges > len(edges),
         "members": members,
     }
 
@@ -699,6 +705,8 @@ def registry_entity_provenance(entity_id: str,
 
     resolved = found["entity_id"]
     edges = registry_provenance.edges_of(_db_path(), resolved, limit=limit)
+    totals = registry_provenance.counts_by_source(_db_path(), resolved)
+    n_edges = sum(totals.values())
     members = found["members"]
     id_status = next((row.get("id_status") for row in members if row.get("id_status")),
                      None)
@@ -716,8 +724,11 @@ def registry_entity_provenance(entity_id: str,
         "id_status_label": (vocabulary.ID_ORIGIN.get(str(id_status or "")) or {}).get("label"),
         "question": vocabulary.PROVENANCE_QUESTION,
         "precedence": vocabulary.PROVENANCE_PRECEDENCE,
-        "steps": registry_provenance.chain(edges, members, id_status, resolved),
+        "steps": registry_provenance.chain(edges, members, id_status, resolved,
+                                           totals=totals),
+        "n_edges": n_edges,
         "edges": edges,
+        "edges_truncated": n_edges > len(edges),
         "members": members,
         "attributes": found["attributes"],
         "attribute_history": registry_store.attribute_history(_db_path(), resolved),

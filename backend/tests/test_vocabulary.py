@@ -113,6 +113,46 @@ def _provenance_map(block: str) -> dict[str, dict[str, dict]]:
     return fields
 
 
+def _quoted_entries(block: str) -> dict[str, dict]:
+    """The same as ``_keyed_entries`` for a key the JS has to quote.
+
+    ``re-bucketed`` and ``model applied`` are not valid bare property names, so
+    Prettier writes them as strings and the other reader skips them.
+    """
+    found = {}
+    pattern = re.compile(
+        r'^\s{2}"(?P<value>[^"]+)":\s*\{\s*'
+        r'label:\s*"(?P<label>[^"]+)",\s*'
+        r'(?:tag:\s*"[^"]*",\s*)?'
+        r'definition:\s*(?P<definition>"(?:[^"\\]|\\.)*"(?:\s*\+\s*\n?\s*"(?:[^"\\]|\\.)*")*)',
+        re.MULTILINE,
+    )
+    for match in pattern.finditer(block):
+        found[match.group("value")] = {
+            "label": match.group("label"),
+            "definition": _join_strings(match.group("definition")),
+        }
+    return found
+
+
+def _term(source: str, key: str) -> dict:
+    """One entry of the ``TERMS`` list, by its key."""
+    pattern = re.compile(
+        rf'key:\s*"{re.escape(key)}",\s*'
+        r'term:\s*"(?P<term>[^"]+)",\s*'
+        r'plural:\s*"(?P<plural>[^"]+)",\s*'
+        r'definition:\s*(?P<definition>"(?:[^"\\]|\\.)*"(?:\s*\+\s*\n?\s*"(?:[^"\\]|\\.)*")*)',
+        re.DOTALL,
+    )
+    match = pattern.search(source)
+    assert match, f"no term {key!r} in glossary.js"
+    return {
+        "term": match.group("term"),
+        "plural": match.group("plural"),
+        "definition": _join_strings(match.group("definition")),
+    }
+
+
 @pytest.fixture(scope="module")
 def js() -> str:
     if not GLOSSARY_JS.is_file():
@@ -277,3 +317,82 @@ def test_the_endpoint_needs_no_login(monkeypatch, tmp_path):
     ]
     assert body["fields"]["entity_basis"]["values"]
     assert body["stages"]
+
+
+# ---------------------------------------------------------------------------
+# The four value tables the frontend added, and the three terms
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "export_name,ours",
+    [
+        ("ANSWER", vocabulary.ANSWER),
+        ("ANSWER_SOURCE", vocabulary.ANSWER_SOURCE),
+        ("RULES_REPLAYED", vocabulary.RULES_REPLAYED),
+        ("SCORER", vocabulary.SCORER),
+        ("LINE_CHANGE", vocabulary.LINE_CHANGE),
+    ],
+)
+def test_the_four_newer_tables_match_the_frontend(js, export_name, ours):
+    theirs = _keyed_entries(_block(js, export_name))
+    missing = set(theirs) - set(ours)
+    assert not missing, f"{export_name}: the backend has no entry for {sorted(missing)}"
+    for value, entry in theirs.items():
+        assert entry["label"] == ours[value]["label"], f"{export_name}.{value} label"
+        assert entry["definition"] == ours[value]["definition"], (
+            f"{export_name}.{value} definition"
+        )
+
+
+def test_a_quoted_key_matches_too(js):
+    """`re-bucketed` and `model applied` are quoted in the JS, not bare names."""
+    theirs = _quoted_entries(_block(js, "LINE_CHANGE"))
+    for value in ("re-bucketed", "model applied", "model reverted"):
+        assert value in theirs, f"the reader missed {value!r}"
+        assert theirs[value]["label"] == vocabulary.LINE_CHANGE[value]["label"]
+        assert theirs[value]["definition"] == vocabulary.LINE_CHANGE[value]["definition"]
+
+
+def test_the_newer_questions_match_the_frontend(js):
+    for export_name, ours in [
+        ("ANSWER_QUESTION", vocabulary.ANSWER_QUESTION),
+        ("ANSWER_SOURCE_QUESTION", vocabulary.ANSWER_SOURCE_QUESTION),
+        ("RULES_REPLAYED_QUESTION", vocabulary.RULES_REPLAYED_QUESTION),
+        ("SCORER_QUESTION", vocabulary.SCORER_QUESTION),
+        ("LINE_CHANGE_QUESTION", vocabulary.LINE_CHANGE_QUESTION),
+    ]:
+        match = re.search(rf'export const {export_name} = "([^"]+)"', js)
+        assert match, f"{export_name} is not a plain string in glossary.js"
+        assert match.group(1) == ours, export_name
+
+
+@pytest.mark.parametrize("key", ["link", "codeVersion", "fileFingerprint"])
+def test_the_three_shared_terms_match_the_frontend(js, key):
+    theirs = _term(js, key)
+    ours = vocabulary.TERMS[key]
+    assert theirs["term"] == ours["term"]
+    assert theirs["plural"] == ours["plural"]
+    assert theirs["definition"] == ours["definition"]
+
+
+def test_the_line_change_keys_are_the_words_the_backend_writes():
+    """The stored `action` strings and the labels must be one list, or the
+    screen would meet a value it has no word for."""
+    from app.services import bucketing_history
+
+    assert set(bucketing_history.ACTIONS) == set(vocabulary.LINE_CHANGE)
+
+
+def test_the_endpoint_serves_the_newer_tables_and_the_terms():
+    from app.main import app
+
+    with TestClient(app) as client:
+        body = client.get("/api/vocabulary").json()
+    for field in ("answer_source", "rules_replayed", "scorer", "line_change",
+                  "is_match"):
+        assert body["fields"][field]["values"], field
+    assert {entry["value"] for entry in body["fields"]["line_change"]["values"]} == {
+        "scored", "re-bucketed", "model applied", "model reverted"}
+    assert sorted(body["terms"]) == ["codeVersion", "fileFingerprint", "link"]
+    assert body["terms"]["link"]["term"] == "link"

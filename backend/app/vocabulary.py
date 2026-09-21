@@ -401,6 +401,127 @@ RUN_STATUS: dict[str, dict] = {
     },
 }
 
+#: The terms the backend names in a definition it serves. The whole list lives
+#: in `docs/GLOSSARY.md` and in `frontend/src/glossary.js`; these three are the
+#: ones an API response has to be able to define on its own.
+TERMS: dict[str, dict] = {
+    "link": {
+        "term": "link",
+        "plural": "links",
+        "definition": (
+            "One accepted join between two records inside an entity. It carries "
+            "what joined them: a match key, a score, an earlier ID or a reviewer."
+        ),
+    },
+    "codeVersion": {
+        "term": "code version",
+        "plural": "code versions",
+        "definition": (
+            "The exact copy of this tool's code that produced a run. It is named "
+            "by the commit it was built from."
+        ),
+    },
+    "fileFingerprint": {
+        "term": "file fingerprint",
+        "plural": "file fingerprints",
+        "definition": (
+            "A short code worked out from a file's contents. Two files with the "
+            "same fingerprint hold exactly the same bytes, whatever they are named."
+        ),
+    },
+}
+
+ANSWER_SOURCE_QUESTION = "Where this answer was read from"
+
+#: The ``source`` on an entity provenance response.
+ANSWER_SOURCE: dict[str, dict] = {
+    "run": {
+        "label": "From this run's files",
+        "definition": (
+            "Read from the run folder. Delete the run and this answer goes with "
+            "it, unless the run was published."
+        ),
+    },
+    "registry": {
+        "label": "From the registry",
+        "definition": (
+            "Read from the registry, which keeps this after a run is deleted. "
+            "Publishing writes it down."
+        ),
+    },
+}
+
+RULES_REPLAYED_QUESTION = "Which rules these steps used"
+
+#: The ``source`` on a cleaning preview.
+RULES_REPLAYED: dict[str, dict] = {
+    "run": {
+        "label": "This run's own rules",
+        "definition": (
+            "The frozen rules this run used, replayed on this record. They are "
+            "what made the value you are looking at."
+        ),
+    },
+    "draft": {
+        "label": "The rules you are editing",
+        "definition": (
+            "The draft rules on this screen. Nothing has been saved or run with "
+            "them yet."
+        ),
+    },
+}
+
+SCORER_QUESTION = "Which score decided"
+
+#: The ``scorer`` on a run's details and on a change to the lines.
+SCORER: dict[str, dict] = {
+    "splink": {
+        "label": "Splink score",
+        "definition": (
+            "The score the unsupervised engine works out from the shape of the data."
+        ),
+    },
+    "model": {
+        "label": "Model score",
+        "definition": "The score the trained model works out from saved labels.",
+    },
+}
+
+LINE_CHANGE_QUESTION = "What moved the lines"
+
+#: The ``action`` on an entry in a run's history of the lines. These four
+#: strings are what ``app/services/bucketing_history.py`` writes, so the keys
+#: here and the stored values are the same words.
+LINE_CHANGE: dict[str, dict] = {
+    "scored": {
+        "label": "First scored",
+        "definition": (
+            "The run scored its pairs and put each one in a bucket for the first time."
+        ),
+    },
+    "re-bucketed": {
+        "label": "Lines moved",
+        "definition": (
+            "Someone moved the accept line or the review line, so every pair was "
+            "put in a bucket again."
+        ),
+    },
+    "model applied": {
+        "label": "Model applied",
+        "definition": (
+            "A trained model scored the same pairs, and the buckets were set on "
+            "its score."
+        ),
+    },
+    "model reverted": {
+        "label": "Model taken off",
+        "definition": (
+            "The model was taken off this run, so the buckets went back to the "
+            "Splink score."
+        ),
+    },
+}
+
 ANSWER_QUESTION = "The answer on this pair"
 
 #: pair_labels.is_match. The API keeps TRUE and FALSE; the screen never does.
@@ -537,6 +658,10 @@ CLUSTER_STATUSES = tuple(CLUSTER_STATUS)
 RUN_STATUSES = tuple(RUN_STATUS)
 ANSWERS = tuple(ANSWER)
 TRACKS = tuple(TRACK)
+ANSWER_SOURCES = tuple(ANSWER_SOURCE)
+RULES_REPLAYED_SOURCES = tuple(RULES_REPLAYED)
+SCORERS = tuple(SCORER)
+LINE_CHANGES = tuple(LINE_CHANGE)
 
 
 # ---------------------------------------------------------------------------
@@ -689,7 +814,28 @@ def as_dict() -> dict:
                 "definition": "Which track a record is matched inside.",
                 "values": _values(TRACK),
             },
+            "answer_source": {
+                "question": ANSWER_SOURCE_QUESTION,
+                "definition": "Where a provenance answer was read from.",
+                "values": _values(ANSWER_SOURCE),
+            },
+            "rules_replayed": {
+                "question": RULES_REPLAYED_QUESTION,
+                "definition": "Which rules a cleaning preview replayed.",
+                "values": _values(RULES_REPLAYED),
+            },
+            "scorer": {
+                "question": SCORER_QUESTION,
+                "definition": "Which score decided a pair.",
+                "values": _values(SCORER),
+            },
+            "line_change": {
+                "question": LINE_CHANGE_QUESTION,
+                "definition": "What last moved the lines that set the buckets.",
+                "values": _values(LINE_CHANGE),
+            },
         },
+        "terms": {key: dict(entry) for key, entry in TERMS.items()},
         "stages": [dict(stage) for stage in STAGES],
     }
 
