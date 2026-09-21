@@ -24,9 +24,9 @@ import { Icons } from "./Icons";
 import { fmtNumber, fmtDateTime } from "./ProbBar";
 import { Term, TermHint, Provenance, provenanceLabel } from "./Term";
 import { ANSWER_SOURCE, ANSWER_SOURCE_QUESTION } from "../glossary";
+import { RowCap, useRowCap } from "./RowCap";
 
-const LINKS_PER_PAGE = 50;
-const MEMBERS_SHOWN = 60;
+const LINKS_PER_PAGE = 25;
 
 /* An id that may be long, in the mono face, wrapping rather than pushing the
    table wide. */
@@ -211,11 +211,11 @@ function Steps({ steps }) {
 }
 
 /* Every record in the entity, with why it is here. */
-function Members({ members, recordPlural = "records" }) {
-  const [all, setAll] = useState(false);
+function Members({ members, recordPlural = "records", resetKey }) {
+  const [shown, setShown] = useRowCap(resetKey);
   const rows = Array.isArray(members) ? members : [];
   if (rows.length === 0) return null;
-  const shown = all ? rows : rows.slice(0, MEMBERS_SHOWN);
+  const visible = rows.slice(0, shown);
 
   return (
     <div>
@@ -223,7 +223,7 @@ function Members({ members, recordPlural = "records" }) {
         Why these {recordPlural} are in this entity
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-        {shown.map((m) => (
+        {visible.map((m) => (
           <span
             key={m.record_id}
             style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12 }}
@@ -233,11 +233,12 @@ function Members({ members, recordPlural = "records" }) {
           </span>
         ))}
       </div>
-      {rows.length > shown.length && (
-        <button className="btn sm ghost" style={{ marginTop: 6 }} onClick={() => setAll(true)}>
-          Show all {fmtNumber(rows.length)} {recordPlural}
-        </button>
-      )}
+      <RowCap
+        shown={shown}
+        loaded={rows.length}
+        plural={recordPlural}
+        setShown={setShown}
+      />
     </div>
   );
 }
@@ -479,7 +480,11 @@ export function EntityProvenancePanel({ data, recordPlural = "records", columnLa
 
         <Steps steps={steps} />
 
-        <Members members={data.members} recordPlural={recordPlural} />
+        <Members
+          members={data.members}
+          recordPlural={recordPlural}
+          resetKey={data.entity_id}
+        />
 
         {runs.length > 0 && (
           <div style={{ fontSize: 12.5 }}>

@@ -15,6 +15,7 @@ import { Icons } from "./Icons";
 import { fmtNumber } from "./ProbBar";
 import { Empty } from "./Empty";
 import { Cell, NUMERIC_TYPES } from "./cells";
+import { RowCap, useRowCap } from "./RowCap";
 import { Term, TermHint, Provenance, provenanceLabel } from "./Term";
 import { noun, existingLabelName } from "../profileText";
 
@@ -52,9 +53,11 @@ export function guardReason(guard) {
 }
 
 // ---------- expanded members ----------
-function GroupMembers({ runId, groupId, columns, existingIds, recordPlural }) {
+function GroupMembers({ runId, groupId, columns, existingIds, recordPlural, size }) {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
+  // A trade-union group runs to 1,144 records. It opens 25 at a time.
+  const [shown, setShown] = useRowCap(groupId);
 
   useEffect(() => {
     let alive = true;
@@ -88,6 +91,7 @@ function GroupMembers({ runId, groupId, columns, existingIds, recordPlural }) {
   }
 
   const members = Array.isArray(detail.members) ? detail.members : [];
+  const visible = members.slice(0, shown);
   // More than one earlier ID in a group is exactly what a conflict looks like,
   // so that column is the thing to make obvious. It gets its own last column,
   // which means dropping the profile's own copy of it.
@@ -118,7 +122,7 @@ function GroupMembers({ runId, groupId, columns, existingIds, recordPlural }) {
             </tr>
           </thead>
           <tbody>
-            {members.map((r) => (
+            {visible.map((r) => (
               <tr key={r.record_id}>
                 {dataColumns.map((col, i) => {
                   const numeric = NUMERIC_TYPES.has(col.type);
@@ -156,11 +160,14 @@ function GroupMembers({ runId, groupId, columns, existingIds, recordPlural }) {
           </tbody>
         </table>
       </div>
-      {detail.members_truncated && (
-        <p className="muted" style={{ fontSize: 11.5, margin: 0 }}>
-          Only the first {members.length} {recordPlural} of this group are shown.
-        </p>
-      )}
+      <RowCap
+        shown={shown}
+        loaded={members.length}
+        total={size ?? detail.size}
+        truncated={detail.members_truncated}
+        plural={recordPlural}
+        setShown={setShown}
+      />
       {conflicting && (
         <p style={{ fontSize: 12, color: "var(--ti-red)", margin: "4px 0 0" }}>
           This group joins {distinctIds.size} different earlier IDs
@@ -585,6 +592,7 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
                             columns={displayColumns}
                             existingIds={ids}
                             recordPlural={recordPlural}
+                            size={g.size}
                           />
                         </td>
                       </tr>

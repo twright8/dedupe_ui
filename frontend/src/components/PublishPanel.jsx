@@ -163,8 +163,12 @@ export default function PublishPanel({ runId, run, profile }) {
 
   const s = preview?.summary || {};
   const proposed = run?.counts?.entitiesProposed;
-  const publishedAt = published?.published_at || preview?.published_at || counts.publishedAt;
-  const publishedBy = published?.published_by || preview?.published_by;
+  /* Whether THIS run is published. The preview's `published_at` describes the
+     latest publication in the registry, whichever run made it, so it would
+     call an unpublished run published. Only this session's publish and the
+     run's own counts answer for this run. */
+  const publishedAt = published?.published_at || counts.publishedAt;
+  const publishedBy = published?.published_by || counts.publishedBy;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>

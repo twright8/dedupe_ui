@@ -16,6 +16,7 @@ import { Empty } from "./Empty";
 import { Cell, NUMERIC_TYPES } from "./cells";
 import { Term, TermHint, Provenance, provenanceLabel } from "./Term";
 import { RunEntityProvenance } from "./EntityProvenance";
+import { RowCap, useRowCap } from "./RowCap";
 import { noun } from "../profileText";
 
 const PER_PAGE = 50;
@@ -362,20 +363,22 @@ export default function EntitiesTable({ runId, profile }) {
                             style={{ whiteSpace: "normal" }}
                           >
                             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                              <EntityMembers
-                                runId={runId}
-                                entityId={e.entity_id}
-                                columns={displayColumns}
-                                recordPlural={recordPlural}
-                              />
-                              {/* Why these records are one entity, from the
-                                  run's own files. */}
+                              {/* The answer people open an entity to read comes
+                                  first. An entity of 1,191 records would bury
+                                  it under its own member list. */}
                               <RunEntityProvenance
                                 runId={runId}
                                 entityId={e.entity_id}
                                 recordPlural={recordPlural}
                                 columnLabel={(k) => columnLabel(k, displayColumns)}
                                 flat
+                              />
+                              <EntityMembers
+                                runId={runId}
+                                entityId={e.entity_id}
+                                columns={displayColumns}
+                                recordPlural={recordPlural}
+                                nRecords={e.n_records}
                               />
                             </div>
                           </td>
@@ -418,9 +421,12 @@ export default function EntitiesTable({ runId, profile }) {
 }
 
 // The records inside one entity, with the earlier ID beside the new one.
-function EntityMembers({ runId, entityId, columns, recordPlural }) {
+function EntityMembers({ runId, entityId, columns, recordPlural, nRecords }) {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
+  // The entity detail takes no offset or limit — it sends the members in one
+  // go, capped at 500 — so the paging is over what arrived.
+  const [shown, setShown] = useRowCap(entityId);
 
   useEffect(() => {
     let alive = true;
@@ -449,10 +455,14 @@ function EntityMembers({ runId, entityId, columns, recordPlural }) {
     );
 
   const members = detail.members || [];
+  const visible = members.slice(0, shown);
   const dataColumns = columns.filter((c) => c.key !== "existing_entity_id");
 
   return (
     <div>
+      <div className="eyebrow" style={{ marginBottom: 6 }}>
+        The {recordPlural} in this entity
+      </div>
       <div className="tbl-wrap">
         <table className="t" style={{ borderRadius: 0 }}>
           <thead>
@@ -474,7 +484,7 @@ function EntityMembers({ runId, entityId, columns, recordPlural }) {
             </tr>
           </thead>
           <tbody>
-            {members.map((m) => {
+            {visible.map((m) => {
               const earlier = m.existing_entity_id;
               const changed = earlier && String(earlier) !== String(detail.entity_id);
               return (
@@ -525,11 +535,14 @@ function EntityMembers({ runId, entityId, columns, recordPlural }) {
           </tbody>
         </table>
       </div>
-      {detail.members_truncated && (
-        <p className="muted" style={{ fontSize: 11.5, margin: "6px 0 0" }}>
-          Only the first {members.length} {recordPlural} are shown.
-        </p>
-      )}
+      <RowCap
+        shown={shown}
+        loaded={members.length}
+        total={detail.n_records ?? nRecords}
+        truncated={detail.members_truncated}
+        plural={recordPlural}
+        setShown={setShown}
+      />
     </div>
   );
 }

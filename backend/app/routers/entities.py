@@ -26,6 +26,7 @@ from app.registry import plan as registry_plan
 from app.registry import provenance as registry_provenance
 from app.registry import store as registry_store
 from app.services import bucketing_history, clusters_reader, entities_reader
+from app.services import run_counts
 from app.services import pair_labels, run_manifest
 from app.services.audit_logger import log_event
 
@@ -574,7 +575,11 @@ def publish(run_id: str, body: PublishBody | None = None,
         edges=edges, collisions=_collisions(run_dir).get("id_collision_examples") or [],
     )
     # A run's label is its title on screen (the input file's name when unset), so
-    # publishing must not write one. "Published" is read from entity_publications.
+    # publishing must not write one. The run's counts carry when and by whom, so the
+    # runs list can show a "Published" chip without asking the registry per row.
+    run_counts.merge(_db_path(), run_id, {
+        "published_at": result["published_at"], "published_by": user_name or "",
+    })
     log_event(
         _db_path(), user=user_name or "unknown", kind="publish",
         description=(f"Published run {run_id}: {plan['summary']['new']} new, "

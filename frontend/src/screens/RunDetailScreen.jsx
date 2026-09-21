@@ -14,6 +14,7 @@ import ExactGroupsTable from "../components/ExactGroupsTable";
 import EntitiesTable from "../components/EntitiesTable";
 import PublishPanel from "../components/PublishPanel";
 import RunManifest from "../components/RunManifest";
+import { PublishedChip } from "../components/PublishedChip";
 import { useProfile } from "../profile";
 import { Term, TermHint, Provenance } from "../components/Term";
 import { noun, existingLabelName } from "../profileText";
@@ -1555,6 +1556,7 @@ export default function RunDetailScreen() {
                 </span>
               </>
             )}
+            <PublishedChip run={run} style={{ marginLeft: 8 }} />
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>

@@ -22,6 +22,7 @@ import { Icons } from "../components/Icons";
 import { ProbBar, fmtProb, fmtNumber } from "../components/ProbBar";
 import { Empty } from "../components/Empty";
 import { Cell, NUMERIC_TYPES, readableColumns } from "../components/cells";
+import { RowCap, useRowCap } from "../components/RowCap";
 import { patternSummary } from "../components/PairEvidence";
 import { FocusEvents } from "../components/FocusStrip";
 import { evidenceFocusFor, pickColumns } from "../evidenceFocus";
@@ -1440,7 +1441,10 @@ function AttributeChoice({ column, label, attribute, busy, onSettle }) {
 
 function UnitMembers({ unit, columns }) {
   const profile = useProfile();
+  // A held group's unit can hold 1,144 records, so it opens 25 at a time.
+  const [shown, setShown] = useRowCap(unit.unit_id);
   const members = unit.members || [];
+  const visible = members.slice(0, shown);
   if (members.length === 0) {
     return (
       <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
@@ -1464,7 +1468,7 @@ function UnitMembers({ unit, columns }) {
           </tr>
         </thead>
         <tbody>
-          {members.map((m) => (
+          {visible.map((m) => (
             <tr key={m.record_id}>
               <td className="mono" style={{ fontSize: 11.5 }}>
                 {m.record_id}
@@ -1485,11 +1489,14 @@ function UnitMembers({ unit, columns }) {
           ))}
         </tbody>
       </table>
-      {unit.members_truncated && (
-        <p className="muted" style={{ fontSize: 11.5, padding: 8, margin: 0 }}>
-          Only the first {fmtNumber(members.length)} {noun(profile, "record_plural")} are shown.
-        </p>
-      )}
+      <RowCap
+        shown={shown}
+        loaded={members.length}
+        total={unit.unit_size}
+        truncated={unit.members_truncated}
+        plural={noun(profile, "record_plural")}
+        setShown={setShown}
+      />
     </div>
   );
 }

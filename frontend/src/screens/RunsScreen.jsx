@@ -11,6 +11,7 @@ import { Empty } from "../components/Empty";
 import { useProfile } from "../profile";
 import { hasEntityCounts, hasExactCounts, hasPairCounts, hasRecordCounts, trackCountKey } from "../counts";
 import { Term, TermHint } from "../components/Term";
+import { PublishedChip } from "../components/PublishedChip";
 import { BUCKET_LABELS } from "../components/DiffHero";
 import { noun } from "../profileText";
 import { scoredBy } from "./RunDetailScreen";
@@ -401,10 +402,13 @@ export default function RunsScreen() {
                   <td>
                     <div style={{ fontWeight: 500 }}>{r.label}</div>
                     <div
-                      className="mono muted"
-                      style={{ fontSize: 11 }}
+                      style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}
                     >
-                      {r.id}
+                      <span className="mono muted" style={{ fontSize: 11 }}>
+                        {r.id}
+                      </span>
+                      {/* Publishing is a fact about the run, not its name. */}
+                      <PublishedChip run={r} />
                     </div>
                   </td>
                   <td>

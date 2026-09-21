@@ -388,6 +388,7 @@ def _normalize_counts(raw):
         "attributeTies": raw.get("attribute_ties", 0),
         "idCollisions": raw.get("id_collisions", 0),
         "publishedAt": raw.get("published_at"),
+        "publishedBy": raw.get("published_by"),
         # Stage 3b — which model, if any, decided this run, and on what lines
         # (docs/MODEL_API.md). The three per-track values are objects keyed by
         # track. They are recorded on the run, so activating a newer version
