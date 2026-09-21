@@ -89,7 +89,7 @@ export const TERMS = [
     key: "guard",
     term: "guard",
     plural: "guards",
-    definition: "A limit on a match key. A set of records that breaks the limit is not merged.",
+    definition: "A safety check attached to a match key. It looks at each exact group the match key made and stops the ones that are not believable, such as one company number under five different names. A stopped group is a held group, and a person decides it.",
     retire: ["cap"],
     seeAlso: ["matchKey", "heldGroup"],
   },

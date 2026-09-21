@@ -245,11 +245,40 @@ export default function MethodologyScreen() {
               into one.
             </p>
             <p>
-              A guard is a limit on a match key. It stops a set of records that looks wrong. A
-              guard can ignore a value that appears on a blocked list, refuse a set over a size
-              limit, refuse a set carrying more different names than you allow, or require the
-              records to agree on a second column as well. A set of records a guard stopped is a
-              held group. Its records stay separate until a person decides.
+              A match key is a simple rule, and a simple rule is sometimes wrong. "Same company
+              number means same organisation" holds almost every time. It fails when the number is
+              a placeholder such as 00000001, which hundreds of unrelated records share.
+            </p>
+            <p>
+              A guard is a safety check that you attach to a match key. The match key puts records
+              together first. The guard then looks at each exact group and asks whether it is
+              believable. There are four kinds of guard.
+            </p>
+            <ul style={{ margin: "0 0 12px 18px", padding: 0, lineHeight: 1.6 }}>
+              <li>
+                <b>Ignore these values.</b> A list of values that prove nothing, such as
+                placeholder numbers. A record that holds one is not matched on this match key.
+              </li>
+              <li>
+                <b>Too many records.</b> A limit on how many records one exact group may hold. One
+                name on 141 records may be one busy person. It may also be several people.
+              </li>
+              <li>
+                <b>Too many different names.</b> A limit on how many different values another
+                column may show inside one exact group. One company number under five different
+                names needs a person to look.
+              </li>
+              <li>
+                <b>Must also agree on something else.</b> Inside an exact group, records stay
+                together only if they also share a value in another column that you name, such as
+                the postcode. The exact group is split into the parts that do.
+              </li>
+            </ul>
+            <p>
+              The first and the last kind act quietly. The value is ignored, or the exact group is
+              split. The two limits stop the whole exact group. A stopped group is a held group.
+              Nothing in it is joined. It waits on the <Click>Cluster review</Click> screen, with
+              the reason shown, until a person says it is all one thing or splits it.
             </p>
             <p>
               Out come the exact groups and the held groups. To read them, open the{" "}
