@@ -244,11 +244,13 @@ function Members({ members, recordPlural = "records" }) {
 
 /* The join log itself: one row per link, paged here because the response may
    hold thousands. */
-function EveryLink({ edges, totalLinks }) {
+function EveryLink({ edges, totalLinks, truncated }) {
   const [page, setPage] = useState(0);
   const rows = Array.isArray(edges) ? edges : [];
-  const total = totalLinks || rows.length;
-  const capped = rows.length < total;
+  const total = totalLinks ?? rows.length;
+  // The API says whether the page left anything out; it is not worked out by
+  // comparing two numbers here.
+  const capped = !!truncated;
   const pages = Math.max(1, Math.ceil(rows.length / LINKS_PER_PAGE));
   const from = page * LINKS_PER_PAGE;
   const slice = rows.slice(from, from + LINKS_PER_PAGE);
@@ -408,7 +410,9 @@ export function EntityProvenancePanel({ data, recordPlural = "records", columnLa
   if (!data) return null;
 
   const steps = Array.isArray(data.steps) ? data.steps : [];
-  const totalLinks = steps.reduce((sum, s) => sum + (s.n_links || 0), 0);
+  // `n_edges` is how many links the entity has, whether or not this page holds
+  // them all. `edges_truncated` says whether it does.
+  const totalLinks = data.n_edges ?? 0;
   const origin = ANSWER_SOURCE[String(data.source || "")] || null;
   const runs = Array.isArray(data.runs) ? data.runs : [];
 
@@ -506,7 +510,11 @@ export function EntityProvenancePanel({ data, recordPlural = "records", columnLa
           </button>
           {showLinks && (
             <div style={{ marginTop: 10 }}>
-              <EveryLink edges={data.edges} totalLinks={totalLinks} />
+              <EveryLink
+                edges={data.edges}
+                totalLinks={totalLinks}
+                truncated={data.edges_truncated}
+              />
             </div>
           )}
         </div>

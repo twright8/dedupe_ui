@@ -57,6 +57,49 @@ const SOURCE_OPTIONS = SOURCE_VALUES.map((key) => {
 
 const GROUP_PROVENANCE = new Set(["cluster_merge", "cluster_split"]);
 
+/* What the API said went wrong, in its own words. A refusal names the decision
+   and the screen that undoes it, and that sentence is more use to a reviewer
+   than anything this screen could write. */
+function detailOf(err) {
+  const detail = err?.body?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (typeof detail?.detail === "string") return detail.detail;
+  return err?.message || "That did not work.";
+}
+
+/* One line saying how the last action went. Three tones: it worked, the API
+   refused it, or it failed. */
+function Notice({ notice, onClose }) {
+  if (!notice) return null;
+  const tone = notice.tone || "ok";
+  const colour =
+    tone === "bad" ? "var(--ti-red)" : tone === "warn" ? "var(--amber)" : "var(--green)";
+  const background =
+    tone === "bad" ? "var(--ti-red-50)" : tone === "warn" ? "var(--amber-50)" : "var(--green-50)";
+  return (
+    <div
+      role="status"
+      style={{
+        border: `1px solid ${colour}`,
+        background,
+        borderRadius: 5,
+        padding: "9px 12px",
+        fontSize: 12.5,
+        lineHeight: 1.5,
+        marginBottom: 12,
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 10,
+      }}
+    >
+      <span style={{ minWidth: 0 }}>{notice.text}</span>
+      <button className="btn sm ghost" style={{ marginLeft: "auto" }} onClick={onClose}>
+        Close
+      </button>
+    </div>
+  );
+}
+
 // What a group decision did. The glossary word for both is "group decision".
 const KIND_VERB = { merge: "merged", split: "split" };
 
@@ -105,6 +148,9 @@ export default function LabelsScreen() {
   const [error, setError] = useState(null);
   const [attempt, setAttempt] = useState(0);
   const [bulkBusy, setBulkBusy] = useState(false);
+  // What the last action said. The API answers a refusal with a sentence that
+  // names the decision and where to undo it, so that sentence is what shows.
+  const [notice, setNotice] = useState(null);
 
   // The test set is per track and lives with the model, because the model is
   // what it grades.
@@ -220,24 +266,46 @@ export default function LabelsScreen() {
     )
       return;
     setDesignating(true);
+    setNotice(null);
     try {
-      await api.designateTestSet(testTrack, 200);
+      const res = await api.designateTestSet(testTrack, { n: 200 });
+      setNotice({
+        tone: "ok",
+        text: `Froze ${fmtNumber(res.designated)} answers into the test set. ${fmtNumber(
+          res.left_for_training
+        )} are left to train on.`,
+      });
       loadEval();
       refresh();
+    } catch (err) {
+      setNotice({ tone: "bad", text: detailOf(err) });
     } finally {
       setDesignating(false);
     }
   }
 
-  async function changeRole(ids, heldOut) {
-    if (!ids.length) return;
+  /* Freeze one answer into its own track's test set. Freezing is permanent, so
+     the only control is this one: there is no way back out. A refusal comes
+     back per label with a reason a reviewer can act on. */
+  async function freezeLabel(label) {
     setBulkBusy(true);
+    setNotice(null);
     try {
-      await api.setLabelsRole(ids, heldOut);
+      const res = await api.designateTestSet(label.track, { label_ids: [label.id] });
+      const refused = (res.refused || []).find((r) => r.label_id === label.id);
+      if (refused) {
+        setNotice({ tone: "warn", text: refused.reason });
+      } else {
+        setNotice({
+          tone: "ok",
+          text: "That answer is in the test set now. The model is graded on it and no longer learns from it.",
+        });
+      }
+      setEvalSet((current) => (label.track === testTrack ? res : current));
       refresh();
       loadEval();
     } catch (err) {
-      alert(err.message || "Could not move that label to the other set");
+      setNotice({ tone: "bad", text: detailOf(err) });
     } finally {
       setBulkBusy(false);
     }
@@ -268,13 +336,31 @@ export default function LabelsScreen() {
     }
   }
 
-  async function deleteLabel(label) {
-    if (!window.confirm(`Remove the active label for ${label.name_a} ↔ ${label.name_b}?`)) return;
+  /* Withdraw one answer. The row stays and stops counting, so the library is
+     the record of who said what and when. A label a group decision wrote is
+     refused with 409, and the message names the decision and the screen that
+     undoes the whole of it. */
+  async function withdrawLabel(label) {
+    const who = `${label.name_a || label.record_id_a} and ${label.name_b || label.record_id_b}`;
+    if (
+      !window.confirm(
+        `Withdraw the answer on ${who}?\n\n` +
+          "It stops counting straight away. The row stays in the library, so the history still " +
+          "says who saved it and when."
+      )
+    )
+      return;
+    setNotice(null);
     try {
-      await api.deleteLabel(label.id);
+      const res = await api.withdrawLabel(label.id);
+      setNotice({
+        tone: "ok",
+        text: `Withdrew the "${res.answer}" answer on ${res.pair_id}.`,
+      });
       refresh();
+      loadEval();
     } catch (err) {
-      alert(err.message || "Could not delete label");
+      setNotice({ tone: "bad", text: detailOf(err) });
     }
   }
 
@@ -319,6 +405,8 @@ export default function LabelsScreen() {
           />
         </div>
       </div>
+
+      <Notice notice={notice} onClose={() => setNotice(null)} />
 
       {/* Test set */}
       <div className="card" style={{ marginBottom: 12 }}>
@@ -369,6 +457,12 @@ export default function LabelsScreen() {
             >
               {designating ? "Freezing..." : "Freeze a balanced test set"}
             </button>
+            <p className="muted" style={{ fontSize: 12, margin: 0, width: "100%", lineHeight: 1.5 }}>
+              Freezing is permanent. There is no way to move an answer back to the{" "}
+              <Term name="trainingSet" />, because a model must never be trained on the answers it
+              is graded against — a figure quoted off the <Term name="testSet" /> has to stay
+              quotable.
+            </p>
           </div>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             <div className="kpi" style={{ padding: 10, minWidth: 170 }}>
@@ -650,8 +744,8 @@ export default function LabelsScreen() {
                         }
                         tracks={tracks}
                         bulkBusy={bulkBusy}
-                        onRole={changeRole}
-                        onDelete={deleteLabel}
+                        onFreeze={freezeLabel}
+                        onWithdraw={withdrawLabel}
                       />
                     ))
                   : items.map((label) => (
@@ -660,8 +754,8 @@ export default function LabelsScreen() {
                         label={label}
                         tracks={tracks}
                         bulkBusy={bulkBusy}
-                        onRole={changeRole}
-                        onDelete={deleteLabel}
+                        onFreeze={freezeLabel}
+                        onWithdraw={withdrawLabel}
                       />
                     ))}
               </tbody>
@@ -711,7 +805,7 @@ export default function LabelsScreen() {
 /* One row of the grouped list. A group decision expands into its own labels,
    fetched by decision id and paged like everything else. A single label comes
    back in the same shape with no decision id, so both read the same way. */
-function DecisionRow({ row, open, onToggle, tracks, bulkBusy, onRole, onDelete }) {
+function DecisionRow({ row, open, onToggle, tracks, bulkBusy, onFreeze, onWithdraw }) {
   const [members, setMembers] = useState(null);
   const [error, setError] = useState(null);
   const verb = KIND_VERB[row.kind];
@@ -811,8 +905,8 @@ function DecisionRow({ row, open, onToggle, tracks, bulkBusy, onRole, onDelete }
                         label={label}
                         tracks={tracks}
                         bulkBusy={bulkBusy}
-                        onRole={onRole}
-                        onDelete={onDelete}
+                        onFreeze={onFreeze}
+                        onWithdraw={onWithdraw}
                       />
                     ))}
                   </tbody>
@@ -831,7 +925,7 @@ function DecisionRow({ row, open, onToggle, tracks, bulkBusy, onRole, onDelete }
   );
 }
 
-function LabelRow({ label, tracks, bulkBusy, onRole, onDelete, indent }) {
+function LabelRow({ label, tracks, bulkBusy, onFreeze, onWithdraw, indent }) {
   // TRUE and FALSE are the wire values. They are mapped here and never shown.
   const isMatch = String(label.is_match || "").toUpperCase() === "TRUE";
   const inTestSet = !!label.held_out;
@@ -888,18 +982,16 @@ function LabelRow({ label, tracks, bulkBusy, onRole, onDelete, indent }) {
               Training set
             </span>
           )}
-          {!fromGroup && (
+          {/* Freezing only ever goes one way, so there is no control to
+              undo it. A group decision cannot be frozen at all. */}
+          {!inTestSet && !fromGroup && !superseded && (
             <button
               className="btn sm"
               disabled={bulkBusy}
-              onClick={() => onRole([label.id], inTestSet ? 0 : 1)}
-              title={
-                inTestSet
-                  ? "Put this label back in the training set"
-                  : "Hold this label back in the test set"
-              }
+              onClick={() => onFreeze(label)}
+              title="Freeze this answer into the test set. It cannot be taken back out."
             >
-              {inTestSet ? "→ Training set" : "→ Test set"}
+              &rarr; Test set
             </button>
           )}
         </div>
@@ -920,10 +1012,18 @@ function LabelRow({ label, tracks, bulkBusy, onRole, onDelete, indent }) {
           </div>
         )}
       </td>
-      <td>
-        {!superseded && (
-          <button className="btn sm danger" onClick={() => onDelete(label)}>
-            Remove
+      <td style={{ whiteSpace: "normal" }}>
+        {superseded ? null : fromGroup ? (
+          <span className="muted" style={{ fontSize: 11.5, lineHeight: 1.4 }}>
+            Undo this on the Cluster review screen
+          </span>
+        ) : (
+          <button
+            className="btn sm danger"
+            onClick={() => onWithdraw(label)}
+            title="Take this answer back. The row stays in the library."
+          >
+            Withdraw
           </button>
         )}
       </td>

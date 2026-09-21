@@ -241,17 +241,10 @@ export const api = {
     const qs = params ? "?" + new URLSearchParams(params).toString() : "";
     return get(`/api/labels${qs}`);
   },
-  createLabel(data) {
-    return post("/api/labels", data);
-  },
-  updateLabel(id, data) {
-    return put(`/api/labels/${id}`, data);
-  },
-  deleteLabel(id) {
+  // Withdraw one answer. The row stays and `active` goes to 0, so who said
+  // what is never lost. 409 when it is part of a group decision.
+  withdrawLabel(id) {
     return del(`/api/labels/${id}`);
-  },
-  setLabelsRole(ids, heldOut) {
-    return post("/api/labels/role", { ids, held_out: heldOut ? 1 : 0 });
   },
   labelsExportUrl(params) {
     const qs = params ? "?" + new URLSearchParams(params).toString() : "";
@@ -292,8 +285,13 @@ export const api = {
   getTestSet(track) {
     return get(`/api/model/${track}/test-set`);
   },
-  designateTestSet(track, n) {
-    return post(`/api/model/${track}/test-set/designate`, { n: n || 200 });
+  /* Freeze answers into this track's test set. `{n}` lets the tool choose the
+     newest, balanced between the two answers; `{label_ids}` names them, which
+     is what the Label library needs. There is no unfreeze. */
+  designateTestSet(track, body) {
+    const payload =
+      typeof body === "number" || body == null ? { n: body || 200 } : body;
+    return post(`/api/model/${track}/test-set/designate`, payload);
   },
 
   // --- Config ---

@@ -253,6 +253,14 @@ export const TERMS = [
     seeAlso: ["label", "cluster"],
   },
   {
+    key: "withdraw",
+    term: "withdraw",
+    plural: "withdraws",
+    definition:
+      "Taking back a saved answer. It stops counting for anything, and its row stays in the library, so who said what and when is never lost.",
+    seeAlso: ["label", "reviewer"],
+  },
+  {
     key: "reviewer",
     term: "reviewer",
     plural: "reviewers",

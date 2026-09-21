@@ -110,9 +110,6 @@ export default function ModelPanel({ runId }) {
   const [job, setJob] = useState(null);
   const [openVersion, setOpenVersion] = useState(null);
   const [report, setReport] = useState(null);
-  // Which score this run is read on. The API names it, so the panel never has
-  // to work the word out from a column name.
-  const [scoreName, setScoreName] = useState(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -130,18 +127,11 @@ export default function ModelPanel({ runId }) {
 
   useEffect(load, [load]);
 
-  useEffect(() => {
-    if (!runId) return undefined;
-    let alive = true;
-    setScoreName(null);
-    api
-      .getRunPairsHistogram(runId, { track, bins: 10 })
-      .then((res) => alive && setScoreName(res?.score_column_label || null))
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [runId, track]);
+  /* Which score a pair of this track is decided on, and the one word for it.
+     The model answer carries `scorer`, `score_column` and
+     `score_column_label`, so the panel never fetches a histogram to learn a
+     word. */
+  const scoreName = model?.score_column_label || null;
 
   // The report of whichever version is open, fetched on its own so a list of ten
   // versions never drags ten reports down the wire.
@@ -302,7 +292,8 @@ export default function ModelPanel({ runId }) {
 
             {scoreName && (
               <p className="muted" style={{ fontSize: 12.5, margin: 0, lineHeight: 1.55 }}>
-                This run is read on the {scoreName}.
+                A <Term name="pair" /> on this <Term name="track" /> is decided on the {scoreName}{" "}
+                right now.
               </p>
             )}
 

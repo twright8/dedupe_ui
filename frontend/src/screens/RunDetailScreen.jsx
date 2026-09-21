@@ -1091,9 +1091,10 @@ function RunDiagnostics({ runId, untrained }) {
     );
   }
 
-  // Which of the two scores this run was read on. Both names are the
-  // glossary's, and they are used only where both could be meant.
-  const scoreName = diag.score_column === "gbt_score" ? "model score" : "Splink score";
+  // Which of the two scores this run was read on. The API names it — the same
+  // word the model panel and the histogram use, from one definition — so this
+  // screen never works it out from a column name.
+  const scoreName = diag.score_column_label || "Splink score";
   const examples = diag.cleaning_examples || diag.examples || [];
   // A cleaning example's last column is the cleaned name the match keys use. It
   // is shown under the profile's own label for that column, never its key.
