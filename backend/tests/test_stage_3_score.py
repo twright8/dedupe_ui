@@ -1060,3 +1060,476 @@ def test_dropping_an_oversized_block_leaves_only_the_rest():
     entry = report["tracks"]["person"]["rules"][0]
     assert entry["pairs"] == 0
     assert entry["pairs_before_control"] == 780
+
+
+# ---------------------------------------------------------------------------
+# Predicting one blocking rule at a time
+# ---------------------------------------------------------------------------
+
+
+#: Three routes that overlap, so the "a pair belongs to the first rule that
+#: makes it" exclusion has something to do, and a numeric block key, so the
+#: hot-key control has to be measured on the frame Splink scores.
+MULTI_ROUTE_SETTINGS = {
+    "tracks": {
+        "person": {
+            "blocking_rules": [
+                {"id": "r0", "description": "same surname, same birth year",
+                 "sql": "l.surname = r.surname AND l.birth_year = r.birth_year",
+                 "max_block_size": 3, "on_oversize": "drop"},
+                {"id": "r1", "description": "same postcode",
+                 "sql": "l.postcode = r.postcode"},
+                {"id": "r2", "description": "same forename",
+                 "sql": "l.forename = r.forename"},
+            ],
+            "comparisons": [
+                {"id": "c1", "column": "forename", "term_frequency": False,
+                 "splink_function": "cl.JaroWinklerAtThresholds",
+                 "splink_args": {"score_threshold_or_thresholds": [0.9]}},
+                {"id": "c2", "column": "postcode", "term_frequency": False,
+                 "splink_function": "cl.ExactMatch", "splink_args": {}},
+                {"id": "c3", "column": "birth_year", "term_frequency": False,
+                 "splink_function": "custom.NumericDifferenceAtThresholds",
+                 "splink_args": {"thresholds": [0, 1]}},
+            ],
+            "em_blocking_rules": ["l.surname = r.surname"],
+            "max_pairs": 1000000,
+        },
+        "organisation": {"blocking_rules": [], "comparisons": [], "max_pairs": 1000},
+    },
+    "em_iterations": 3,
+    "random_seed": 42,
+    "probability_two_random_records_match": 0.01,
+    # Every blocked comparison survives, so a route's pair count IS what the
+    # blocking made and can be checked against what the budget priced.
+    "match_probability_threshold_candidate": 0.0,
+    "match_probability_threshold_review": 0.5,
+    "match_probability_threshold_high": 0.92,
+}
+
+
+def _multi_route_run(tmp_path, settings=None):
+    """Forty person records over ten surnames, four postcodes and five forenames."""
+    run_dir = tmp_path / "run"
+    config_dir = run_dir / "config"
+    config_dir.mkdir(parents=True)
+
+    forenames = ["ANN", "ANNE", "BEN", "CARL", "DAWN"]
+    rows = []
+    for i in range(40):
+        surname, place = i % 4, i // 4
+        # Eight of each surname's ten share a birth year, which is over r0's
+        # limit of three and is dropped; two share another and survive; one
+        # has none at all, and a null key never blocks with anything.
+        year = "1980" if place < 8 else "1990"
+        rows.append({
+            "record_id": str(i + 1),
+            "name": f"{forenames[i % 5]} SURNAME{surname:02d}",
+            "surname": f"SURNAME{surname:02d}",
+            "forename": forenames[i % 5],
+            "postcode": f"AA{place % 3} 1AA",
+            "birth_year": None if (place == 9 and surname == 0) else year,
+            "total_value": float(i),
+        })
+    records_frame(rows).to_parquet(run_dir / "records.parquet", index=False)
+    groups_frame([]).to_parquet(run_dir / "exact_groups.parquet", index=False)
+    (config_dir / "ruleset.json").write_text(json.dumps(default_ruleset()),
+                                             encoding="utf-8")
+    (config_dir / "linkage_settings.json").write_text(
+        json.dumps(settings or MULTI_ROUTE_SETTINGS), encoding="utf-8"
+    )
+    return run_dir, config_dir
+
+
+def _trained_person_linker(tmp_path, settings=None):
+    """A trained person linker over ``_multi_route_run``, plus what it was given."""
+    settings = settings or MULTI_ROUTE_SETTINGS
+    run_dir, config_dir = _multi_route_run(tmp_path, settings)
+    units_path = run_dir / "units.parquet"
+    units_module.build_units_files(
+        run_dir / "records.parquet", run_dir / "exact_groups.parquet",
+        units_path, run_dir / "unit_members.parquet", None,
+        temp_dir=run_dir / "duckdb_tmp",
+    )
+    ruleset = default_ruleset()
+    config = linkage.track_settings(settings, "person")
+    rows = stage_3.read_unit_projection(
+        units_path, stage_3.splink_columns(config, ruleset, "person"))
+    rows = units_module.track_units(rows, "person")
+    linker, _path, _pairs, routes = stage_3.train_track(
+        rows, config, settings, ruleset, "person", run_dir)
+    return linker, run_dir, rows, config, settings, routes
+
+
+#: What the acceptance test compares. ``match_key`` is the route attribution,
+#: which the pairs file does not keep but the proof needs.
+_IDENTITY_EXTRA = ("match_key",)
+
+
+@pytest.mark.slow
+def test_route_by_route_prediction_is_the_one_pass_prediction(tmp_path):
+    """The acceptance test: same pairs, same scores, same gammas, same routes.
+
+    Predicting one blocking rule at a time is only worth doing if it is the
+    same answer. It is, because the rule objects handed to each pass are the
+    trained model's own: their ``preceding_rules`` still carry the
+    ``AND NOT (...)`` that makes a pair belong to the first rule that matches
+    it, and ``match_key`` is the length of that list.
+    """
+    linker, run_dir, *_ = _trained_person_linker(tmp_path)
+
+    one = run_dir / "one_pass.parquet"
+    many = run_dir / "by_route.parquet"
+    one_pairs, one_routes = stage_3.predict_one_pass(
+        linker, 0.0, one, extra=_IDENTITY_EXTRA)
+    many_pairs, many_routes = stage_3.predict_route_by_route(
+        linker, 0.0, many, extra=_IDENTITY_EXTRA,
+        temp_dir=run_dir / "duckdb_tmp")
+
+    assert one_pairs == many_pairs > 0
+    # Three routes, and every one of them made something.
+    assert [r["match_key"] for r in many_routes] == [0, 1, 2]
+    assert all(r["pairs"] > 0 for r in many_routes)
+    assert {r["match_key"]: r["pairs"] for r in one_routes} \
+        == {r["match_key"]: r["pairs"] for r in many_routes}
+
+    order = ["match_key", "unit_id_l", "unit_id_r"]
+    left = pd.read_parquet(one).sort_values(order).reset_index(drop=True)
+    right = pd.read_parquet(many).sort_values(order).reset_index(drop=True)
+
+    assert list(left.columns) == list(right.columns)
+    assert any(c.startswith("gamma_") for c in left.columns)
+    for column in left.columns:
+        if column in ("match_probability", "match_weight"):
+            assert (left[column] - right[column]).abs().max() < 1e-9, column
+        else:
+            assert list(left[column]) == list(right[column]), column
+
+
+@pytest.mark.slow
+def test_a_pair_is_made_by_one_route_only_when_the_routes_overlap(tmp_path):
+    """Splink's cross-rule exclusion survives being asked one rule at a time.
+
+    The three routes of this fixture overlap heavily — two records can share a
+    surname, a postcode and a forename — so if the ``AND NOT`` clauses were
+    lost, the same pair would come back from more than one route.
+    """
+    linker, run_dir, *_ = _trained_person_linker(tmp_path)
+    many = run_dir / "by_route.parquet"
+    total, routes = stage_3.predict_route_by_route(
+        linker, 0.0, many, extra=_IDENTITY_EXTRA,
+        temp_dir=run_dir / "duckdb_tmp")
+
+    pairs = pd.read_parquet(many)
+    assert len(pairs) == total == sum(r["pairs"] for r in routes)
+    assert not pairs.duplicated(subset=["unit_id_l", "unit_id_r"]).any()
+
+    # And the exclusion really did bite: route 1 on its own would make more
+    # pairs than route 1 made here, because route 0 had already made some.
+    import duckdb
+
+    units = pd.read_parquet(run_dir / "units.parquet")
+    con = duckdb.connect()
+    con.register("u", units)
+
+    def alone(sql: str) -> int:
+        return int(con.execute(
+            f"select count(*) from u l join u r on ({sql}) "
+            "where l.unit_id < r.unit_id").fetchone()[0])
+
+    postcode = alone("l.postcode = r.postcode")
+    forename = alone("l.forename = r.forename")
+    # The routes overlap: run on their own they would make more pairs between
+    # them than the three routes made together.
+    assert routes[1]["pairs"] + routes[2]["pairs"] < postcode + forename
+    # And it is the later route that gives way, which is what `match_key` says.
+    assert routes[1]["pairs"] == postcode
+    assert routes[2]["pairs"] < forename
+
+
+@pytest.mark.slow
+def test_the_first_routes_pairs_are_exactly_what_the_budget_priced(tmp_path):
+    """The control bit, end to end: route 0 makes what ``price_rule`` said.
+
+    Route 0 blocks on ``birth_year``, which is text in ``units.parquet`` and a
+    number in the frame Splink scores. Its control is priced on one and applied
+    to the other, and the two agree only because both frames are cast the same
+    way. With the candidate threshold at 0 every blocked comparison survives,
+    so this is a direct comparison of blocking against pricing.
+    """
+    linker, run_dir, rows, config, settings, routes = _trained_person_linker(tmp_path)
+
+    api = _db_api(run_dir / "duckdb_tmp")
+    report, failure = blocking_budget_report(run_dir / "units.parquet", settings, api)
+    assert failure is None
+    priced = {r["id"]: r["pairs"] for r in report["tracks"]["person"]["rules"]}
+    # `price_rule` prices each rule on its own, so only the first route — the
+    # one nothing excludes anything from — can be compared to it directly.
+    assert routes[0]["pairs"] == priced["r0"] > 0
+    # And the control really did remove something: eight of each surname's ten
+    # share a birth year, which is over the limit of three.
+    assert priced["r0"] < report["tracks"]["person"]["rules"][0]["pairs_before_control"]
+
+
+def test_a_numeric_block_key_is_controlled_on_the_frame_splink_scores():
+    """A control measured on text does nothing to a frame that holds numbers.
+
+    ``dob_year_clean`` is a string of digits in ``units.parquet`` and a float
+    in the frame Splink scores, because a numeric-difference comparison needs
+    numbers. The control inlines its oversized keys as text, and DuckDB spells
+    the float ``1985`` as ``1985.0``. Measured on the wrong frame, every
+    ``NOT IN`` is true, the control silently does nothing, and the PSC person
+    track goes from 94.7 million comparisons to 1.46 billion.
+    """
+    import duckdb
+
+    config = {
+        "blocking_rules": [],
+        "comparisons": [{"id": "c", "column": "birth_year", "term_frequency": False,
+                         "splink_function": "custom.NumericDifferenceAtThresholds",
+                         "splink_args": {"thresholds": [0, 1]}}],
+    }
+    rule = {"id": "b", "description": "same birth year",
+            "sql": "l.birth_year = r.birth_year",
+            "max_block_size": 2, "on_oversize": "drop"}
+    text = pd.DataFrame({
+        "unit_id": [f"u{i}" for i in range(9)],
+        # The missing one matters: a column of digits with nothing missing
+        # casts to int64, which spells itself the same way text does. Real data
+        # always has something missing, and then the cast is float64 and the
+        # spelling parts company.
+        "birth_year": ["1985"] * 6 + ["1990"] * 2 + [None],
+    })
+    numbers = stage_3.cast_numeric_columns(text.copy(), config)
+    assert str(numbers["birth_year"].dtype).startswith("float")
+
+    con = duckdb.connect()
+    from_text = linkage.controlled_sql(con, text, rule)
+    from_numbers = linkage.controlled_sql(con, numbers, rule)
+    assert "'1985'" in from_text and "'1985.0'" in from_numbers
+
+    def pairs(frame, sql):
+        con.register("u", frame)
+        return int(con.execute(
+            f"select count(*) from u l join u r on ({sql}) "
+            "where l.unit_id < r.unit_id").fetchone()[0])
+
+    # Sixteen pairs uncontrolled: fifteen in the block of six, one in the pair,
+    # and none at all for the unit with no birth year.
+    assert pairs(numbers, rule["sql"]) == 16
+    # Measured on the text frame, the control removes nothing at all.
+    assert pairs(numbers, from_text) == 16
+    # Measured on the frame it will be applied to, it drops the hot block.
+    assert pairs(numbers, from_numbers) == 1
+
+
+def test_the_budget_and_the_scoring_frame_spell_their_keys_the_same_way():
+    """``_budget_rows`` casts what ``_splink_frame`` casts, so one answer serves both."""
+    config = linkage.track_settings(MULTI_ROUTE_SETTINGS, "person")
+    units = pd.DataFrame({
+        "unit_id": ["u1", "u2", "u3"], "track": ["person"] * 3,
+        "surname": ["A", "A", "A"], "forename": ["ANN", "ANN", "ANN"],
+        "postcode": ["AA1 1AA", "AA1 1AA", "AA1 1AA"],
+        "birth_year": ["1985", "1986", None],
+    })
+    budget = stage_3._budget_rows(units, "person", config)
+    splink = stage_3._splink_frame(units, config)
+    assert str(budget["birth_year"].dtype) == str(splink["birth_year"].dtype)
+    assert str(budget["birth_year"].dtype).startswith("float")
+
+
+def test_a_control_is_measured_once_when_a_cache_is_given(monkeypatch):
+    """The budget and the training ask the same question; it is answered once."""
+    rows = pd.DataFrame({"unit_id": [f"u{i}" for i in range(6)],
+                         "surname": ["A"] * 5 + ["B"]})
+    rules = [{"id": "b1", "description": "", "sql": "l.surname = r.surname",
+              "max_block_size": 2, "on_oversize": "drop"}]
+
+    calls: list[str] = []
+    real = linkage.controlled_sql
+
+    def counted(con, units, rule, track=None):
+        calls.append(rule.get("id"))
+        return real(con, units, rule, track)
+
+    monkeypatch.setattr(stage_3.linkage, "controlled_sql", counted)
+
+    cache: dict = {}
+    first = stage_3.controlled_rules(rows, rules, "person", cache=cache)
+    second = stage_3.controlled_rules(rows, rules, "person", cache=cache)
+    assert first == second
+    assert calls == ["b1"]
+
+    # Without a cache it is measured every time, which is what it did before.
+    calls.clear()
+    stage_3.controlled_rules(rows, rules, "person")
+    stage_3.controlled_rules(rows, rules, "person")
+    assert calls == ["b1", "b1"]
+
+
+def test_a_cached_control_is_not_reused_for_a_differently_typed_frame():
+    """The cache key carries the dtypes, because the generated SQL carries values."""
+    config = {"blocking_rules": [], "comparisons": [
+        {"id": "c", "column": "birth_year", "term_frequency": False,
+         "splink_function": "custom.NumericDifferenceAtThresholds",
+         "splink_args": {"thresholds": [0]}}]}
+    rules = [{"id": "b1", "description": "", "sql": "l.birth_year = r.birth_year",
+              "max_block_size": 2, "on_oversize": "drop"}]
+    text = pd.DataFrame({"unit_id": [f"u{i}" for i in range(7)],
+                         "birth_year": ["1985"] * 5 + ["1990", None]})
+    numbers = stage_3.cast_numeric_columns(text.copy(), config)
+
+    cache: dict = {}
+    from_text = stage_3.controlled_rules(text, rules, "person", cache=cache)
+    from_numbers = stage_3.controlled_rules(numbers, rules, "person", cache=cache)
+    assert len(cache) == 2
+    assert from_text[0]["sql"] != from_numbers[0]["sql"]
+
+
+def test_the_route_by_route_limit_comes_from_the_environment(monkeypatch):
+    monkeypatch.delenv("PREDICT_ROUTE_BY_ROUTE_ABOVE", raising=False)
+    assert stage_3.route_by_route_above() == 5_000_000
+    monkeypatch.setenv("PREDICT_ROUTE_BY_ROUTE_ABOVE", "10")
+    assert stage_3.route_by_route_above() == 10
+    monkeypatch.setenv("PREDICT_ROUTE_BY_ROUTE_ABOVE", "nonsense")
+    assert stage_3.route_by_route_above() == 5_000_000
+
+
+@pytest.mark.slow
+def test_the_stage_takes_the_route_by_route_path_above_the_limit(tmp_path,
+                                                                monkeypatch):
+    """Which path ran is recorded, and the pairs are the same either way."""
+    monkeypatch.setenv("PREDICT_ROUTE_BY_ROUTE_ABOVE", "100000000")
+    run_dir, config_dir = _multi_route_run(tmp_path / "one")
+    run_stage_3_score(str(run_dir), str(config_dir), render_diagnostics=False)
+    one = pd.read_parquet(run_dir / "pairs.parquet")
+    report = json.loads((run_dir / "blocking_report.json").read_text())
+    assert report["tracks"]["person"]["prediction"]["path"] == "one_pass"
+
+    monkeypatch.setenv("PREDICT_ROUTE_BY_ROUTE_ABOVE", "1")
+    run_dir, config_dir = _multi_route_run(tmp_path / "many")
+    run_stage_3_score(str(run_dir), str(config_dir), render_diagnostics=False)
+    many = pd.read_parquet(run_dir / "pairs.parquet")
+    report = json.loads((run_dir / "blocking_report.json").read_text())
+    prediction = report["tracks"]["person"]["prediction"]
+    assert prediction["path"] == "route_by_route"
+    assert [r["id"] for r in prediction["routes"]] == ["r0", "r1", "r2"]
+    assert sum(r["pairs"] for r in prediction["routes"]) == prediction["pairs"]
+    # No per-route file is left behind.
+    assert not list(run_dir.glob("*.route*.parquet"))
+
+    order = ["unit_id_l", "unit_id_r"]
+    one = one.sort_values(order).reset_index(drop=True)
+    many = many.sort_values(order).reset_index(drop=True)
+    assert list(one.columns) == list(many.columns)
+    for column in one.columns:
+        left, right = one[column], many[column]
+        if left.dtype.kind == "f":
+            assert ((left - right).abs().max() or 0) < 1e-9, column
+        else:
+            assert list(nulls_as_none(one[[column]])[column]) \
+                == list(nulls_as_none(many[[column]])[column]), column
+
+
+# ---------------------------------------------------------------------------
+# Reusing a model the run folder already holds
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_a_second_attempt_reuses_the_model_instead_of_training_again(tmp_path,
+                                                                    monkeypatch):
+    """Training is saved before prediction, so a failed predict is not paid twice.
+
+    A PSC run spends an hour and a half in EM and then hours in prediction, and
+    it is prediction that fails. The model is written the moment it is trained,
+    with a fingerprint of everything that shaped it, and a later attempt in the
+    same folder picks it up.
+    """
+    run_dir, config_dir = _multi_route_run(tmp_path)
+    run_stage_3_score(str(run_dir), str(config_dir), render_diagnostics=False)
+    first = pd.read_parquet(run_dir / "pairs.parquet")
+    model = (run_dir / "splink_model_person.json").read_text()
+    trained = json.loads((run_dir / "splink_trained_person.json").read_text())
+    assert trained["track"] == "person"
+    assert len(trained["fingerprint"]) == 64
+
+    from splink.internals.linker_components.training import LinkerTraining
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("the model was trained again")
+
+    monkeypatch.setattr(LinkerTraining, "estimate_u_using_random_sampling", refuse)
+    monkeypatch.setattr(
+        LinkerTraining, "estimate_parameters_using_expectation_maximisation", refuse)
+
+    run_stage_3_score(str(run_dir), str(config_dir), render_diagnostics=False)
+    second = pd.read_parquet(run_dir / "pairs.parquet")
+
+    # Nothing asked the linker to train — the stubs above would have said so —
+    # and the model on disk is untouched.
+    assert (run_dir / "splink_model_person.json").read_text() == model
+    # And the run is the same run.
+    assert len(first) == len(second)
+    order = ["unit_id_l", "unit_id_r"]
+    first = first.sort_values(order).reset_index(drop=True)
+    second = second.sort_values(order).reset_index(drop=True)
+    assert (first["match_probability"] - second["match_probability"]).abs().max() \
+        < 1e-9
+
+
+@pytest.mark.slow
+def test_a_changed_setting_retrains_rather_than_reusing(tmp_path):
+    """The fingerprint covers what shapes the model, so a change invalidates it."""
+    run_dir, config_dir = _multi_route_run(tmp_path)
+    run_stage_3_score(str(run_dir), str(config_dir), render_diagnostics=False)
+    before = json.loads(
+        (run_dir / "splink_trained_person.json").read_text())["fingerprint"]
+
+    settings = json.loads(json.dumps(MULTI_ROUTE_SETTINGS))
+    settings["tracks"]["person"]["comparisons"][0]["splink_args"][
+        "score_threshold_or_thresholds"] = [0.95]
+    (config_dir / "linkage_settings.json").write_text(json.dumps(settings),
+                                                      encoding="utf-8")
+    run_stage_3_score(str(run_dir), str(config_dir), render_diagnostics=False)
+    after = json.loads(
+        (run_dir / "splink_trained_person.json").read_text())["fingerprint"]
+    assert after != before
+
+
+def test_the_fingerprint_moves_with_the_controlled_sql_and_the_unit_count():
+    """It carries the blocking SQL *after* its control, which depends on the data."""
+    config = linkage.track_settings(MULTI_ROUTE_SETTINGS, "person")
+    ruleset = default_ruleset()
+    blocking = [{"id": "r0", "sql": "l.surname = r.surname"}]
+    em = [{"id": "", "sql": "l.surname = r.surname"}]
+
+    base = stage_3.training_fingerprint(config, MULTI_ROUTE_SETTINGS, ruleset,
+                                        "person", blocking, em, 1000)
+    assert base == stage_3.training_fingerprint(
+        config, MULTI_ROUTE_SETTINGS, ruleset, "person", blocking, em, 1000)
+    assert base != stage_3.training_fingerprint(
+        config, MULTI_ROUTE_SETTINGS, ruleset, "person", blocking, em, 1001)
+    controlled = [{"id": "r0", "sql": "l.surname = r.surname AND l.surname "
+                                      "NOT IN ('SMITH')"}]
+    assert base != stage_3.training_fingerprint(
+        config, MULTI_ROUTE_SETTINGS, ruleset, "person", controlled, em, 1000)
+
+
+def test_a_saved_model_is_only_reused_when_everything_matches(tmp_path,
+                                                              monkeypatch):
+    model = tmp_path / "splink_model_person.json"
+    trained = tmp_path / "splink_trained_person.json"
+    assert stage_3.saved_training_matches(trained, model, "abc") is False
+
+    model.write_text("{}", encoding="utf-8")
+    trained.write_text(json.dumps({"fingerprint": "abc"}), encoding="utf-8")
+    assert stage_3.saved_training_matches(trained, model, "abc") is True
+    assert stage_3.saved_training_matches(trained, model, "def") is False
+
+    trained.write_text("not json", encoding="utf-8")
+    assert stage_3.saved_training_matches(trained, model, "abc") is False
+
+    trained.write_text(json.dumps({"fingerprint": "abc"}), encoding="utf-8")
+    monkeypatch.setenv("REUSE_TRAINED_MODEL", "0")
+    assert stage_3.saved_training_matches(trained, model, "abc") is False

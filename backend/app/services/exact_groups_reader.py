@@ -225,8 +225,7 @@ def _open(run_dir: str):
     records = records_path(run_dir)
     if not groups.is_file() or not records.is_file():
         raise ExactGroupsNotFound(str(groups))
-    con = duckdb_conn.connect()
-    return con, groups, records
+    return duckdb_conn.reader_connect(run_dir), groups, records
 
 
 def get_groups(

@@ -2415,3 +2415,524 @@ alone is the problem.
 **What did not run:** the organisation track, stages 4 and 5, and therefore the
 sampled pairs item 4 asks for. `evidence.py`, `time_readers.py` and
 `adopt_run.py` are written and tested and are waiting for a finished run.
+
+## 106. Session of 2026-09-21 (second) — predicting route by route, and the bug that made it necessary
+
+Everything in this section was measured under the **project interpreter**,
+`/home/tomwright/PycharmProjects/dedupe_ui/backend/.venv/bin/python` (pandas
+3.0.6, pyarrow 25.0.1, duckdb 1.5.5), against the code tree
+`/home/tomwright/PycharmProjects/dedupe_ui_pscrun/backend` (branch `psc-run`).
+
+### The hot-key control was doing nothing on four of the six person routes
+
+Section 105 concluded that the person `predict` needed more than 35 GB of
+DuckDB spill for 94.7 million comparisons, which is about 370 bytes a pair.
+That reading was wrong, and the reason is worth writing down.
+
+`train_track` built the controlled prediction SQL from `rows` — the projection
+read straight off `units.parquet` — and then handed Splink `frame`, which is
+`_splink_frame(rows, config)`. Those are not the same values.
+`custom.NumericDifferenceAtThresholds` compares numbers and the cleaning engine
+writes text, so `_splink_frame` casts `dob_year_clean` with `pd.to_numeric`.
+With anything missing — and something is always missing — that gives float64.
+
+The control writes its oversized block keys into the SQL as string literals,
+built from `coalesce(cast(<column> as varchar), '')`. DuckDB spells the string
+`1985` as `'1985'` and the float `1985.0` as `'1985.0'`. Measured on `rows` and
+applied to `frame`, every `NOT IN` was true, so:
+
+```
+(l.surname_metaphone = r.surname_metaphone AND l.dob_year_clean = r.dob_year_clean
+ AND l.dob_month_clean = r.dob_month_clean)
+AND (<key> NOT IN ('RS§1985§3', ...)   <- never matches '…§1985.0§…'
+     OR (l.postcode_district = r.postcode_district))
+```
+
+was the bare rule. **pb1, pb2, pb5 and pb6 all block on `dob_year_clean`, and
+all four ran with no control at all.** So did person em2. The person track was
+not predicting 94.7 million comparisons; on section 104's own uncontrolled
+figures it was predicting about **1.46 billion**:
+
+| route | priced, after the control | what actually ran |
+|---|---|---|
+| pb1 | 20,130,171 | 198,530,709 |
+| pb2 | 16,755,794 | 114,611,766 |
+| pb3 | 13,563,011 | 13,563,011 (text key, control worked) |
+| pb4 | 16,907,827 | 16,907,827 (text key, control worked) |
+| pb5 | 11,624,404 | 527,628,584 |
+| pb6 | ≤15,762,398 | ≤582,535,879 |
+| **total** | **≤94,743,605** | **≤1,453,769,756** |
+
+That is what filled 32.5 GiB of spill in 375 seconds of prediction blocking,
+and it means **370 bytes a pair was never measured** — the real width is about
+24 bytes a pair, which is the number to size a spill cap from.
+
+**The fix is one word.** `train_track` now measures the control on `frame`, the
+frame Splink will apply the SQL to, which is what `controlled_rules`' own
+docstring already said it had to be. `_budget_rows` casts the same columns the
+same way, so the budget prices the rule against the values the rule will meet
+and the two frames agree. `cast_numeric_columns` is now a named function with
+the reason in its docstring, because it is a contract between two places and
+not four lines inside one of them.
+
+**Why nothing smaller than the full snapshot could have caught it.** The
+500,000-record PSC sample has no block over `max_block_size: 20` on any person
+route, so `controlled_sql` returns the rule untouched and the two spellings
+never diverge. Checked directly: all six shipped routes give byte-identical SQL
+from either frame on that sample, and the same pair counts. A column of digits
+with nothing missing also casts to int64, whose text is the same as the
+string's — so a tidy fixture passes too. `tests/test_stage_3_score.py::
+test_a_numeric_block_key_is_controlled_on_the_frame_splink_scores` pins it with
+a frame that has one missing value.
+
+### Route-by-route prediction
+
+Even with the control working, 94.7 million comparisons in one `predict` is a
+comparison table the size of all six routes at once. The stage now predicts one
+blocking rule at a time whenever the blocking budget has priced the track above
+`PREDICT_ROUTE_BY_ROUTE_ABOVE` (default **5,000,000**), and keeps the single
+pass below it, so donations and the PSC sample are untouched.
+
+**It is the same answer, and the reason is that the rule objects are the
+trained model's own.** Splink deduplicates across blocking rules while it
+blocks: rule *n* carries `AND NOT (rule 0 OR ... OR rule n-1)`, and both that
+clause and the `match_key` column come from one place,
+`BlockingRule.preceding_rules` — `match_key` is simply its length. So handing
+`predict` a list of one *rule object* rather than a list of one *rule* changes
+nothing about what that rule does: its preceding rules are still the five in
+front of it, its SQL is byte-for-byte the branch of the `UNION ALL` it would
+have been, and its `match_key` is still its own index. Splink does this to
+itself in `estimate_u.py`. **No after-the-fact deduplication is needed, and
+none is done** — the exclusion is still Splink's.
+
+What changes is how much is alive at once. Each route's prediction table is
+copied straight to its own parquet and dropped before the next route starts, so
+the spill is the largest single route rather than the sum. The per-route files
+are then concatenated with one `read_parquet([...])`, which refuses a schema
+mismatch — the check worth making, since a pair's columns must not depend on
+which route made it.
+
+**Proved identical on both real runs.** `prove_routes.py` trains each track's
+model once and predicts it twice, comparing pair for pair in DuckDB:
+
+| run | track | units | pairs | pairs only in one | duplicates | max Δprobability | max Δweight | gamma differences | `match_key` differences |
+|---|---|---|---|---|---|---|---|---|---|
+| donations `don_veto` | person | 13,310 | 25,503 | 0 / 0 | 0 | 0.0 | 0.0 | 0 | 0 |
+| donations `don_veto` | organisation | 9,065 | 4,973 | 0 / 0 | 0 | 0.0 | 0.0 | 0 | 0 |
+| PSC `psc_final` | person | 449,396 | 1,073,249 | 0 / 0 | 0 | 0.0 | 0.0 | 0 | 0 |
+| PSC `psc_final` | organisation | 31,572 | 70,273 | 0 / 0 | 0 | 0.0 | 0.0 | 0 | 0 |
+
+Route attribution matches route for route — PSC person, both ways:
+`{0: 220,790, 1: 2,695, 2: 424,015, 3: 127,620, 4: 297,825, 5: 304}`. The
+difference is 0.0 exactly, not 1e-9. Script:
+`/home/tomwright/psc_scratch/full_venv/prove_routes.py <run_dir> <work_dir>`.
+
+In the suite: `test_route_by_route_prediction_is_the_one_pass_prediction`
+(same pairs, scores, gammas and `match_key` on a forty-record fixture with
+three overlapping routes), `test_a_pair_is_made_by_one_route_only_when_the_
+routes_overlap`, and `test_the_stage_takes_the_route_by_route_path_above_the_
+limit`, which runs the whole stage both ways and diffs `pairs.parquet`.
+
+`blocking_report.json` now carries, per track, a `prediction` block naming
+which path ran, the pairs, and each route's `match_key`, rule id, pairs and
+seconds.
+
+### The oversized key sets are measured once
+
+The budget measured each control to price the rule, and `train_track` measured
+it again to build the SQL — about 50 seconds a rule twice over on 11.2 million
+person units. `controlled_rules` now takes a `cache` dict, which
+`run_stage_3_score` keeps for the length of the stage.
+
+The key is the track, the rule, the control, the row count **and the dtype of
+every column the control reads**. The dtypes are in the key because the
+generated SQL inlines key values as text and the text depends on the type —
+the bug above, turned into a guard. Casting `_budget_rows` the same way
+`_splink_frame` casts means the two frames now agree and the cache hits;
+before the cast they would have missed, correctly.
+
+### Stage 2 was not batched, and here is why
+
+`apply_match_keys` is a whole-frame NumPy algorithm: one `UnionFind` over every
+record, a normalised copy of every column any key reads, and per-tier
+"eligible before" masks that are global by definition — a tier-2 key has to
+know who tier 1 already covered, across the whole snapshot. Batching it means
+either a DuckDB rewrite of all 585 lines of `app/rules/keys.py` (token lists,
+conditions, guards, blocklists, tiers) or a two-pass design with a global
+union-find, and either way `keys_eval.evaluate` and `exact_overlay` sit on the
+same frame. That is not a small change and it is not one to make in the same
+session as the scoring fixes. **18.1 GB at fifteen million records stands, and
+stage 2 still will not fit the server's 6 GB budget by a factor of three.** It
+is the next thing to do to this pipeline.
+
+### The estimate, written before the full run was started
+
+| | |
+|---|---|
+| input | 15,029,263 records, 11,799,425 units (11,205,785 person, 593,640 organisation) — reused from `/home/tomwright/psc_scratch/full_venv/fulldata/runs/psc_full` |
+| build units | 458 s, 11.9 GB (measured, section 104) |
+| blocking budget | about 1,060 s (measured); the cache saves the *second* measurement, not this one |
+| u by random sampling | 24 s (measured) |
+| EM person em1 | about 1,990 s — unchanged, its keys are text and its control already worked |
+| EM person em2 | about 1,500 s — it ran uncontrolled at 105.6M pairs in 2,665 s and will now run at 59.0M |
+| person predict | six routes of 11.6M to 20.1M comparisons. Blocking is a hash build over 11.2M units per route plus the output, so 100 to 200 s a route: **900 to 1,800 s**, plus about 100 s to concatenate |
+| organisation | priced at 1,832,607, under the 5,000,000 limit, so **one pass**; a few hundred seconds all in |
+| overlays and pairs | about 42 million pairs at 500,000 a batch, each batch joined to the 11.8M-row overlay projection: **400 to 900 s** |
+| **stage 3 total** | **8,000 to 11,000 s — 2.2 to 3.1 hours** |
+| stage 3 peak RSS | **about 20 GB**, reached while Splink loads the person frame, exactly as in section 104. The frame is unchanged |
+| spill | the largest single route is 20.1M comparisons. At the 24 bytes a pair the failed run actually measured that is under 1 GB, but the blocked-pairs table and the hash builds dominate: **expect 8 to 15 GB peak**, and keep `DUCKDB_MAX_TEMP=35GB` so a surprise is still bounded |
+| stage 4 clusters | **600 to 1,200 s, 3 to 4 GB** |
+| stage 5 entities | **900 to 1,800 s, 8 to 10 GB** |
+| files | `predictions_person.parquet` about 2.1 GB (plus the six route parts alive at the same moment, another 2.1 GB), `pairs.parquet` 4 to 6 GB, `clusters.parquet` about 1 GB, `entities.parquet` about 2 GB |
+| disk | 64.0 GB free at the start; **expect about 39 GB free at the worst moment**, against a 15 GB floor |
+
+What would make this wrong, in the order I would bet on it: the overlay pass
+over 42 million pairs (it has never run at more than a million), the concat
+step (never run at more than 1.07 million), and stage 5's mint frame.
+
+### A trained model survives a failed prediction
+
+`train_track` saves the model the moment EM finishes, **before** it predicts,
+with `splink_trained_<track>.json` beside it holding a fingerprint of
+everything that shaped it: the comparisons, the prior and how it is estimated,
+the EM settings and the seed, the unit count, and the blocking and training SQL
+*after* their hot-key controls — the part that depends on the data, since a
+control inlines the keys it found. A later attempt in the same run folder whose
+fingerprint matches loads the model and goes straight to prediction. Set
+`REUSE_TRAINED_MODEL=0` to train anyway.
+
+This is insurance for exactly the failure that happened: a PSC run spends about
+an hour and a half in EM and then hours in prediction, and it is prediction
+that fails. Before this, every attempt paid for the training again.
+
+## 107. The full run, finished — and what it says
+
+Stages 3, 4 and 5 over the full PSC snapshot, in
+`/home/tomwright/psc_scratch/full_venv/fulldata/runs/psc_full`, driven by
+`run_stage_pscrun.py`, under
+`/home/tomwright/PycharmProjects/dedupe_ui/backend/.venv/bin/python` (pandas
+3.0.6, pyarrow 25.0.1, duckdb 1.5.5) against the code tree
+`/home/tomwright/PycharmProjects/dedupe_ui_pscrun/backend` at `psc-run`.
+`SPLINK_MEMORY_LIMIT=10GB`, `DUCKDB_MAX_TEMP=35GB`.
+
+### Time, memory and disk, against the estimate
+
+| stage | estimated | **measured** | estimated peak RSS | **measured** |
+|---|---|---|---|---|
+| 3 score | 8,000–11,000 s | **8,128.5 s** | about 20 GB | **27.1 GB** |
+| 4 cluster | 600–1,200 s | **69.0 s** | 3–4 GB | **12.2 GB** |
+| 5 entities | 900–1,800 s | **458.2 s** | 8–10 GB | **19.1 GB** |
+
+Disk 63.2 GB free before stage 3, 57.8 GB after stage 5, **lowest 31.3 GB**
+against a 15 GB floor. Spill was released after every phase; nothing was left
+behind. The run folder is **12 GB**.
+
+Inside stage 3:
+
+| phase | estimated | **measured** |
+|---|---|---|
+| build units | 458 s | **492.0 s** — 15,029,263 records to 11,799,425 units |
+| blocking budget | about 1,060 s | **930.7 s** |
+| u by random sampling | 24 s | **23.1 s** |
+| EM person em1 | about 1,990 s | **717.9 s** |
+| EM person em2 | about 1,500 s | **884.0 s** |
+| person predict, six routes | 900–1,800 s | **421.3 s** |
+| organisation, all in | a few hundred s | **21.4 s** |
+| overlays and the pairs file | 400–900 s | **2,790.3 s** |
+
+**The estimate was right about the total and wrong about where the time goes.**
+Prediction, the thing that had failed, is now the cheapest part of the person
+track. EM came in at a third of the estimate. The overlays are three times the
+estimate and are now the largest single phase of the pipeline — 46 minutes to
+bucket, veto and finalise 41 million pairs at 500,000 a batch. Each batch
+rebuilds a string index over all 11.8 million overlay units, twice (once in
+`apply_overlays`, once in `vetoes.SideValues`); building it once outside the
+loop is the obvious next thing to do.
+
+**Peak RSS was 27.1 GB, not 20 GB, and it is not Splink.** It is reached in
+`score_eval.evaluate`, gathering the accepted-pair edge arrays over 41 million
+pairs. That is 93% of this machine and it is the new high-water mark for the
+whole pipeline.
+
+### The controls, and the route-by-route prediction
+
+Every priced figure reproduces section 104 to the pair — person 94,743,605 of
+150,000,000 and organisation 1,832,607 of 5,000,000. **The oversized key sets
+were measured once**: all eight person controls came back "(already measured)"
+in under a second where the budget had spent about 50 seconds on each.
+
+| route | priced, after the control | before the control | pairs kept | seconds |
+|---|---|---|---|---|
+| pb1 | 20,130,171 | 198,530,709 | 11,760,742 | 92.1 |
+| pb2 | 16,755,794 | 114,611,766 | 3,251,892 | 21.4 |
+| pb3 | 13,563,011 | 351,486,369 | 9,448,408 | 53.6 |
+| pb4 | 16,907,827 | 127,149,799 | 10,424,656 | 52.5 |
+| pb5 | 11,624,404 | 527,628,584 | 5,448,066 | 89.6 |
+| pb6 | ≤15,762,398 | ≤582,535,879 | 8,878 | 82.8 |
+| **person** | **≤94,743,605** | **≤1,901,943,106** | **40,342,642** | **421.3** |
+| organisation, one pass | 1,832,607 | 157,854,369 | 649,509 | 21.4 |
+
+**Duplicate pairs across routes in `pairs.parquet`: 0.** Splink's own
+`AND NOT` exclusion survived being asked one rule at a time, at full scale.
+The organisation track took the one-pass path, as designed, because 1,832,607
+is under the 5,000,000 limit.
+
+`untrainedComparisons` is **0** on both tracks.
+
+### The numbers a researcher would ask for
+
+**Pairs by bucket.** 40,992,151 scored.
+
+| track | score bucket | after the vetoes |
+|---|---|---|
+| person accept | 14,993,817 | **6,390,630** |
+| person review | 13,737,743 | 4,516,638 |
+| person reject | 11,611,082 | 29,435,374 |
+| organisation accept | 561,162 | **446,894** |
+| organisation review | 48,489 | 4,183 |
+| organisation reject | 39,858 | 198,432 |
+
+**`pairsVetoedFromAccept`, per veto.**
+
+| track | veto | pairs hit | from accept |
+|---|---|---|---|
+| person | v1 | 17,924,433 | **7,648,900** (to reject) |
+| person | v2 | 9,667,587 | **954,287** (to review) |
+| organisation | ov1 | 193,410 | **113,702** |
+| organisation | ov4 | 849 | **566** |
+
+The vetoes are doing more than half the work on the person track: 27,592,020
+pairs are `decided_by: veto` against 12,750,622 `decided_by: score`. **v1 alone
+moves 7.6 million pairs out of accept** — more than the 6.4 million that
+survive there.
+
+**Clusters.** 8,460,758 clusters. By status: person 7,908,239 ok, 2,865
+weak_link, **17 too_large**; organisation 549,599 ok, 38 weak_link. 57,635
+person unit rows and 474 organisation ones are withheld. Person cluster sizes:
+6,026,297 of 1; 1,230,804 of 2; 577,631 of 3–5; 73,131 of 6–20; 3,204 of
+21–100; **54 over 100, holding 40,247 units**.
+
+**Entities: 8,515,947 proposed** from 11,799,425 units and 15,029,263 records —
+7,965,874 person and 550,073 organisation, all `new`, 0 id collisions, 469,749
+attribute ties.
+
+| records per entity | person entities | organisation entities |
+|---|---|---|
+| 1 | 5,354,336 | 384,570 |
+| 2 | 1,403,856 | 76,340 |
+| 3–5 | 949,868 | 59,305 |
+| 6–20 | 247,878 | 26,509 |
+| 21–100 | 9,898 | 3,343 |
+| **over 100** | **38** | **6** |
+
+### The learned weights say what the problem is
+
+Person track, match weight in bits (`log2(m/u)`):
+
+| comparison | level | weight |
+|---|---|---|
+| postcode_clean | exact full postcode | **+10.14** |
+| postcode_clean | exact sector | **+9.51** |
+| surname_clean | **exact match** | **+9.33** |
+| postcode_clean | **exact district** | **+9.26** |
+| surname_clean | Jaro-Winkler ≥ 0.92 | +7.85 |
+| forename_canon | exact match | +6.97 |
+| dob_year_clean | **equal** | **+2.56** |
+| dob_month_clean | **exact** | **+1.00** |
+| nationality_norm | exact | +0.34 |
+
+**A shared postcode district is worth as much as a shared surname, and nine
+times a shared birth month.** That is section 5's warning and deduping's D7,
+now measured on fifteen million records rather than a sample. The organisation
+track is healthy by comparison: an exact `name_core` is +11.59 and an exact
+registration number +11.34, both far above anything a coincidence supplies.
+
+### Would I let a researcher use the person track's accepted merges? No.
+
+**Nineteen of the twenty largest proposed person entities are wrong**, and they
+are wrong in the same way.
+
+| records | units | distinct names | distinct postcodes | what it is |
+|---|---|---|---|---|
+| 217 | 195 | **165** | 171 | every "Mateusz <different surname>" |
+| 214 | 180 | **143** | 157 | the same, another Mateusz block |
+| 202 | 179 | 5 | 6 | *Joaquim Almeida — plausible* |
+| 198 | 173 | **148** | 161 | Dariusz / Mariusz, different surnames |
+| 190 | 169 | **129** | 157 | every "Catalin <different surname>" |
+| 190 | 169 | **118** | 99 | "Jing Yao", "Xinguang Wang", "Bing Wang", "Bin Cao" |
+| 184 | 153 | **101** | 124 | Mohammed/Muhammad/Hamza, 33 birth years |
+| 173 | 124 | **51** | 112 | Gagandeep / Amandeep / Jasdeep Singh |
+
+Only one of the twenty — Joaquim Almeida, 5 names, 6 postcodes, one birth year
+— looks like one person. **The failure is systematic and it falls on non-British
+naming conventions**: Polish, Romanian, Chinese, Pakistani and Sikh records,
+where a very common forename plus a shared birth month and year is enough.
+
+The sampled accepted pairs show it happening one pair at a time. Sampled across
+the accept range, not the top of it:
+
+- p=0.9726 — Mr Ciprian Tofan (PL1 2PP) and Mr Ciprian Cornel Turiac (ME16 0RE).
+  **Different surnames.** Same forename, same birth month and year, both
+  Romanian. Route pb5.
+- p=0.9909 — Mr Hemanshu Udani and Mr Hemanshu Malaviya. **Different surnames.**
+- p=0.9980 — Binbin Ma and Binbin Cai. **Different surnames.**
+- p=0.9500 — Mrs Kirsten Cherie Walker (SG11, New Zealander, April 1974) and
+  Kirsten Walker (RH20, British, February 1973). Different birth month,
+  different year, different nationality, 90 miles apart.
+- p=0.9636 — Mr Kenneth John Cowan (Suffolk, March 1971) and Mr Kenneth Gordon
+  Cowan (Ayrshire, November 1972). Different middle name, different birth date,
+  400 miles apart.
+- p=0.9967 — Mr Jason James Wignall (Devon, October 1986) and Mr Jason David
+  Wignall (Lancashire, June 1986).
+
+The top of the accept range is fine — same full name, same birth date,
+different postcode, which is a person who moved. **It is the bottom two-thirds
+of accept that is not safe**, and it is not a handful of cases: 6.4 million
+pairs are in accept and the 0.95 line is where those examples sit.
+
+The organisation track is the opposite. Its accepted pairs agree on the
+registration number and the postcode, and its largest entities are corporate
+families (Legal & General, Aviva, Places for People, Punch Taverns) that are
+over-merged at worst. One is plainly wrong and worth naming: **"Carlyle Bus &
+Coach Limited" of West Bromwich is in the same entity as "The Carlyle Group,
+Inc."** — a bus company and a US private equity firm, joined on the first name
+token.
+
+**The smallest fix.** Not the thresholds — moving the accept line up would lose
+the good merges with the bad. Three changes, in the order I would make them:
+
+1. **A veto that refuses a person pair whose surnames disagree unless something
+   else identifies them.** pb5 exists to catch a surname change at marriage,
+   and every bad example above comes through it. A veto in the shape of the
+   existing v1/v2 — "surnames differ and neither postcode nor middle name
+   agrees" — would take out the Ciprian, Hemanshu and Binbin cases without
+   touching a genuine name change, which almost always keeps the address.
+2. **Stop the postcode district out-weighing the surname.** `cl.PostcodeComparison`
+   learns a district match at +9.26 because a district is small compared to the
+   country, but the hot-key control now *blocks* on the district on five of the
+   six person routes, so the pairs the model sees are not the pairs its `u` was
+   sampled from. Either sample `u` under the same blocking, or collapse the
+   district level into "area" so the model cannot spend nine bits on it.
+3. **Cap a proposed person entity's distinct names.** An entity built from 165
+   different names is not a person under any reading, and the `too_large`
+   cluster guard did not catch it — it fires on 17 clusters and these are all
+   under its limit. A guard on *distinct names per entity*, not size, would
+   have withheld every one of the twenty.
+
+Until at least the first of those is in, the person track's accepted merges are
+research-grade only above about p=0.999, and the review queue — 4.5 million
+pairs — is not a queue anybody can work through.
+
+### Item 6: the readers, and getting the run onto a server
+
+`time_readers_pscrun.py` against the finished folder. Two rounds: the server's
+6 GB DuckDB budget, and 14 GB.
+
+| call | at 6 GB | at 14 GB |
+|---|---|---|
+| records list, page 1 | 0.7 s | 1.0 s |
+| records list, person, deep page | 24.7 s | 54.8 s |
+| exact groups list, page 1 | 3.9 s | 5.1 s |
+| pairs list by score | 146.7 s | 23.4 s |
+| pairs list by priority | 144.1 s | 14.5 s |
+| pairs list, review bucket | 29.4 s | 8.3 s |
+| pairs list, deep page | **out of memory** | 16.7 s |
+| clusters queue, page 1 | 94.6 s | 10.5 s |
+| entities list, page 1 | **out of memory** | 22.1 s |
+| entities list by size | **out of memory** | 16.4 s |
+| one pair detail | 6.8 s | 5.7 s |
+| one cluster detail | 10.2 s | 10.9 s |
+| one entity detail | — | 4.5 s |
+
+**Not one reader is under two seconds at full scale, and three fail outright
+inside the server's budget.** One thing was fixed here and the rest is named
+rather than rushed:
+
+- **Fixed: `duckdb_conn.reader_connect`.** Every reader now opens with
+  `preserve_insertion_order=false` and the run's own temp directory.
+  `pairs_reader` and `exact_groups_reader` were opening a bare connection whose
+  spill went to the *system* temp directory, outside `DUCKDB_MAX_TEMP` and
+  outside anything a run owns. Releasing insertion order turned the clusters
+  queue from an out-of-memory error into an answer at 6 GB. A reader ends every
+  query in an explicit `ORDER BY ... LIMIT`, so it never depended on the order
+  rows arrived in.
+- **Not fixed, and this is the real problem: every list reader computes a
+  whole-run aggregate on every request.** `pairs_reader.get_pairs` runs
+  seventeen `count(*) FILTER` aggregates and a filtered total over a query that
+  joins 41 million pairs to 11.8 million units *twice*, then sorts the result to
+  take fifty rows — three passes over the join per page.
+  `entities_reader.get_entities` and `clusters_reader.get_clusters` each build a
+  temp table by joining two multi-gigabyte parquets and grouping to one row per
+  entity or cluster, with `list()` aggregates that cannot spill. That is what
+  runs out of memory at 6 GB.
+  **The fix is a per-run index file** — the entity and cluster summaries written
+  once at the end of stages 5 and 4, the way `scored_units.parquet` is already
+  written — plus taking the pairs chip counts off `pairs.parquet` alone, which
+  already carries `bucket`, `decided_by`, `track`, `vetoed_by` and
+  `import_disagrees`. None of the three needs the unit join.
+- **Also latent: `pairs_reader.model_explanation` reads `units.parquet` whole**
+  — 1.8 GB — and `psc_features._company_sets` then builds a company-to-units map
+  over all 11.8 million of them, for one pair. It returns early here because no
+  stage-3b model is active, so it never fired on this run. It would need the
+  same treatment as the corpus statistics before the model screen could be
+  opened at this scale.
+
+**Adopting the run.** `scripts/adopt_run.py` registered the folder and every
+page then opened through the API with a `TestClient`, all 200s, against the
+scratch data directory `/home/tomwright/psc_scratch/full_venv/fulldata` —
+nothing under `backend/data` was touched. Re-running it with the same arguments
+is a no-op, as intended.
+
+**A defect it found.** `adopt_run` defaulted its database to `<data>/app.db`,
+and its own usage example said the same. **`app.main` opens
+`<DATA_DIR>/linkage.db`.** Following the script's example registered the run
+into a file the web tool never reads, and the only symptom was an empty runs
+list. The default is now `linkage.db` and a test asserts it equals
+`Path(app.main.DB_PATH).name`.
+
+### What the owner copies to the server, and the commands
+
+The run folder is 12 GB. Everything in it is needed except `records_raw.parquet`
+(stage 0's untouched input, 1.0 GB, which nothing reads after stage 1) — so
+**11 GB to copy**:
+
+| file | size | what reads it |
+|---|---|---|
+| `pairs.parquet` | 2,553 MB | the pairs list and detail, the histogram |
+| `records.parquet` | 1,883 MB | the records list, the entity and group details |
+| `units.parquet` | 1,801 MB | every screen that shows a unit |
+| `entities.parquet` | 1,722 MB | the entities list and detail, the export |
+| `clusters.parquet` | 1,128 MB | the clusters queue and detail |
+| `unit_members.parquet` | 848 MB | the cluster and entity details |
+| `events.parquet` | 546 MB | the evidence panel |
+| `scored_units.parquet` | 367 MB | which units a recluster has already seen |
+| `exact_groups.parquet` | 247 MB | the exact-groups screen |
+| `splink_model_person.json` | 7.0 MB | the gamma labels on the pair detail |
+| `splink_model_organisation.json`, `splink_trained_*.json` | 0.1 MB | the same, and the model-reuse fingerprint |
+| `blocking_report.json`, `score_eval.json`, `exact_eval.json`, `entity_report.json`, `contradictions.json` | < 1 MB | the run summary screens |
+| `config/` | 0.1 MB | the run's ruleset and linkage settings snapshot |
+| `diagnostics/` | 0.1 MB | Splink's charts |
+
+```bash
+# 1. copy the folder, leaving the raw input behind
+rsync -av --progress --exclude records_raw.parquet --exclude duckdb_tmp \
+  /home/tomwright/psc_scratch/full_venv/fulldata/runs/psc_full/ \
+  user@server:/srv/dedupe/data/runs/psc_full/
+
+# 2. register it (the default database is now the right one)
+ssh user@server
+cd /srv/dedupe/backend
+.venv/bin/python scripts/adopt_run.py /srv/dedupe/data/runs/psc_full \
+  --label "PSC full snapshot 2026-09-18" \
+  --input-filename persons-with-significant-control-snapshot-2026-09-18.zip \
+  --counts /srv/dedupe/data/runs/psc_full/adopt_counts.json
+```
+
+`adopt_counts.json` is the union of the five stages' counts;
+`/home/tomwright/psc_scratch/full_venv/fulldata/adopt_counts.json` is the one
+this run produced and can be copied with the folder.
+
+**Do not put this in front of a researcher yet.** The server has a 6 GB DuckDB
+budget; at that budget the entities list and two of the pairs views run out of
+memory on this run, and nothing else is under twenty seconds. The reader index
+files come first.

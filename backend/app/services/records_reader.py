@@ -156,7 +156,7 @@ def get_records(
     limit = max(1, min(int(limit), MAX_LIMIT))
     offset = max(0, int(offset))
 
-    con = duckdb_conn.connect()
+    con = duckdb_conn.reader_connect(run_dir)
     try:
         columns = _column_names(con, path)
 

@@ -49,7 +49,8 @@ def max_temp() -> str:
     return os.environ.get(MAX_TEMP_ENV, DEFAULT_MAX_TEMP)
 
 
-def configure(con, temp_dir: str | os.PathLike | None = None, *, threads: int | None = None):
+def configure(con, temp_dir: str | os.PathLike | None = None, *,
+              threads: int | None = None, preserve_order: bool = True):
     """Put this project's limits on an existing connection, and return it.
 
     Splink owns its own connection, so the settings have to be applied to a
@@ -57,6 +58,16 @@ def configure(con, temp_dir: str | os.PathLike | None = None, *, threads: int | 
 
     *temp_dir* is created if it does not exist. Without it DuckDB spills to the
     system temp directory, where nothing associates the files with a run.
+
+    *preserve_order* false lets DuckDB reorder rows inside a query. It is the
+    first thing DuckDB's own out-of-memory message tells you to try, and it is
+    what a reader wants: a reader ends every query in an explicit ``ORDER BY``
+    and a ``LIMIT``, so the order it gets back is the order it asked for and
+    nothing depends on the order rows happened to arrive in. Leaving it on made
+    a 41-million-pair sort materialise the whole sorted result before taking
+    fifty rows of it, which at PSC scale is minutes, or an out-of-memory error
+    inside a 6 GB budget. It stays on everywhere else, because a pipeline stage
+    that writes a parquet does depend on the order it wrote.
     """
     con.execute(f"SET memory_limit='{memory_limit()}'")
     if temp_dir is not None:
@@ -67,14 +78,28 @@ def configure(con, temp_dir: str | os.PathLike | None = None, *, threads: int | 
     con.execute(f"SET max_temp_directory_size='{max_temp()}'")
     if threads is not None:
         con.execute(f"SET threads={int(threads)}")
+    if not preserve_order:
+        con.execute("SET preserve_insertion_order=false")
     return con
 
 
-def connect(temp_dir: str | os.PathLike | None = None, *, threads: int | None = None):
+def connect(temp_dir: str | os.PathLike | None = None, *,
+            threads: int | None = None, preserve_order: bool = True):
     """An in-memory DuckDB connection with the limits already on it."""
     import duckdb
 
-    return configure(duckdb.connect(), temp_dir, threads=threads)
+    return configure(duckdb.connect(), temp_dir,
+                     threads=threads, preserve_order=preserve_order)
+
+
+def reader_connect(run_dir: str | os.PathLike):
+    """The connection a reader should use: the run's spill, and free to reorder.
+
+    Every reader ends its queries in an explicit ``ORDER BY ... LIMIT``, so it
+    never depends on insertion order, and it should spill inside the run folder
+    like everything else rather than into the system temp directory.
+    """
+    return connect(Path(run_dir) / "duckdb_tmp", preserve_order=False)
 
 
 def settings_of(con) -> dict:

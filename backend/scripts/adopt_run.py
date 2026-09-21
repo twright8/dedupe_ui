@@ -12,7 +12,7 @@ output, it writes the ``runs`` row a completed run would have had, and the
 nothing: the folder must already be under the instance's ``runs`` directory.
 
     python scripts/adopt_run.py /srv/dedupe/data/runs/psc_full \
-        --db /srv/dedupe/data/app.db --counts counts.json \
+        --db /srv/dedupe/data/linkage.db --counts counts.json \
         --label "PSC full snapshot 2026-09-18"
 
 **It never overwrites.** A run id the database already holds is refused, unless
@@ -38,6 +38,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.db import init_db, query_db, write_db  # noqa: E402
 from app.services.audit_logger import log_event  # noqa: E402
+
+#: The database file `app.main` opens, as `<DATA_DIR>/linkage.db`. Adopting
+#: into any other name registers the run where nothing will look for it.
+DB_FILENAME = "linkage.db"
 
 #: Without these a run folder is not a finished run and there is nothing to show.
 REQUIRED = ("records.parquet", "units.parquet", "pairs.parquet",
@@ -322,7 +326,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("run_dir", help="the finished run folder, under <data>/runs/")
     parser.add_argument("--db", help="the instance's SQLite file "
-                                     "(default: <data>/app.db beside the folder)")
+                                     "(default: <data>/linkage.db beside the "
+                                     "folder, which is what the app opens)")
     parser.add_argument("--run-id", help="the id to register it under "
                                          "(default: the folder name)")
     parser.add_argument("--label", help="what the runs list should call it")
@@ -333,7 +338,10 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     run_dir = Path(args.run_dir).resolve()
-    db_path = args.db or str(run_dir.parent.parent / "app.db")
+    # `app.main` opens `<DATA_DIR>/linkage.db`. A default of anything else
+    # writes the run into a file the web tool never reads, and the only
+    # symptom is an empty runs list.
+    db_path = args.db or str(run_dir.parent.parent / DB_FILENAME)
     counts = None
     if args.counts:
         counts = json.loads(Path(args.counts).read_text(encoding="utf-8"))
