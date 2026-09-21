@@ -10,6 +10,7 @@ readers can find the run afterwards.
 import json
 import os
 import sys
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -56,7 +57,7 @@ def run_folder(tmp_path):
 
 @pytest.fixture
 def db_path(tmp_path):
-    return str(tmp_path / "data" / "app.db")
+    return str(tmp_path / "data" / "linkage.db")
 
 
 def test_adopting_a_folder_writes_a_complete_run(run_folder, db_path):
@@ -148,7 +149,7 @@ def test_the_command_line_finds_the_database_beside_the_runs_directory(run_folde
                                                                       capsys):
     assert adopt_run.main([str(run_folder)]) == 0
     assert "registered" in capsys.readouterr().out
-    expected = run_folder.parent.parent / "app.db"
+    expected = run_folder.parent.parent / "linkage.db"
     assert query_db(str(expected), "SELECT id FROM runs")[0]["id"] == "psc_full"
 
 
@@ -166,7 +167,7 @@ def test_an_adopted_run_is_visible_to_the_runs_api(run_folder, monkeypatch):
     import app.main as main_mod
 
     data_dir = run_folder.parent.parent
-    db_path = str(data_dir / "app.db")
+    db_path = str(data_dir / "linkage.db")
     adopt_run.adopt(run_folder, db_path, label="PSC full")
     monkeypatch.setattr(main_mod, "DB_PATH", db_path)
     monkeypatch.setattr(main_mod, "DATA_DIR", data_dir)
@@ -180,3 +181,21 @@ def test_an_adopted_run_is_visible_to_the_runs_api(run_folder, monkeypatch):
     assert response.status_code == 200
     ids = [r["id"] for r in response.json()]
     assert "psc_full" in ids
+
+
+def test_the_default_database_is_the_one_the_app_opens(run_folder):
+    """`adopt_run` with no --db must write where `app.main` will read.
+
+    The application opens ``<DATA_DIR>/linkage.db``. A default of anything else
+    registers the run into a file nothing looks at, and the only symptom is an
+    empty runs list — which is exactly what the full PSC run hit.
+    """
+    from app import main as app_main
+
+    assert adopt_run.DB_FILENAME == Path(app_main.DB_PATH).name
+
+    adopt_run.main([str(run_folder)])
+    expected = run_folder.parent.parent / adopt_run.DB_FILENAME
+    assert expected.is_file()
+    rows = query_db(str(expected), "SELECT * FROM runs")
+    assert [row["id"] for row in rows] == ["psc_full"]

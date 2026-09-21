@@ -101,7 +101,7 @@ def _open(run_dir: str):
         raise ClustersNotFound(str(path))
     # The run's own temp directory, so anything DuckDB spills belongs to a run
     # and is bounded by DUCKDB_MAX_TEMP (`docs/PSC_HANDOVER.md` section 11).
-    return duckdb_conn.connect(Path(run_dir) / "duckdb_tmp"), path, units
+    return duckdb_conn.reader_connect(run_dir), path, units
 
 
 def _priority_columns(unit_columns: list[str]) -> list[str]:
