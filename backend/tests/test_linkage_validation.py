@@ -194,3 +194,23 @@ def test_a_saved_settings_document_round_trips_through_the_api(client, db_path):
     current = client.get("/api/config/current").json()
     assert json.dumps(current["linkage_settings"], sort_keys=True) == \
         json.dumps(default_linkage_settings(), sort_keys=True)
+
+
+# ---------------------------------------------------------------------------
+# The two raw validation messages now come from the vocabulary
+# ---------------------------------------------------------------------------
+
+
+def test_a_bad_on_oversize_says_what_the_setting_is_for():
+    from app import vocabulary
+    from app.rules import linkage
+
+    errors: list[dict] = []
+    linkage._check_block_control(
+        {"sql": "l.a = r.a", "max_block_size": 10, "on_oversize": "explode"},
+        "l.a = r.a", "rule", "person", {"a"}, errors)
+    messages = [e["message"] for e in errors
+                if e["path"] == "rule.on_oversize"]
+    assert messages == [vocabulary.choice_error("on_oversize", "explode",
+                                                linkage.ON_OVERSIZE)]
+    assert "what happens when a blocking rule makes too many pairs" in messages[0]

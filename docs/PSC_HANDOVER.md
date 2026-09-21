@@ -2936,3 +2936,367 @@ this run produced and can be copied with the folder.
 budget; at that budget the entities list and two of the pairs views run out of
 memory on this run, and nothing else is under twenty seconds. The reader index
 files come first.
+
+## 108. The quality fix — vetoes, the name gate, and the readers
+
+Everything here is the **project interpreter**,
+`/home/tomwright/PycharmProjects/dedupe_ui/backend/.venv/bin/python` (pandas
+3.0.6, pyarrow 25.0.1, duckdb 1.5.5), against the code tree
+`/home/tomwright/PycharmProjects/dedupe_ui/backend` on `main`.
+
+Section 107 ended with "Would I let a researcher use the person track's accepted
+merges? No." This section is the answer to that, measured on the same run. No
+rescoring was needed: the vetoes and the gate are re-applied over the finished
+run's own `pairs.parquet`, and stages 4 and 5 are run again on top. The baseline
+stays where it was, in
+`/home/tomwright/psc_scratch/full_venv/fulldata/runs/psc_full`; the re-applied
+run is `/home/tomwright/psc_scratch/tw_quality/fulldata/runs/psc_veto`.
+
+### 1. Four new veto rules on the person track, and one new operator
+
+`not_equal_or_missing` is the one pair operator a null makes TRUE. `differs`
+asks "do these two disagree?", which a missing value cannot answer. The new one
+asks "does this column agree?", and a column nobody filed does not agree. It is
+what a veto rule needs to say "and nothing else identifies them". Because it is
+true for most pairs on its own, it is only ever written beside a condition that
+is not. **Key `not_equal_or_missing`, label "Not the same, or missing".**
+
+| id | in words | action |
+|---|---|---|
+| v3 | Two clearly different surnames (Jaro-Winkler under 0.85 on the cleaned surname), and neither the full postcode nor the middle names agree | reject |
+| v4 | Two clearly different surnames, whatever else agrees | review |
+| v5 | Two clearly different middle names, two different birth months, and no shared full postcode | reject |
+| v6 | A different birth year AND a different birth month — two dates, not one date filed twice | reject |
+
+**0.85 was read off the run.** Among accepted pairs whose surnames differ, the
+share that also agree on a middle name is 29.1% at 0.95 and over, 20.1% from
+0.90 to 0.95 and 18.6% from 0.85 to 0.90, then falls to 11.3% from 0.80 to 0.85
+and 4.6% from 0.70 to 0.80 — against 42.8% for an accepted pair whose surnames
+match. Below 0.85 the surname difference stops behaving like a spelling variant.
+
+v4 is the rule that keeps a marriage name-change reachable. It caps every
+clearly-different-surname pair at review, so the ones v3 spares — the ones the
+postcode or the middle name corroborates — go to a reviewer instead of being
+merged in silence.
+
+### 2. Pairs by bucket, before and after
+
+| track | bucket | before | after |
+|---|---|---|---|
+| person | accept | 6,390,630 | **5,317,154** |
+| person | review | 4,516,638 | **2,605,985** |
+| person | reject | 29,435,374 | **32,419,503** |
+| organisation | accept | 446,894 | 446,894 |
+| organisation | review | 4,183 | 4,183 |
+| organisation | reject | 198,432 | 198,432 |
+
+`decided_by`: score 13,205,872 → 7,073,810, veto 27,786,279 → 33,918,341.
+The organisation track is untouched to the pair, as intended — nothing was added
+to it.
+
+**Per rule.** `vetoed_by` names the first rule carrying the strongest action, so
+these are pairs each rule is *credited* with, not pairs it hits; a pair v2 and
+v3 both hit reads `v3`. `pairsVetoedFromAccept` is the pairs the score alone
+would have accepted.
+
+| track | veto | pairs credited | pairsVetoedFromAccept | to reject | to review |
+|---|---|---|---|---|---|
+| person | v1 | 17,924,433 | 7,648,900 | 17,924,433 | 0 |
+| person | v2 | 8,964,602 | 618,302 | 7,225,392 | 1,739,210 |
+| person | **v3** | 5,528,993 | **639,342** | 5,528,993 | 0 |
+| person | **v4** | 136,194 | **70,136** | 24,267 | 111,927 |
+| person | **v5** | 427,299 | **246,107** | 427,299 | 0 |
+| person | **v6** | 742,561 | **453,876** | 742,561 | 0 |
+| organisation | ov1 | 193,410 | 113,702 | 193,410 | 0 |
+| organisation | ov4 | 849 | 566 | 849 | 0 |
+
+### 3. Looking for harm, and not finding much
+
+1,073,476 person pairs left accept. Of those:
+
+- **0 had a matching surname AND a matching full date of birth.** None of the
+  four rules can fire on such a pair, and the measurement agrees.
+- 362,067 had a matching surname — those are v5 and v6, where the birth date
+  disagrees.
+- 57,710 shared a full postcode.
+- 43,593 had the marriage shape: same forename, same full date of birth, same
+  full postcode, different surname.
+
+**Where the marriage shape lands now:** 47,181 in review (all v4), 26,217 still
+in accept because the surnames are near variants (0.85 or better), and **none in
+reject**. That is the rule working as written.
+
+### 4. A cluster gate on different names: `mixed_names`
+
+The match keys have `max_distinct` and the cluster gate had nothing like it. The
+new limit is `max_distinct_values` in `linkage_settings.json`,
+`{track: [{"column": ..., "count": ...}, ...]}`, and a cluster trips it when ANY
+column the track names shows more distinct values than that column's own limit.
+A track with no entry is not gated this way; donations names none.
+
+PSC person names three, and each was added because the previous one was not
+enough:
+
+| column | count | why |
+|---|---|---|
+| `surname_clean` | 3 | A birth name, a married name, one inconsistently filed hyphenated variant. On the baseline run, a person cluster of two units averages 1.11 distinct surnames, one of 6 to 20 units 2.33, one of over 100 units 104 |
+| `forename_canon` | 3 | With the surname gated, the twelve largest remaining wrong person entities were one surname and many forenames — 206 records under 55 names, every one of them Singh, and the same for Khan, Mia and Ali. A chain that cannot run away on the surname runs away on the forename |
+| `dob_year_clean` | 2 | With both names gated, the largest wrong one left was 111 records under 57 names, all "Mohammed &lt;something&gt; Ali", over 29 birth years. A person has one birth year and v1 leaves a year of slack, so two adjacent years is honest and three is a chain. 1,713,278 person clusters show one birth year and 36,156 show two, against 2,037 over two — a clean break |
+
+**Key `mixed_names`, label "Mixed names", definition "This cluster holds more
+different values of a name or a birth year than one person could have, so it is
+really several people."** It is withheld exactly like the other statuses —
+rebuilt from the trusted edges alone — and it sits just under `too_large` in the
+status order, because it asks the same question of a cluster small enough to
+pass the size cap.
+
+### 5. Clusters and entities, before and after
+
+| | before | after |
+|---|---|---|
+| clusters | 8,460,758 | 9,041,366 |
+| `ok` | 8,457,838 | 9,036,652 |
+| `too_large` | 17 | **1** |
+| `mixed_names` | — | **3,765** |
+| `weak_link` | 2,903 | 948 |
+| clusters withheld | 2,920 | 4,714 |
+| held groups waiting | 3,842 | 3,842 |
+| review queue | 6,762 | 8,556 |
+| **entities proposed** | 8,515,947 | **9,074,905** |
+| attribute ties | 469,749 | 423,456 |
+| id collisions | 0 | 0 |
+
+Stage 4 ran in 193.0 s at 11.3 GB; stage 5 in 552.2 s at 18.3 GB.
+
+Records per entity:
+
+| records | person before | person after | organisation before | organisation after |
+|---|---|---|---|---|
+| 1 | 5,354,336 | 5,968,713 | 384,570 | 384,570 |
+| 2 | 1,403,856 | 1,446,628 | 76,340 | 76,340 |
+| 3–5 | 949,868 | 899,339 | 59,305 | 59,305 |
+| 6–20 | 247,878 | 203,082 | 26,509 | 26,509 |
+| 21–100 | 9,898 | 7,070 | 3,343 | 3,343 |
+| **over 100** | **38** | **0** | 6 | 6 |
+
+### 6. The twenty largest person entities, again
+
+Nineteen of the twenty now look like one person. The one that does not is
+**"Mohammed Imran" / "Muhammad Imran"** — 75 records, 5 names, one surname, two
+birth years, and **56 different postcodes**. A single common name with two birth
+years passes every gate there is.
+
+The rest are what a researcher would hope to see: Jaime Coronado Llanos (82
+records, 5 names, 9 postcodes, one birth year), Daniel O'Connell (72, 3 names, 2
+postcodes), Bertrand Perrodo, Rivka Dreyfuss, Mathew Causon, Cay Arff, Francois
+Perrodo, Michail Logothetis, Michael Grimes (one name, two postcodes), Aslam
+Dahya, Tyler Golding-Reddock, Jonathan Round, Diane Wilson, Ethan Sandifer,
+Rosalind Mason, Matthew Harrison, Andrew De-Long, Robert Keane, Irvine Jay.
+Every one is a spelling or a title varying around a single filed identity.
+
+**Forty accepted pairs sampled across the score range** (not the top of it) are
+now all same-surname, and nearly all same birth month and year with a different
+address — a person who moved. Two are worth naming as the residual:
+
+- Mr Daniel Edmunds (RM3 0WL, May 1989) and Mr Daniel Phillip Edmunds (NP23 4GB,
+  October 1989), p = 0.978. Same surname, same year, different month, different
+  end of the country, and only one side filed a middle name, so v5 cannot see it
+  and v6 needs the year to differ too.
+- Dr Mohandeep Singh Arora (PE7 8PB) and Mr Mandeep Singh Arora (TW5 0UQ), both
+  September 1986, p = 0.9986. The forenames are 0.9 alike, so v2 does not fire.
+
+**Twenty review pairs** are siblings and spouses — Yohannes and Jeleesa Solomon,
+Deborah Jane and Joanne Lockhart, Heidi and Paul Meader, Mustafa and Zohair
+Poonawala — plus the surname-change candidates v4 sends there, such as Jaspal
+Singh Chumber against Jaspal Singh Sandhu. That is a queue a person can work.
+
+### Would I let a researcher use the person track's accepted merges now? Yes, with two things said plainly.
+
+The systematic failure is gone. It was a rule about surnames and a gate about
+names, not a threshold move, and it cost no pair that agrees on the surname and
+the full date of birth.
+
+**What remains, in the order I would take it:**
+
+1. **A common forename and surname with two birth years still merges.** The
+   "Mohammed Imran" entity is 75 records over 56 postcodes. The gate allows two
+   birth years because v1 allows one year of slack; tightening either would
+   start costing genuine off-by-one filings. The honest next step is a rule
+   about *how many addresses* one proposed person may hold — the same shape as
+   `max_distinct_values`, on `postcode_district`, and it wants measuring before
+   it is set.
+2. **Same surname, same birth year, different birth month, different address.**
+   v6 needs both to differ and v5 needs both middle names filed. A third rule in
+   that family would catch the Daniel Edmunds case; it was not written because
+   nothing in the sampled forty suggests it is common, and a month is only 1.00
+   bit of evidence.
+3. **The review queue is 2.6 million pairs.** Down from 4.5 million, and now
+   made of pairs a person can actually decide, but still not a queue anyone
+   works through end to end. It wants sorting by something better than the
+   score.
+
+### 7. Why a postcode district was worth as much as a surname — and it is not the `u`
+
+Section 107 guessed that the hot-key control blocking on the district had spoiled
+the `u`. **It had not.** `estimate_u_using_random_sampling` is called on the
+whole 11,205,785-unit person frame (`stage_3_score.py`, `U_SAMPLE_PAIRS = 5e6`,
+seed 42), before any blocking, and the control only ever rewrites blocking SQL.
+Measured directly on the run's own `units.parquet`, the true random-pair rate for
+a district match is **0.000543** against the **0.000575** the model learned — 5.9%
+out, and in the direction that *understates* the weight.
+
+A UK postcode district really is about as rare as a UK surname: 4,935 districts
+behave like 1,342 effective values, and 996,588 surnames behave like 2,211,
+because SMITH, KHAN, JONES, SINGH, PATEL and AHMED alone cover about 1.4 million
+person units.
+
+**The defect is the term-frequency asymmetry.** `pc1` (surname) had
+`term_frequency: true` and `pc6` (postcode) had `false`, so agreeing on SMITH is
+worth 5.53 bits after the adjustment while agreeing on E14 — as common as JONES —
+is worth a flat 9.26. `term_frequency` is now `true` on `pc6`.
+
+**It is a partial fix and the run has NOT been rescored with it.** Splink
+attaches a frequency table only to an exact-match level, and
+`cl.PostcodeComparison` builds its sector, district and area levels by regular
+expression, so the flat district weight stands. Proved on the 500,000-record
+sample, scored both ways with today's defaults: the learned m and u are identical
+to the digit on every level, the only difference in the model file is
+`tf_adjustment_column: postcode_clean` on the full-postcode level, and over
+401,746 person pairs the largest weight move is 5.31 bits, the mean 0.24, and
+**42 pairs change bucket**. Accept goes 19,134 → 19,131.
+
+Individualising the district needs a custom comparison built the way
+`custom.NumericDifferenceAtThresholds` was, with `tf_adjustment_column` set to a
+`postcode_district` column of the frame. That is a code change plus a full
+rescore, and it is the next thing to do to the person model.
+
+### 8. The overlays: 2,790 s to 1,072 s
+
+Each of the 82 batches used to rebuild a string index over all 11.8 million
+overlay units three times — once in `apply_overlays`, once in `_priority_totals`
+and once in `vetoes.SideValues`. The index does not depend on the batch.
+`vetoes.UnitLookup` now builds it once per run and every path that lays the
+overlays down takes it: `overlay_predictions`, `rewrite_pairs`,
+`_score_pairs_file` and the forced-pairs append.
+
+**Measured on the full run: 2,790.3 s → 1,071.6 s**, and the new time is for
+strictly more work — six person veto rules instead of two, two of them
+Jaro-Winkler over 40 million pairs. Reading the overlay projection off
+`units.parquet` is 1.5 s of that. Peak RSS 9.2 GB.
+
+Identity is pinned by tests rather than argued: a pairs file written with a
+prebuilt index and one written without hash to the same bytes, on both the
+overlay path and the re-bucket path, and a test counts the index builds and
+asserts there is one.
+
+### 9. The readers, at full scale, in the server's 6 GB
+
+Every list reader used to compute a whole-run aggregate on every request.
+`get_pairs` joined 41 million pairs to 11.8 million units twice and did it three
+times a page; the clusters and entities queues built temp tables with `list()`
+aggregates DuckDB cannot spill. Four stages now write the answer once:
+
+| file | written by | size on the full run | build time |
+|---|---|---|---|
+| `pairs_index.parquet` | stage 3, and every path that rewrites `pairs.parquet` | 2,464 MB | 33.2 s |
+| `clusters_index.parquet` | stage 4 | 442 MB | 11.9 s |
+| `entities_index.parquet` | stage 5 | 499 MB | 14.4 s |
+| `exact_groups_index.parquet` | stage 2 | 91 MB | 15.8 s |
+
+Plus `pairs_counts.json`, a few hundred bytes: the seventeen chips above the
+pairs list, which describe the whole run and ignore the filters. It records what
+it was computed from — the pairs file's size and time, the index's time, and a
+fingerprint of the active labels — so a stale one is ignored and rewritten. No
+other code has to remember to refresh it.
+
+**A group-by that returns a `list()` column cannot spill.** The entity index
+failed at a 9.3 GB memory limit on the first attempt, which is the same shape as
+section 104's 61-way join: the lists are built inside the hash table and the
+buffer manager cannot evict them. `app/services/index_chunks.py` splits the
+groups by a hash of their key, writes each piece, and concatenates them with a
+plain scan. Eight pieces; every index now builds inside the server's 6 GB.
+
+| call | section 107, 6 GB | now, 6 GB |
+|---|---|---|
+| records list, page 1 | 0.7 s | 1.1 s |
+| records list, person, deep page | 24.7 s | **1.3 s** |
+| exact groups list, page 1 | 3.9 s | **0.1 s** |
+| pairs list by score | 146.7 s | **1.2 s** |
+| pairs list by priority | 144.1 s | **1.1 s** |
+| pairs list, review bucket | 29.4 s | **1.2 s** |
+| pairs list, deep page (offset 200,000) | out of memory | **2.4 s** |
+| pairs list, sort=useful | — | **1.2 s** |
+| pairs histogram | — | **0.1 s** |
+| clusters queue, page 1 | 94.6 s | **1.5 s** |
+| entities list, page 1 | out of memory | **0.5 s** |
+| entities list by size | out of memory | **0.5 s** |
+| one pair detail | 6.8 s | **0.8 s** |
+| one cluster detail | 10.2 s | **0.9 s** |
+| one entity detail | — | **0.9 s** |
+
+**Everything is under two seconds except a pairs page 200,000 rows deep**, which
+is 2.4 s. That residual is DuckDB's top-N over 41 million rows with a 200,000
+offset and nothing else: offset 0 is 1.34 s, offset 1,000 is 1.25 s, offset
+20,000 is 1.30 s. It is not worth an index of its own.
+
+Three more things in the same work:
+
+- **`model_explanation` read `units.parquet` whole** — 1.8 GB — to explain one
+  pair. It now reads the two units by key, with `pd.read_parquet(..., filters=)`
+  rather than DuckDB, so the dtypes are the ones the feature builders expect.
+- **The records page sorted fifteen million rows of forty columns** to show
+  fifty. It now sorts two columns, takes fifty record ids and fetches those rows.
+- **`get_pairs` returned a SQL string where `total` belonged** whenever
+  `sort=useful` and the run had priority columns: a local named `total` shadowed
+  the row count. Fixed, and the priority sum is now called `priority_sum`.
+
+An index is used only when it is at least as new as the file it was made from and
+carries this profile's own columns. A stale one is ignored, not served, so a
+missed call site costs a slow page and never a wrong answer. Every reader keeps
+its old query as the fallback, so a run from an older pipeline — or one adopted
+from a folder — still opens.
+
+**The run folder is now 15 GB rather than 12**, and the indexes are 3.5 GB of
+that. `records_raw.parquet` (1.0 GB) still need not be copied.
+
+### 10. Donations is untouched
+
+The donations pipeline was run end to end twice: once against this tree and once
+against `git archive HEAD backend`, the code as it was before this work.
+`records`, `exact_groups`, `units`, `unit_members`, `clusters`, `entities` and
+`scored_units` are **byte-identical**, and so are `score_eval.json`,
+`exact_eval.json`, `entity_report.json` and `blocking_report.json`. Only the four
+index files are new.
+
+`pairs.parquet` differs in the last two digits of `match_probability` — and it
+differs the same way between two runs of the *unchanged* tree, so it is DuckDB's
+parallel summation and not this work. The largest difference is 6.3e-14 in the
+probability and 8.4e-13 in the weight, and **no pair changes bucket**.
+
+### 11. What is still open
+
+- **Stage 2 is still 18.1 GB at fifteen million records** and still three times
+  the server's budget. Nothing here changed it. The plan stands from section 106:
+  `apply_match_keys` is a whole-frame NumPy algorithm with a global union-find
+  and per-tier "eligible before" masks, so batching it means either rewriting all
+  585 lines of `app/rules/keys.py` in DuckDB or a two-pass design with a global
+  union-find, and `keys_eval.evaluate` and `exact_overlay` sit on the same frame.
+  **The paragraph of plan asked for:** do it in two passes over `records.parquet`
+  and never hold the whole projection. Pass one reads, per tier and per key, only
+  the columns that key's conditions and guards name, and writes `(record_id,
+  key_id, key_value)` triples to a parquet — one narrow file, streamed, with the
+  token lists and blocklists applied as it goes. Pass two groups those triples in
+  DuckDB to get each key's groups, feeds the edges to one union-find over integer
+  record codes exactly as stage 4 already does for units, and evaluates the
+  guards as group-level aggregates rather than per-row masks. The "eligible
+  before" mask becomes a join against the tiers already resolved, which is a
+  semi-join on a code column and not a boolean array over fifteen million rows.
+  `exact_overlay` then reads the group table rather than the frame. Expect stage 2
+  to drop from 18 GB to about 3, and expect the work to be a week rather than an
+  afternoon, because every match key's semantics have to be reproduced exactly and
+  `exact_eval.json` is the thing that proves it.
+- **The person model has not been rescored** with `term_frequency: true` on the
+  postcode, and the district level cannot be individualised without a custom
+  comparison.
+- **`price_rule` and the blocking budget** are unchanged, and so is everything in
+  sections 104 to 107 about how the run was produced.

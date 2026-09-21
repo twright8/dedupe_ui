@@ -43,7 +43,8 @@ says so: prefer changing the words on screen.
 | **earlier grouping** | The grouping the team made before this tool existed. The profile names it; donations calls it the earlier manual grouping, PSC has none. | imported labels, existing labels, earlier manual work, earlier labels, the manual work | `existing_entity_id`, label provenance `import`, `decided_by = import` | Review filters, run summary, Cluster review |
 | **earlier ID** (earlier IDs) | The ID a record already carried from the earlier grouping. | existing entity ID, DonorIDStandardTR, old ID | `existing_entity_id`, `existing_entity_ids`, `n_existing_ids` | Cluster review column, Review chips |
 | **cluster** (clusters) | A set of units joined by accepted pairs. A cluster is a proposal, not a decision. | group (on the cluster screen), component, candidate entity | `cluster_id`, `clusters.parquet` | Cluster review |
-| **cluster for review** (clusters for review) | A cluster the gate held back for a person, because it conflicts, is too large, may be a chain, or mixes earlier IDs. | held cluster, flagged cluster | `withheld`, cluster `status` | Cluster review |
+| **cluster for review** (clusters for review) | A cluster the gate held back for a person, because it conflicts, is too large, holds too many different names, may be a chain, or mixes earlier IDs. | held cluster, flagged cluster | `withheld`, cluster `status` | Cluster review |
+| **mixed names** | A cluster that holds more different values of a name or a birth year than one person could have, so it is really several people. | mixed-name cluster | cluster `status` = `mixed_names` | Cluster review |
 | **entity** (entities) | One real person or one real organisation, with one ID that stays the same from run to run. | proposed entity, merged group, final group | `entities.parquet`, registry `entities` | Entities tab, export |
 | **entity ID** (entity IDs) | The ID an entity carries. | EntityID, standard ID, final ID | `entity_id`, export `EntityID` | Entities tab, export |
 | **proposal** | What a run produces: one entity ID per record, not yet written anywhere durable. | draft entities, candidate IDs | `scope = proposal`, `entities.parquet` | Publish & export |
@@ -123,6 +124,8 @@ rank.
 | pair `decided_by` | `import` | 5 Earlier grouping |
 | pair `decided_by` | `human` | 6 Reviewer |
 | pair `vetoed_by` | a veto id | 4 Rule — the id names which one |
+| cluster `status` | `mixed_names` | **different question** — what the gate found |
+| veto condition `op` | `not_equal_or_missing` | **different question** — what the rule compares. "Not the same, or missing": the two values differ, or one side has no value at all. It is how a veto rule says that nothing here corroborates the pair |
 | cluster/edge `edge_source` | `score` | 3 Score |
 | cluster/edge `edge_source` | `import` | 5 Earlier grouping |
 | cluster/edge `edge_source` | `human` | 6 Reviewer |

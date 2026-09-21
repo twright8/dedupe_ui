@@ -201,6 +201,19 @@ def run_stage_2_exact(
         json.dumps(report, indent=2), encoding="utf-8"
     )
 
+    # The Exact groups screen's index (item 6). Its own SQL writes it, so the
+    # file and the query it replaces cannot drift apart.
+    t_index = time.time()
+    from app.services import exact_groups_reader
+
+    try:
+        exact_groups_reader.write_index(run_dir)
+        _step(f"  Exact-group index written in {time.time() - t_index:.1f}s",
+              progress_callback)
+    except Exception as error:  # noqa: BLE001 — an index is an optimisation
+        _step(f"  WARNING: the exact-group index was not written ({error})",
+              progress_callback)
+
     counts = counts_from(report)
     elapsed = time.time() - t_start
     precision = report["eval"]["pair_precision"]

@@ -98,7 +98,7 @@ match How it works.
 - `runs.py:1432` (legacy OCOD query description): `"exact, high, review, ambiguous, unmatched_ocod, unmatched_roe"` — a second, dead bucket vocabulary.
 - `runs.py:964`: `"Bulk marked {n} unlabelled {bucket} matches as {verdict} …"` → **verdict**.
 - `diag.score_column` / `histogram.score_column` = `"gbt_score"` → **model score**.
-- `clustersByStatus` keys (`too_large`, `weak_link`, `mixed_ids`) ship no display label.
+- `clustersByStatus` keys (`too_large`, `mixed_names`, `weak_link`, `mixed_ids`) ship no display label.
 
 ## 6. Export column names and files
 

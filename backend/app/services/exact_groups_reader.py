@@ -21,8 +21,14 @@ import duckdb
 from app import duckdb_conn, vocabulary
 
 from app.profiles import get_profile
+from app.services import index_chunks
 
 GROUPS_FILENAME = "exact_groups.parquet"
+#: One row per exact group, with what the screen shows. Written by stage 2
+#: (`write_index`). Without it every request joined `exact_groups.parquet` to
+#: `records.parquet` and grouped it — twice, once for the chips and once for
+#: the page.
+GROUP_INDEX_FILENAME = "exact_groups_index.parquet"
 RECORDS_FILENAME = "records.parquet"
 EVENTS_FILENAME = "events.parquet"
 EVAL_FILENAME = "exact_eval.json"
@@ -52,6 +58,58 @@ class InvalidQuery(ValueError):
 
 def groups_path(run_dir: str) -> Path:
     return Path(run_dir) / GROUPS_FILENAME
+
+
+def index_path(run_dir: str) -> Path:
+    return Path(run_dir) / GROUP_INDEX_FILENAME
+
+
+def _index_fits(run_dir: str, priority: list[str]) -> bool:
+    """The index is used only when it carries this profile's priority columns,
+    which are positional, and is at least as new as the file it was made from."""
+    index = index_path(run_dir)
+    groups = groups_path(run_dir)
+    if not index.is_file() or not groups.is_file():
+        return False
+    try:
+        if index.stat().st_mtime < groups.stat().st_mtime:
+            return False
+        import pyarrow.parquet as pq
+
+        held = set(pq.ParquetFile(index).schema_arrow.names)
+    except Exception:
+        return False
+    wanted = {"group_id", "track", "status", "guard", "key_ids", "size",
+              "n_labelled", "n_ids", "existing_ids", "names", "first_name",
+              "member_hit", "agreement"}
+    wanted |= {f"priority_{i}" for i in range(len(priority))}
+    return wanted <= held
+
+
+def write_index(run_dir) -> Path | None:
+    """Write the per-group index. Stage 2 calls this when it has finished.
+
+    The screen's own SQL builds it, so the file and the query it replaces
+    cannot drift apart. The search is left out — it is per request — so a
+    search still reads the two files and everything else reads this.
+    """
+    run_dir = Path(run_dir)
+    if not groups_path(run_dir).is_file() or not records_path(run_dir).is_file():
+        return None
+    out = index_path(run_dir)
+    con = duckdb_conn.reader_connect(run_dir)
+    try:
+        record_columns = _column_names(con, records_path(run_dir))
+        priority = _priority_columns(record_columns)
+        sql = _aggregate_sql(record_columns, priority, with_search=False)
+        index_chunks.write(
+            con, out, lambda where: f"SELECT * FROM ({sql}){where}",
+            key="group_id", work=run_dir / "duckdb_tmp", prefix="exact_groups_index",
+            params=[str(groups_path(run_dir)), str(records_path(run_dir))],
+        )
+    finally:
+        con.close()
+    return out
 
 
 def records_path(run_dir: str) -> Path:
@@ -263,14 +321,20 @@ def get_groups(
     try:
         record_columns = _column_names(con, records)
         priority = _priority_columns(record_columns)
-        base = _aggregate_sql(record_columns, priority, with_search=bool(q))
-
-        # DuckDB binds ? in the order they appear in the text: the two parquet
-        # paths in the first CTE, then the search inside the aggregate.
-        base_params: list = [str(groups), str(records)]
-        if q:
-            pattern = f"%{q.lower()}%"
-            base_params = [str(groups), str(records), pattern, pattern]
+        # A search asks a question about the members, so it still reads the two
+        # files. Everything else reads the index.
+        indexed = not q and _index_fits(run_dir, priority)
+        if indexed:
+            base = "SELECT * FROM read_parquet(?)"
+            base_params: list = [str(index_path(run_dir))]
+        else:
+            base = _aggregate_sql(record_columns, priority, with_search=bool(q))
+            # DuckDB binds ? in the order they appear in the text: the two
+            # parquet paths in the first CTE, then the search in the aggregate.
+            base_params = [str(groups), str(records)]
+            if q:
+                pattern = f"%{q.lower()}%"
+                base_params = [str(groups), str(records), pattern, pattern]
 
         where: list[str] = []
         params: list = []
@@ -295,7 +359,11 @@ def get_groups(
 
         # The counts describe the whole run, so they are taken from a base with
         # no search in it at all.
-        unfiltered = _aggregate_sql(record_columns, priority, with_search=False)
+        unfiltered, unfiltered_params = (
+            (base, base_params) if indexed
+            else (_aggregate_sql(record_columns, priority, with_search=False),
+                  [str(groups), str(records)])
+        )
         counts_row = con.execute(
             f"""SELECT count(*) FILTER (WHERE status = 'merged'),
                        count(*) FILTER (WHERE status = 'held'),
@@ -304,7 +372,7 @@ def get_groups(
                        count(*) FILTER (WHERE agreement = 'extends'),
                        count(*) FILTER (WHERE agreement = 'new')
                 FROM ({unfiltered})""",
-            [str(groups), str(records)],
+            unfiltered_params,
         ).fetchone()
         counts = dict(zip(
             ("merged", "held", "consistent", "conflict", "extends", "new"),

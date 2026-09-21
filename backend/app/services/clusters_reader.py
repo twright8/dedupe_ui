@@ -19,10 +19,15 @@ import duckdb
 from app import duckdb_conn, vocabulary
 
 from app.profiles import get_profile
-from app.services import exact_groups_reader
+from app.services import exact_groups_reader, index_chunks
 from app.services.records_reader import describe_columns
 
 CLUSTERS_FILENAME = "clusters.parquet"
+#: One row per real cluster, with everything the queue shows. Written by stage
+#: 4 (`write_index`), read here when it is there and rebuilt from
+#: `clusters.parquet` joined to `units.parquet` when it is not — so a run from
+#: an older pipeline, or one adopted from a folder, still opens.
+CLUSTER_INDEX_FILENAME = "clusters_index.parquet"
 UNITS_FILENAME = "units.parquet"
 UNIT_MEMBERS_FILENAME = "unit_members.parquet"
 RECORDS_FILENAME = "records.parquet"
@@ -60,6 +65,10 @@ class InvalidQuery(ValueError):
 
 def clusters_path(run_dir: str) -> Path:
     return Path(run_dir) / CLUSTERS_FILENAME
+
+
+def index_path(run_dir: str) -> Path:
+    return Path(run_dir) / CLUSTER_INDEX_FILENAME
 
 
 def _json_safe(value):
@@ -113,26 +122,83 @@ def _priority_columns(unit_columns: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _base_sql(run_dir: str, unit_columns: list[str], priority: list[str]) -> tuple[str, list]:
-    """One row per cluster and per held exact group, with the numbers a chip needs."""
+def _cluster_source_sql(run_dir: str, unit_columns: list[str],
+                        priority: list[str]) -> str:
+    """The join, projected to the columns the group-by reads and no others.
+
+    `clusters.parquet` joined to `units.parquet` is 11.8 million rows at PSC
+    scale, and this is the only pass over either file.
+    """
     name = "CAST(u.name AS VARCHAR)" if "name" in unit_columns else "CAST(NULL AS VARCHAR)"
-    label = "u.existing_entity_id" if "existing_entity_id" in unit_columns \
-        else "CAST(NULL AS VARCHAR)"
+    label = "CAST(u.existing_entity_id AS VARCHAR)" \
+        if "existing_entity_id" in unit_columns else "CAST(NULL AS VARCHAR)"
     priority_select = "".join(
-        f', sum(TRY_CAST(u."{column}" AS DOUBLE)) AS "priority_{index}"'
+        f', TRY_CAST(u."{column}" AS DOUBLE) AS "p_{index}"'
         for index, column in enumerate(priority)
     )
-    priority_zero = "".join(
-        f', CAST(NULL AS DOUBLE) AS "priority_{index}"' for index in range(len(priority))
+    return f"""
+        SELECT c.cluster_id AS cluster_id, c.track AS track, c.status AS status,
+               c.statuses AS statuses, c.withheld AS withheld,
+               c.proposed_entity_key AS proposed_entity_key,
+               CAST(COALESCE(u.unit_size, 1) AS BIGINT) AS unit_size,
+               {label} AS lbl, {name} AS nm
+               {priority_select}
+        FROM read_parquet(?) c
+        JOIN read_parquet(?) u ON CAST(u.unit_id AS VARCHAR) = CAST(c.unit_id AS VARCHAR)
+    """
+
+
+def _cluster_aggregate_sql(source: str, unit_columns: list[str],
+                           priority: list[str], where: str = "") -> str:
+    """One row per REAL cluster, over `_cluster_source_sql`'s columns."""
+    priority_select = "".join(
+        f', sum("p_{index}") AS "priority_{index}"' for index in range(len(priority))
     )
+    return f"""
+        SELECT cluster_id,
+               any_value(track) AS track,
+               any_value(status) AS status,
+               any_value(statuses) AS statuses,
+               any_value(withheld) AS withheld,
+               count(*) AS n_units,
+               CAST(sum(unit_size) AS BIGINT) AS n_records,
+               count(DISTINCT proposed_entity_key) AS n_parts,
+               list_slice(list_sort(list_distinct(list(lbl))), 1, {MAX_IDS})
+                   AS existing_entity_ids,
+               count(DISTINCT lbl) AS n_existing_ids,
+               list_slice(list_sort(list_distinct(list(nm))), 1, {MAX_NAMES}) AS names,
+               min(nm) AS first_name,
+               CAST(NULL AS VARCHAR) AS guard
+               {priority_select}
+        FROM {source}{where}
+        GROUP BY cluster_id
+    """
+
+
+def _cluster_sql(run_dir: str, unit_columns: list[str],
+                 priority: list[str]) -> tuple[str, list]:
+    """One row per REAL cluster — the half of the queue an index can hold.
+
+    This is the expensive half: `clusters.parquet` joined to `units.parquet`,
+    grouped to one row per cluster, with ``list()`` aggregates that DuckDB
+    cannot spill. At PSC scale that is 9 million clusters over two
+    multi-gigabyte files on every request, and it is what ran out of memory in
+    the server's 6 GB budget. Stage 4 runs this once and writes the answer.
+    """
+    source = _cluster_source_sql(run_dir, unit_columns, priority)
+    params = [str(clusters_path(run_dir)), str(Path(run_dir) / UNITS_FILENAME)]
+    return _cluster_aggregate_sql(f"({source})", unit_columns, priority), params
+
+
+def _held_sql(run_dir: str, priority: list[str]) -> tuple[str, list]:
+    """The other half: a held exact group, which is not a cluster and has no
+    units. There are 3,842 of them on the full PSC run against 8.5 million
+    clusters, so this stays a live query and is not indexed."""
     groups = Path(run_dir) / GROUPS_FILENAME
     records = Path(run_dir) / RECORDS_FILENAME
-    params = [str(clusters_path(run_dir)), str(Path(run_dir) / UNITS_FILENAME)]
-
-    held_sql = ""
-    if groups.is_file() and records.is_file():
-        held_sql = f"""
-        UNION ALL
+    if not (groups.is_file() and records.is_file()):
+        return "", []
+    sql = f"""
         SELECT g.group_id AS cluster_id,
                any_value(g.track) AS track,
                'held_key' AS status,
@@ -155,32 +221,73 @@ def _base_sql(run_dir: str, unit_columns: list[str], priority: list[str]) -> tup
         JOIN read_parquet(?) r ON CAST(r.record_id AS VARCHAR) = CAST(g.record_id AS VARCHAR)
         WHERE g.status = 'held'
         GROUP BY g.group_id
-        """
-        params.extend([str(groups), str(records)])
-
-    sql = f"""
-        SELECT c.cluster_id,
-               any_value(c.track) AS track,
-               any_value(c.status) AS status,
-               any_value(c.statuses) AS statuses,
-               any_value(c.withheld) AS withheld,
-               count(*) AS n_units,
-               CAST(sum(COALESCE(u.unit_size, 1)) AS BIGINT) AS n_records,
-               count(DISTINCT c.proposed_entity_key) AS n_parts,
-               list_slice(list_sort(list_distinct(list({label}))), 1, {MAX_IDS})
-                   AS existing_entity_ids,
-               count(DISTINCT {label}) AS n_existing_ids,
-               list_slice(list_sort(list_distinct(list({name}))), 1, {MAX_NAMES}) AS names,
-               min({name}) AS first_name,
-               CAST(NULL AS VARCHAR) AS guard
-               {priority_select if priority else ""}
-        FROM read_parquet(?) c
-        JOIN read_parquet(?) u ON CAST(u.unit_id AS VARCHAR) = CAST(c.unit_id AS VARCHAR)
-        GROUP BY c.cluster_id
-        {held_sql}
     """
-    if not priority:
-        sql = sql.replace(priority_zero, "")
+    return sql, [str(groups), str(records)]
+
+
+def write_index(run_dir, chunks: int | None = None) -> Path | None:
+    """Write the per-cluster index. Stage 4 calls this when it has finished.
+
+    The queue's own SQL builds it, so the file and the query it replaces cannot
+    drift apart: there is one definition of a queue row. It is written in
+    pieces, because a group-by whose output carries a `list()` column builds a
+    hash table DuckDB cannot spill — see `app/services/index_chunks.py`.
+    """
+    run_dir = Path(run_dir)
+    if not clusters_path(run_dir).is_file() or not (run_dir / UNITS_FILENAME).is_file():
+        return None
+    out = index_path(run_dir)
+    con = duckdb_conn.reader_connect(run_dir)
+    try:
+        unit_columns = _column_names(con, run_dir / UNITS_FILENAME)
+        priority = _priority_columns(unit_columns)
+        params = [str(clusters_path(run_dir)), str(Path(run_dir) / UNITS_FILENAME)]
+        con.execute(
+            "CREATE OR REPLACE TABLE cr_index_src AS "
+            + _cluster_source_sql(str(run_dir), unit_columns, priority), params)
+        index_chunks.write(
+            con, out,
+            lambda where: _cluster_aggregate_sql("cr_index_src", unit_columns,
+                                                 priority, where),
+            key="cluster_id", chunks=chunks, work=run_dir / "duckdb_tmp",
+            prefix="clusters_index",
+        )
+    finally:
+        con.close()
+    return out
+
+
+#: The columns a queue row is built from. An index that does not carry exactly
+#: these is ignored — a profile whose priority columns have changed since the
+#: stage ran would otherwise read the wrong sums under the right names.
+INDEX_COLUMNS = ("cluster_id", "track", "status", "statuses", "withheld",
+                 "n_units", "n_records", "n_parts", "existing_entity_ids",
+                 "n_existing_ids", "names", "first_name", "guard")
+
+
+def _index_fits(index: Path, priority: list[str]) -> bool:
+    if not index.is_file():
+        return False
+    try:
+        import pyarrow.parquet as pq
+
+        held = list(pq.ParquetFile(index).schema_arrow.names)
+    except Exception:
+        return False
+    return held == list(INDEX_COLUMNS) + [f"priority_{i}" for i in range(len(priority))]
+
+
+def _base_sql(run_dir: str, unit_columns: list[str], priority: list[str]) -> tuple[str, list]:
+    """One row per cluster and per held exact group, with the numbers a chip needs."""
+    index = index_path(run_dir)
+    if _index_fits(index, priority):
+        sql, params = "SELECT * FROM read_parquet(?)", [str(index)]
+    else:
+        sql, params = _cluster_sql(run_dir, unit_columns, priority)
+    held, held_params = _held_sql(run_dir, priority)
+    if held:
+        sql = f"{sql}\n        UNION ALL\n{held}"
+        params = params + held_params
     return sql, params
 
 
@@ -303,6 +410,7 @@ def get_clusters(
                       count(*) FILTER (WHERE status = 'ok'),
                       count(*) FILTER (WHERE status = 'conflict'),
                       count(*) FILTER (WHERE status = 'too_large'),
+                      count(*) FILTER (WHERE status = 'mixed_names'),
                       count(*) FILTER (WHERE status = 'weak_link'),
                       count(*) FILTER (WHERE status = 'mixed_ids'),
                       count(*) FILTER (WHERE status = 'held_key'),
@@ -312,7 +420,8 @@ def get_clusters(
         ).fetchone()
         counts = dict(zip(
             ("all", "reviewable", "withheld", "ok", "conflict", "too_large",
-             "weak_link", "mixed_ids", "held_key", "person", "organisation"),
+             "mixed_names", "weak_link", "mixed_ids", "held_key", "person",
+             "organisation"),
             (int(value) for value in counts_row),
         ))
         counts["attribute_tie"] = len(ties)

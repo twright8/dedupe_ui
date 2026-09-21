@@ -812,6 +812,65 @@ def test_the_overlay_projection_asks_for_the_columns_it_reads_and_no_others():
                        "total_value", "dob_year_clean"]
 
 
+def test_the_prebuilt_unit_index_writes_the_same_bytes(tmp_path):
+    """Item 5: the overlay units are indexed ONCE per run instead of once per
+    batch, three times over. The file must be the same file."""
+    import hashlib
+
+    from app.rules import vetoes as veto_rules
+
+    units = _overlay_units()
+    pairs = _overlay_pairs()
+    pairs["gamma_surname"] = [0, 2, 1, 2]
+    source = tmp_path / "predictions_person.parquet"
+    pairs.to_parquet(source, index=False)
+    ruleset = {"vetoes": [{"id": "v1", "track": "person", "action": "reject",
+                           "when": [{"column": "dob_year_clean",
+                                     "op": "abs_diff_gt", "value": 1}]}]}
+
+    def digest(out, given):
+        stage_3.overlay_predictions({"person": source}, given, 0.5, 0.92, out,
+                                    ruleset=ruleset, batch_rows=1)
+        return hashlib.sha256(out.read_bytes()).hexdigest()
+
+    from_frame = digest(tmp_path / "frame.parquet", units)
+    from_index = digest(tmp_path / "index.parquet", veto_rules.unit_lookup(units))
+    assert from_frame == from_index
+
+    # And the same for the re-bucket path, which streams the same overlays.
+    one = tmp_path / "rb_frame.parquet"
+    two = tmp_path / "rb_index.parquet"
+    (tmp_path / "frame.parquet").replace(one)
+    (tmp_path / "index.parquet").replace(two)
+    stage_3.rewrite_pairs(one, units, 0.5, 0.98, ruleset=ruleset, batch_rows=1)
+    stage_3.rewrite_pairs(two, veto_rules.unit_lookup(units), 0.5, 0.98,
+                          ruleset=ruleset, batch_rows=1)
+    assert hashlib.sha256(one.read_bytes()).hexdigest() == \
+        hashlib.sha256(two.read_bytes()).hexdigest()
+
+
+def test_the_unit_index_is_built_once_for_the_whole_file(tmp_path, monkeypatch):
+    """The point of the change, pinned: 82 batches used to build 246 indexes."""
+    from app.rules import vetoes as veto_rules
+
+    units = _overlay_units()
+    pairs = _overlay_pairs()
+    source = tmp_path / "predictions_person.parquet"
+    pairs.to_parquet(source, index=False)
+
+    built = []
+    original = veto_rules.UnitLookup.__init__
+
+    def counted(self, frame):
+        built.append(len(frame))
+        original(self, frame)
+
+    monkeypatch.setattr(veto_rules.UnitLookup, "__init__", counted)
+    stage_3.overlay_predictions({"person": source}, units, 0.5, 0.92,
+                                tmp_path / "out.parquet", batch_rows=1)
+    assert len(built) == 1
+
+
 def test_a_batched_overlay_writes_what_one_pass_writes(tmp_path):
     """The identity that makes the streaming safe: a pairs file written a batch
     at a time has to equal the file written in one go, row for row."""

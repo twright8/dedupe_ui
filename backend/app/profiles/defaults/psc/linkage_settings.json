@@ -146,8 +146,9 @@
           "column": "postcode_clean",
           "splink_function": "cl.PostcodeComparison",
           "splink_args": {},
-          "term_frequency": false,
-          "description": "Postcode at full, sector, district and area level. Formation-agent postcodes are already nulled by the cleaning, which is what makes this safe to score on at all."
+          "term_frequency": true,
+          "description": "Postcode at full, sector, district and area level. Formation-agent postcodes are already nulled by the cleaning, which is what makes this safe to score on at all.",
+          "_measured": "Term frequency was off here and on for the surname, and on the full run that single asymmetry is why a shared postcode DISTRICT learned +9.26 bits against a shared surname's +9.33. The learned u is not the problem: measured over the run's own 11,205,785 person units, the true random-pair rate for a district match is 0.000543 against the 0.000575 the model learned — 5.9% out, and in the direction that UNDERSTATES the weight. A UK postcode district really is about as rare as a UK surname (1,342 effective districts against 2,211 effective surnames, because SMITH, KHAN, JONES, SINGH and PATEL alone cover 1.4 million person units). What is wrong is that the surname weight is individualised and the postcode weight is not: agreeing on SMITH is worth 5.53 bits after the adjustment, while agreeing on E14 — which is as common as JONES — is worth a flat 9.26. Turning term frequency on here individualises the FULL postcode level, which is the strongest one. It cannot individualise the sector, district or area levels: cl.PostcodeComparison builds those by regular expression over postcode_clean and Splink can only attach a frequency table to the exact-match level, so the flat district weight stands until a custom postcode comparison is built the way custom.NumericDifferenceAtThresholds was. THE FULL RUN HAS NOT BEEN RESCORED WITH THIS CHANGE."
         }
       ],
       "em_blocking_rules": [
@@ -301,5 +302,22 @@
   "match_probability_threshold_candidate": 0.05,
   "match_probability_threshold_high": 0.95,
   "match_probability_threshold_review": 0.5,
-  "_budget_note": "max_pairs is sized from the priced full-snapshot total with about 1.5x headroom: the person track's six routes make at most 94,743,605 blocked comparisons after the hot-key control, and its worst EM training rule 58,985,721 after its own, so 150,000,000 covers both with room. The organisation track's routes make 1,832,607 and its worst EM rule 639,077, so 5,000,000 is already generous. Both figures are linkage.price_rule group arithmetic on the run's own units.parquet, confirmed against Splink's own count_comparisons_from_blocking_rule before the run. PSC_HANDOVER.md section 104."
+  "_budget_note": "max_pairs is sized from the priced full-snapshot total with about 1.5x headroom: the person track's six routes make at most 94,743,605 blocked comparisons after the hot-key control, and its worst EM training rule 58,985,721 after its own, so 150,000,000 covers both with room. The organisation track's routes make 1,832,607 and its worst EM rule 639,077, so 5,000,000 is already generous. Both figures are linkage.price_rule group arithmetic on the run's own units.parquet, confirmed against Splink's own count_comparisons_from_blocking_rule before the run. PSC_HANDOVER.md section 104.",
+  "max_distinct_values": {
+    "person": [
+      {
+        "column": "surname_clean",
+        "count": 3
+      },
+      {
+        "column": "forename_canon",
+        "count": 3
+      },
+      {
+        "column": "dob_year_clean",
+        "count": 2
+      }
+    ]
+  },
+  "_max_distinct_values_measured": "The cluster gate had no equivalent of the match keys' max_distinct guard, and it showed: on the full run too_large fired on 17 person clusters and missed all twenty of the largest proposed person entities, one of which held 217 records under 165 distinct names. Counted over that run's own clusters, a person cluster of two units carries at most 2 distinct cleaned surnames and averages 1.11; one of 6 to 20 units averages 2.33; one of over 100 units averages 104. Sampled at 4 to 8 distinct surnames, every cluster was a mixture. Three is the most one person can honestly show: a birth name, a married name, and one inconsistently filed hyphenated variant. THE FORENAME IS HERE BECAUSE THE SURNAME WAS NOT ENOUGH: with the surname gated and the new veto rules in, the twelve largest remaining wrong person entities were all one surname and many forenames — 206 records under 55 names, every one of them Singh, and the same for Khan, Mia and Ali. A chain that cannot run away on the surname runs away on the forename instead. The organisation track names no column, so it is not gated this way, and neither is donations, where a trade union's branches legitimately carry many different names. THE BIRTH YEAR IS HERE FOR THE SAME REASON, ONE STEP ON: with the surname and the forename both gated, the largest wrong person entities left were 111 records under 57 names, every one of them 'Mohammed <something> Ali', spread over 29 different birth years. The chain runs away on the middle name and the year instead. A person has one birth year, and v1 leaves one year of slack for a filing slip, so a cluster can honestly show two adjacent years; three or more is a chain. Counted on the full run's own person clusters, 1,713,278 show one birth year and 36,156 show two, against 2,037 that show more than two — one tenth of one per cent, and a clean break in the data."
 }

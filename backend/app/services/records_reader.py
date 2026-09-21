@@ -210,13 +210,25 @@ def get_records(
             f"SELECT COUNT(*) FROM {source}{where_sql}", [str(path), *params]
         ).fetchone()[0])
 
+        # The page, in two steps. Sorting fifteen million rows of forty columns
+        # to show fifty of them is what made a deep page half a minute at PSC
+        # scale; sorting two columns and then fetching fifty whole rows by key
+        # is the same answer. `records.parquet` is written in record_id order,
+        # so the second step is answered from the row-group statistics.
+        #
         # record_id breaks ties so paging stays stable when the sort column
         # repeats (thousands of donors share a first year, for instance).
         cursor = con.execute(
-            f'''SELECT * FROM {source}{where_sql}
-                ORDER BY "{sort_column}" {order_sql} NULLS LAST, record_id ASC
-                LIMIT ? OFFSET ?''',
-            [str(path), *params, limit, offset],
+            f'''WITH page AS (
+                    SELECT record_id, "{sort_column}" AS _sort
+                    FROM {source}{where_sql}
+                    ORDER BY "{sort_column}" {order_sql} NULLS LAST, record_id ASC
+                    LIMIT ? OFFSET ?
+                )
+                SELECT r.* FROM read_parquet(?) r
+                JOIN page ON CAST(r.record_id AS VARCHAR) = CAST(page.record_id AS VARCHAR)
+                ORDER BY page._sort {order_sql} NULLS LAST, r.record_id ASC''',
+            [str(path), *params, limit, offset, str(path)],
         )
         item_columns = [d[0] for d in cursor.description]
         items = [

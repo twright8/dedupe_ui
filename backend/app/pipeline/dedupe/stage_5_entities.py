@@ -1172,6 +1172,14 @@ def run_stage_5_entities(
     )
     _merge_into_score_eval(run_dir, report)
 
+    # The Entities list's index (item 6). The list's own SQL writes it, so the
+    # file and the query it replaces cannot drift apart.
+    t_index = time.time()
+    from app.services import entities_reader
+
+    entities_reader.write_index(run_dir)
+    _step(f"  Entity index written in {time.time() - t_index:.1f}s", progress_callback)
+
     counts = counts_from(written, {"report": report}, registry_members)
     elapsed = time.time() - t_start
     _step(

@@ -29,7 +29,7 @@ from app.pipeline.dedupe.stage_0_load import EVENTS_FILENAME
 from app.pipeline.dedupe.stage_3_score import (
     PAIRS_FILENAME, _strip_overlays, _write_evaluation, apply_overlays,
     counts_from, events_by_unit, finalise_pairs, label_outcomes, run_ruleset,
-    write_contradictions,
+    write_contradictions, write_pair_index,
 )
 from app.profiles import get_profile
 from app.rules import linkage
@@ -118,6 +118,10 @@ def _finish(run_dir: Path, data: dict, pairs: pd.DataFrame, labels,
     """
     changed = _buckets_changed(data["pairs"], pairs)
     pairs.to_parquet(run_dir / PAIRS_FILENAME, index=False)
+    # The pairs file changed, so the listing index made from it has to change
+    # with it (item 6). A stale index would be ignored, not served, but a
+    # correct one is what keeps the pairs list under two seconds.
+    write_pair_index(run_dir)
     outcome = label_outcomes(labels, data["members"], data["groups"])
     write_contradictions(run_dir, outcome["contradictions"])
     evaluation = score_eval.evaluate(

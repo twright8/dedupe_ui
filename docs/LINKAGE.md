@@ -48,7 +48,8 @@ Stored beside the ruleset in each config version. Users edit it on the "Threshol
   `thresholds` must be a non-empty list of numbers, each zero or more, in ascending order. A term-frequency adjustment is refused on it: the levels are gaps between numbers, not values, and down-weighting a common birth year is the mistake that let a 37-year gap score 1.0 in the first PSC sample. It is built from Splink's `CustomComparison` over a `NullLevel`, one `AbsoluteDifferenceLevel` per threshold and an `ElseLevel`, with the labels "Equal `<column>`", "`<column>` within N" and "All other", so the per-pair explanation reads in words.
 
   **The column must be a number, and cleaning writes text.** `dob_year_clean` leaves `nullify_outside_range` as a string of digits. Stage 3 therefore casts every column a numeric-difference comparison names — and only those — with `pd.to_numeric(..., errors="coerce")` as it builds the frame it hands Splink (`_splink_frame`). `units.parquet` keeps the text, so the review screen, the exports and the vetoes still see what was filed. A value that is not a number becomes null and lands on the null level.
-- `term_frequency: true` turns on Splink's term-frequency adjustment for that column.
+- `term_frequency: true` turns on Splink's term-frequency adjustment for that column. **Splink attaches it only to an exact-match level.** `cl.PostcodeComparison` builds its sector, district and area levels by regular expression over the postcode column, so those three stay flat however common the value is: turning the flag on for `postcode_clean` individualises the full postcode and nothing below it. That asymmetry is what made a shared postcode district worth as much as a shared surname on the full PSC run — agreeing on SMITH is worth 5.53 bits after the adjustment, agreeing on E14, which is as common as JONES, a flat 9.26 (`docs/PSC_HANDOVER.md` section 108).
+- `max_distinct_values` is the stage 4 name gate, `{track: {"column": ..., "count": ...}}` at the top level of the document beside `cluster_floor`, `max_cluster_units` and `max_existing_ids`. See `docs/ENTITIES.md`.
 - `probability_two_random_records_match: null` means "estimate it from the deterministic rules". The deterministic rules are that track's match keys, read out of the ruleset, and `deterministic_recall` (default 0.8) is how much of the truth they are assumed to find. An estimate that fails is logged and Splink's own default stands, because a prior is not worth losing a run over.
 - `max_pairs` is the blocking budget. Before Splink predicts, the stage counts the pairs each blocking rule would create. If the total is over budget, the run fails with a structured error that names each rule and its count. Nothing is scored.
 - Labels never train Splink. u comes from random sampling and m from EM.
@@ -113,6 +114,9 @@ provenance maps onto the one ordered list in `GLOSSARY.md` through
 | `blocking_report.json` | pairs per blocking rule, per track, and the budget |
 | `score_eval.json` | what the exact groups plus the accepted pairs do to the existing labels |
 | `contradictions.json` | the FALSE labels an exact match key has overruled |
+| `pairs_index.parquet` | the pairs list, materialised: every column of `pairs.parquet` plus `pair_id`, `import_agreement` and the two units' names, so a page needs no unit join. Written by stage 3 and by every path that rewrites `pairs.parquet` — re-bucket, apply-model, revert-model. A reader ignores an index older than the pairs file it was made from, so a missed call site costs a slow page and never a wrong answer |
+| `clusters_index.parquet` | one row per cluster, with what the review queue shows. Written by stage 4 |
+| `entities_index.parquet` | one row per entity, with what the Entities list shows. Written by stage 5 |
 
 ## Scoring the result against the existing labels
 

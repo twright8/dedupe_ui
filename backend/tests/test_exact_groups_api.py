@@ -653,3 +653,27 @@ class TestPreviewKeys:
     def test_404_when_the_run_has_no_loaded_records(self, client, db_path, data_dir):
         r = _preview(client, default_ruleset(), run_id="nope")
         assert r.status_code == 404
+
+
+def test_the_group_index_gives_the_answer_the_group_by_gave(db_path, data_dir):
+    """Item 6: the screen's aggregate, written once by stage 2. A search still
+    reads the two files, because it asks about the members."""
+    from app.services import exact_groups_reader
+
+    _seed_groups(db_path, data_dir)
+    run_dir = data_dir / "runs" / RUN_ID
+    index = exact_groups_reader.write_index(run_dir)
+    assert index.is_file()
+
+    cases = [{}, {"sort": "size", "order": "asc"}, {"status": "merged"},
+             {"track": "person"}, {"limit": 1, "offset": 1},
+             {"q": "a"}, {"sort": "name"}]
+    saved = index.read_bytes()
+    for kwargs in cases:
+        with_index = exact_groups_reader.get_groups(str(run_dir), **kwargs)
+        index.unlink()
+        try:
+            without = exact_groups_reader.get_groups(str(run_dir), **kwargs)
+        finally:
+            index.write_bytes(saved)
+        assert with_index == without, kwargs

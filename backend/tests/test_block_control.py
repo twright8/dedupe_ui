@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("SITE_PASSWORD", "testpass123")
 
 from app.profiles.donations import RAW_COLUMNS
+from app import vocabulary
 from app.rules import linkage
 from tests.rulesets import default_linkage_settings, default_ruleset
 
@@ -428,7 +429,7 @@ def test_a_bad_max_block_size_is_refused(value):
 def test_an_unknown_on_oversize_is_refused():
     errors = _check(_with_rule(max_block_size=60, on_oversize="shrink"))
     assert _messages(errors, "on_oversize") == \
-        ["on_oversize must be one of refine, drop"]
+        [vocabulary.choice_error("on_oversize", "shrink", linkage.ON_OVERSIZE)]
 
 
 @pytest.mark.parametrize("value", ["forename_initial", [], [1], ["a", 2], None])

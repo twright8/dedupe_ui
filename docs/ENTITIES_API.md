@@ -48,7 +48,7 @@ every cluster endpoint accepts either kind.
 | Name | Values | Default |
 |---|---|---|
 | `track` | `person`, `organisation` | every track |
-| `status` | `ok`, `conflict`, `too_large`, `weak_link`, `mixed_ids`, `cross_track_ids`, `held_key`, `attribute_tie` | every status |
+| `status` | `ok`, `conflict`, `too_large`, `mixed_names`, `weak_link`, `mixed_ids`, `cross_track_ids`, `held_key`, `attribute_tie` | every status |
 | `withheld` | `yes`, `no` | both |
 | `decided` | `yes`, `no` | both |
 | `min_units` | 1 or more | 2 — the queue is about clusters, not singletons |
@@ -114,6 +114,7 @@ what the full list shows. Anything else a caller sends for `status`, `track`,
     "ok": 18530,
     "conflict": 0,
     "too_large": 1,
+    "mixed_names": 0,
     "weak_link": 58,
     "mixed_ids": 14,
     "held_key": 141,
@@ -135,7 +136,7 @@ Field notes:
 
 - `status` is the main one; `statuses` is every status the gate raised, because a
   cluster can be both too large and mixed. The order of precedence is
-  `conflict`, `too_large`, `weak_link`, `mixed_ids` (ENTITIES.md).
+  `conflict`, `too_large`, `mixed_names`, `weak_link`, `mixed_ids` (ENTITIES.md).
 - `withheld` says the cluster was **not** proposed as one entity. It was rebuilt
   from the trusted edges alone — import and human — and each part became an
   entity. `parts` is how many entities it produced.
@@ -276,7 +277,8 @@ one unit are already one thing, so labelling them again would say nothing. A
 26-unit cluster therefore writes 25 labels, whatever its record count.
 
 A cluster a human has merged is no longer withheld: the gate's `too_large`,
-`weak_link` and `mixed_ids` all stand down, because a decision always wins.
+`mixed_names`, `weak_link` and `mixed_ids` all stand down, because a decision
+always wins.
 
 `needs_recluster` is always true: the decision has changed the labels, and the
 clusters and entities are stale until `POST /recluster` runs. **400** for a
@@ -743,7 +745,7 @@ slice-3 ones:
 |---|---|
 | `clustersTotal` | clusters, singletons included |
 | `clustersWithheld` | clusters the gate did not propose as one entity |
-| `clustersByStatus` | `{ok, conflict, too_large, weak_link, mixed_ids, attribute_tie}` |
+| `clustersByStatus` | `{ok, conflict, too_large, mixed_names, weak_link, mixed_ids, attribute_tie}` |
 | `heldGroupsOpen` | held exact groups still waiting for a decision |
 | `reviewQueue` | withheld clusters + open held groups + attribute ties |
 | `entitiesProposed`, `entitiesNew`, `entitiesKept`, `entitiesMerged` | the proposal against the registry |

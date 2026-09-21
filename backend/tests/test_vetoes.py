@@ -758,3 +758,189 @@ def test_a_reason_trims_a_float_year_but_never_a_padded_number():
     assert vetoes._render("SC570493") == "SC570493"
     assert vetoes._render("0.5") == "0.5"
     assert vetoes._render(None) == ""
+
+
+# ---------------------------------------------------------------------------
+# `not_equal_or_missing`, the one operator a null makes true
+# ---------------------------------------------------------------------------
+
+
+def test_not_equal_or_missing_is_true_unless_both_sides_agree():
+    condition = {"column": "a", "op": "not_equal_or_missing"}
+    assert mask_for(condition,
+                    ["SMITH", "SMITH", "smith ", None, "SMITH", None],
+                    ["JONES", "SMITH", "SMITH", "SMITH", None, None]) == [
+        True, False, False, True, True, True]
+
+
+def test_not_equal_or_missing_treats_a_blank_as_missing():
+    """The cleaning engine writes "" where nothing was filed, and a blank does
+    not corroborate a pair any more than a null does."""
+    condition = {"column": "a", "op": "not_equal_or_missing"}
+    assert mask_for(condition, ["", "  ", "E1 1AA"], ["E1 1AA", "", "E1 1AA"]) == [
+        True, True, False]
+
+
+def test_not_equal_or_missing_needs_no_argument_and_validates():
+    rules = ruleset_with(veto(column="a", op="not_equal_or_missing"))
+    errors: list[dict] = []
+    vetoes.validate(rules, {"person": ["a"], "organisation": []}, errors)
+    assert errors == []
+
+
+def test_a_column_the_units_do_not_carry_does_not_corroborate():
+    """The mirror of `test_a_column_the_units_do_not_carry_vetoes_nobody`. A
+    column nobody filed cannot say two people are the same, so this operator is
+    true — which is why it is only ever written beside a condition that is
+    false for most pairs."""
+    units = units_frame([{"unit_id": "1"}, {"unit_id": "2"}])
+    pairs = pairs_frame([{"unit_id_l": "1", "unit_id_r": "2",
+                          "match_probability": 1.0}])
+    rules = ruleset_with(veto(column="not_a_column", op="not_equal_or_missing"))
+    out = vetoes.apply_to_buckets(pairs, units, rules,
+                                  np.array(["accept"], dtype=object))
+    assert list(out["bucket"]) == ["reject"]
+
+
+def test_the_operator_list_and_the_vocabulary_are_one_list():
+    from app import vocabulary
+
+    assert set(vetoes.OPERATORS) == set(vocabulary.VETO_OPS)
+
+
+# ---------------------------------------------------------------------------
+# The PSC person rules that ship, on the shapes they were written for
+# ---------------------------------------------------------------------------
+
+
+def _psc_ruleset() -> dict:
+    from pathlib import Path
+
+    path = (Path(__file__).resolve().parents[1] / "app" / "profiles" / "defaults"
+            / "psc" / "ruleset.json")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _psc_verdict(left: dict, right: dict) -> tuple:
+    units = units_frame([{"unit_id": "1", **left}, {"unit_id": "2", **right}])
+    pairs = pairs_frame([{"unit_id_l": "1", "unit_id_r": "2",
+                          "match_probability": 0.99}])
+    out = vetoes.apply_to_buckets(pairs, units, _psc_ruleset(),
+                                  np.array(["accept"], dtype=object))
+    return out["bucket"][0], out["vetoed_by"][0]
+
+
+def test_two_different_surnames_at_two_addresses_are_rejected():
+    """Ciprian Tofan of PL1 2PP against Ciprian Cornel Turiac of ME16 0RE,
+    accepted at p = 0.9726 on the full run."""
+    assert _psc_verdict(
+        {"surname_clean": "TOFAN", "forename_canon": "CIPRIAN",
+         "postcode_clean": "PL1 2PP", "middle_clean": None,
+         "dob_year_clean": "1987.0", "dob_month_clean": "4.0"},
+        {"surname_clean": "TURIAC", "forename_canon": "CIPRIAN",
+         "postcode_clean": "ME16 0RE", "middle_clean": "CORNEL",
+         "dob_year_clean": "1987.0", "dob_month_clean": "4.0"},
+    ) == ("reject", "v3")
+
+
+def test_a_surname_change_at_one_address_reaches_review_and_no_further():
+    """The case route pb5 exists for. The address corroborates it, so it is not
+    rejected — but it is never merged without a person looking."""
+    assert _psc_verdict(
+        {"surname_clean": "SMITH", "forename_canon": "ANNA",
+         "postcode_clean": "E1 1AA", "middle_clean": "MARIE",
+         "dob_year_clean": "1985.0", "dob_month_clean": "6.0"},
+        {"surname_clean": "OKONKWO", "forename_canon": "ANNA",
+         "postcode_clean": "E1 1AA", "middle_clean": "MARIE",
+         "dob_year_clean": "1985.0", "dob_month_clean": "6.0"},
+    ) == ("review", "v4")
+
+
+def test_the_same_surname_and_the_same_birth_date_are_left_alone():
+    """The harm test. A person who moved must still be merged."""
+    assert _psc_verdict(
+        {"surname_clean": "COWAN", "forename_canon": "KENNETH",
+         "postcode_clean": "IP1 1AA", "middle_clean": "JOHN",
+         "dob_year_clean": "1971.0", "dob_month_clean": "3.0"},
+        {"surname_clean": "COWAN", "forename_canon": "KENNETH",
+         "postcode_clean": "KA1 1AA", "middle_clean": "JOHN",
+         "dob_year_clean": "1971.0", "dob_month_clean": "3.0"},
+    ) == ("accept", None)
+
+
+def test_two_middle_names_two_months_and_two_addresses_are_rejected():
+    """Kenneth John Cowan of Suffolk, born March 1971, against Kenneth Gordon
+    Cowan of Ayrshire, born November 1972 — accepted at p = 0.9636."""
+    bucket, by = _psc_verdict(
+        {"surname_clean": "COWAN", "forename_canon": "KENNETH",
+         "postcode_clean": "IP1 1AA", "middle_clean": "JOHN",
+         "dob_year_clean": "1971.0", "dob_month_clean": "3.0"},
+        {"surname_clean": "COWAN", "forename_canon": "KENNETH",
+         "postcode_clean": "KA1 1AA", "middle_clean": "GORDON",
+         "dob_year_clean": "1972.0", "dob_month_clean": "11.0"},
+    )
+    assert bucket == "reject"
+    assert by in ("v5", "v6")
+
+
+def test_two_birth_dates_are_rejected_even_when_no_middle_name_was_filed():
+    """Kirsten Cherie Walker, April 1974, against Kirsten Walker, February
+    1973. Only one side filed a middle name, so v5 cannot see it."""
+    assert _psc_verdict(
+        {"surname_clean": "WALKER", "forename_canon": "KIRSTEN",
+         "postcode_clean": "SG11 1AA", "middle_clean": "CHERIE",
+         "dob_year_clean": "1974.0", "dob_month_clean": "4.0"},
+        {"surname_clean": "WALKER", "forename_canon": "KIRSTEN",
+         "postcode_clean": "RH20 1AA", "middle_clean": None,
+         "dob_year_clean": "1973.0", "dob_month_clean": "2.0"},
+    ) == ("reject", "v6")
+
+
+def test_an_off_by_one_birth_year_in_the_same_month_is_still_allowed():
+    """v1 left a year of slack for a filing slip and v6 does not take it back:
+    it needs the month to disagree too."""
+    assert _psc_verdict(
+        {"surname_clean": "COWAN", "forename_canon": "KENNETH",
+         "postcode_clean": "IP1 1AA", "middle_clean": "JOHN",
+         "dob_year_clean": "1971.0", "dob_month_clean": "3.0"},
+        {"surname_clean": "COWAN", "forename_canon": "KENNETH",
+         "postcode_clean": "IP1 1AA", "middle_clean": "JOHN",
+         "dob_year_clean": "1972.0", "dob_month_clean": "3.0"},
+    ) == ("accept", None)
+
+
+# ---------------------------------------------------------------------------
+# The unit index is built once and answers the same
+# ---------------------------------------------------------------------------
+
+
+def test_the_unit_lookup_answers_exactly_as_the_frame_it_was_built_from():
+    units = units_frame([
+        {"unit_id": "1", "a": "X", "b": "1980", "name": "One"},
+        {"unit_id": "2", "a": "Y", "b": "1995", "name": "Two"},
+        {"unit_id": "3", "a": "X", "b": None, "name": "Three"},
+    ])
+    pairs = pairs_frame([
+        {"unit_id_l": "1", "unit_id_r": "2", "match_probability": 1.0,
+         "score_bucket": "accept"},
+        {"unit_id_l": "1", "unit_id_r": "3", "match_probability": 0.6,
+         "score_bucket": "accept"},
+    ])
+    rules = ruleset_with(
+        veto("soft", action="review", column="a", op="differs"),
+        veto("hard", action="reject", column="b", op="abs_diff_gt", value=1),
+    )
+    start = np.array(["accept", "accept"], dtype=object)
+    from_frame = vetoes.apply_to_buckets(pairs, units, rules, start)
+    from_index = vetoes.apply_to_buckets(pairs, vetoes.unit_lookup(units), rules,
+                                         start)
+    for key in ("bucket", "vetoed_by", "veto_reason", "any"):
+        assert list(from_frame[key]) == list(from_index[key]), key
+    assert vetoes.report(pairs, units, rules) == \
+        vetoes.report(pairs, vetoes.unit_lookup(units), rules)
+
+
+def test_a_lookup_handed_back_in_is_not_rebuilt():
+    units = units_frame([{"unit_id": "1"}, {"unit_id": "2"}])
+    lookup = vetoes.unit_lookup(units)
+    assert vetoes.unit_lookup(lookup) is lookup

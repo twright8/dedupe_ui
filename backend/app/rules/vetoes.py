@@ -7,8 +7,11 @@ years apart are not one person, even when the name and the postcode agree.
 
 Everything here works on two aligned Series — the LEFT unit's values and the
 RIGHT unit's values of one column — and returns a boolean mask. A condition is
-false when either side is null, so missing data never triggers a veto. Nothing
-loops over pairs in Python: PSC will have a hundred million of them.
+false when either side is null, so missing data never triggers a veto. The one
+operator that breaks that rule says so in its name: ``not_equal_or_missing`` is
+true when a value is missing, because "nothing here corroborates the pair" has
+to cover "nothing was filed". Nothing loops over pairs in Python: PSC will have
+a hundred million of them.
 
 The same functions serve the pipeline and `POST /api/config/preview-vetoes`, so
 a preview can never promise something a run does not deliver.
@@ -32,6 +35,7 @@ ACTION_RANK = {"review": 1, "reject": 2}
 # op -> the argument key it requires, or None when it takes none.
 OPERATORS: dict[str, str | None] = {
     "differs": None,
+    "not_equal_or_missing": None,
     "abs_diff_gt": "value",
     "abs_diff_gte": "value",
     "similarity_lt": "value",
@@ -229,6 +233,13 @@ def condition_mask(condition: dict, left: pd.Series, right: pd.Series,
     if op == "differs":
         return known & differ
 
+    if op == "not_equal_or_missing":
+        # The one operator a null makes TRUE. `differs` asks "do these two
+        # disagree?", which a missing value cannot answer. This asks "does this
+        # column agree?", and a column nobody filed does not agree. It is what a
+        # veto needs to say "and nothing else identifies them".
+        return ~(known & ~differ)
+
     if op == "similarity_lt":
         import jellyfish
 
@@ -259,23 +270,71 @@ def condition_mask(condition: dict, left: pd.Series, right: pd.Series,
 # ---------------------------------------------------------------------------
 
 
+class UnitLookup:
+    """The overlay units, indexed by unit id as text. Built ONCE per run.
+
+    Every path that lays the overlays over a pairs file does it a batch at a
+    time, and each batch used to rebuild this index from scratch — once in
+    ``apply_overlays``, once in ``_priority_totals`` and once in ``SideValues``.
+    At 11.8 million units and 82 batches that was the largest single phase of
+    the PSC pipeline (`docs/PSC_HANDOVER.md` section 107). The index does not
+    depend on the batch, so it is built outside the loop and handed down.
+
+    ``unit_lookup`` takes either a frame or one of these, so a caller that has
+    not been updated still works — it just pays for its own index.
+    """
+
+    def __init__(self, units: pd.DataFrame):
+        self.units = units
+        self.columns = units.columns
+        if len(units) and "unit_id" in units.columns:
+            frame = units.set_index(units["unit_id"].astype(str).to_numpy())
+            # Unit ids are unique by construction, so this is a no-op and costs
+            # one hash of the index per run. It is here because ``.map`` raises
+            # on a duplicated index, and a run should not die on a file it could
+            # read the first row of.
+            if frame.index.has_duplicates:
+                frame = frame[~frame.index.duplicated(keep="first")]
+            self.frame = frame
+        else:
+            # No rows, or no unit_id to index by: an empty frame with the same
+            # columns, so `column()` answers with an empty Series rather than a
+            # KeyError and every `.map` of it gives null, exactly as before.
+            self.frame = pd.DataFrame(columns=units.columns)
+        self._numeric: dict[str, pd.Series] = {}
+
+    def __len__(self) -> int:
+        return len(self.units)
+
+    def column(self, name: str) -> pd.Series:
+        return self.frame[name]
+
+    def numeric(self, name: str) -> pd.Series:
+        """``to_numeric`` of one column, cached — the priority sums read it per batch."""
+        if name not in self._numeric:
+            self._numeric[name] = pd.to_numeric(self.frame[name], errors="coerce")
+        return self._numeric[name]
+
+
+def unit_lookup(units) -> UnitLookup:
+    """*units* as a ``UnitLookup``, whether it already is one or is a frame."""
+    return units if isinstance(units, UnitLookup) else UnitLookup(units)
+
+
 class SideValues:
     """The two sides' values of whichever columns the vetoes name.
 
     Built once per call from a PROJECTION of the units — only the columns the
-    vetoes read — so a 63-column units file costs three or four of them.
+    vetoes read — so a 63-column units file costs three or four of them. The
+    index itself comes from a ``UnitLookup`` that outlives the batch.
     """
 
-    def __init__(self, pairs: pd.DataFrame, units: pd.DataFrame, columns):
+    def __init__(self, pairs: pd.DataFrame, units, columns):
         self._pairs = pairs
         self._cache: dict[str, tuple[pd.Series, pd.Series]] = {}
-        wanted = [c for c in columns if c in units.columns]
-        if len(units) and "unit_id" in units.columns:
-            index = units["unit_id"].astype(str)
-            self._lookup = units[wanted].set_index(index.to_numpy())
-            self._lookup = self._lookup[~self._lookup.index.duplicated(keep="first")]
-        else:
-            self._lookup = pd.DataFrame(columns=wanted)
+        lookup = unit_lookup(units)
+        wanted = [c for c in columns if c in lookup.columns]
+        self._lookup = lookup
         self._columns = set(wanted)
 
     def get(self, column: str) -> tuple[pd.Series, pd.Series]:
@@ -289,7 +348,7 @@ class SideValues:
                               dtype="object")
             pair = (empty, empty)
         else:
-            values = self._lookup[column]
+            values = self._lookup.column(column)
             left = self._pairs["unit_id_l"].astype(str).map(values)
             right = self._pairs["unit_id_r"].astype(str).map(values)
             pair = (left, right)
@@ -380,7 +439,7 @@ def _reasons(veto: dict, sides: SideValues, hit: np.ndarray,
 # ---------------------------------------------------------------------------
 
 
-def hits(pairs: pd.DataFrame, units: pd.DataFrame, ruleset: dict) -> list[dict]:
+def hits(pairs: pd.DataFrame, units, ruleset: dict) -> list[dict]:
     """One entry per veto: ``{veto, mask}``, in document order.
 
     Only the columns the vetoes name are read out of *units*, and only the rows
@@ -403,7 +462,7 @@ def hits(pairs: pd.DataFrame, units: pd.DataFrame, ruleset: dict) -> list[dict]:
     return result
 
 
-def apply_to_buckets(pairs: pd.DataFrame, units: pd.DataFrame, ruleset: dict,
+def apply_to_buckets(pairs: pd.DataFrame, units, ruleset: dict,
                      bucket: np.ndarray) -> dict:
     """Lay the vetoes over *bucket*, the buckets the score or the model gave.
 
@@ -479,7 +538,7 @@ def counts_from(pairs: pd.DataFrame) -> dict:
     }
 
 
-def report(pairs: pd.DataFrame, units: pd.DataFrame, ruleset: dict,
+def report(pairs: pd.DataFrame, units, ruleset: dict,
            max_examples: int = 10, name_column: str = "name") -> list[dict]:
     """Per veto: how many pairs it hits, how many of those would be accepted,
     and a handful of examples. This is what `preview-vetoes` serves."""
@@ -489,11 +548,10 @@ def report(pairs: pd.DataFrame, units: pd.DataFrame, ruleset: dict,
 
     would_accept = (bucket_without_vetoes(pairs) == "accept") if len(pairs) \
         else np.empty(0, dtype=bool)
+    lookup = unit_lookup(units)
     names = None
-    if len(units) and name_column in units.columns and "unit_id" in units.columns:
-        names = pd.Series(units[name_column].to_numpy(),
-                          index=units["unit_id"].astype(str).to_numpy())
-        names = names[~names.index.duplicated(keep="first")]
+    if len(lookup) and name_column in lookup.columns and "unit_id" in lookup.columns:
+        names = lookup.column(name_column)
 
     out = []
     for entry in hits(pairs, units, ruleset) if len(pairs) else []:

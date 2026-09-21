@@ -1169,7 +1169,7 @@ def _model_buckets(pairs: pd.DataFrame, score_bucket: np.ndarray,
 
 def apply_overlays(
     pairs: pd.DataFrame,
-    units: pd.DataFrame,
+    units,
     review: float,
     high: float,
     model_lines: dict | None = None,
@@ -1206,9 +1206,9 @@ def apply_overlays(
         pairs["veto_conflicts_import"] = pd.Series(dtype="bool")
         return pairs
 
-    lookup = units.set_index(units["unit_id"].astype(str))
-    left_id = pairs["unit_id_l"].map(lookup["existing_entity_id"])
-    right_id = pairs["unit_id_r"].map(lookup["existing_entity_id"])
+    units = vetoes.unit_lookup(units)
+    left_id = pairs["unit_id_l"].map(units.column("existing_entity_id"))
+    right_id = pairs["unit_id_r"].map(units.column("existing_entity_id"))
     both = left_id.notna() & right_id.notna()
     agrees = (both & (left_id == right_id)).to_numpy()
     disagrees = (both & (left_id != right_id)).to_numpy()
@@ -1231,8 +1231,8 @@ def apply_overlays(
                                      dtype="object")
     pairs["veto_conflicts_import"] = vetoed["any"] & agrees
 
-    left_held = pairs["unit_id_l"].map(lookup["held_group_id"])
-    right_held = pairs["unit_id_r"].map(lookup["held_group_id"])
+    left_held = pairs["unit_id_l"].map(units.column("held_group_id"))
+    right_held = pairs["unit_id_r"].map(units.column("held_group_id"))
     same_held = (left_held.notna() & (left_held == right_held)).to_numpy()
     # np.where keeps None; Series.where would put NaN in an object column.
     pairs["held_group_id"] = pd.Series(
@@ -1263,7 +1263,7 @@ def union_prediction_columns(paths) -> list[str]:
 
 def overlay_predictions(
     prediction_paths: dict,
-    units: pd.DataFrame,
+    units,
     review: float,
     high: float,
     out_path,
@@ -1287,6 +1287,9 @@ def overlay_predictions(
         if column not in union:
             union.append(column)
     rows = batch_rows or pair_batch_rows()
+    # ONE index over the overlay units for the whole file. Rebuilding it per
+    # batch is what made this the pipeline's longest phase at PSC scale.
+    units = vetoes.unit_lookup(units)
 
     writer = PairWriter(out_path)
     for track, path in prediction_paths.items():
@@ -1304,13 +1307,13 @@ def overlay_predictions(
     return writer.close(empty=empty)
 
 
-def _priority_totals(pairs: pd.DataFrame, units: pd.DataFrame) -> pd.DataFrame:
+def _priority_totals(pairs: pd.DataFrame, units) -> pd.DataFrame:
     """The pair's summed priority columns — what the review table sorts on."""
-    lookup = units.set_index(units["unit_id"].astype(str))
+    units = vetoes.unit_lookup(units)
     for column in get_profile().priority_columns:
         if column not in units.columns:
             continue
-        values = pd.to_numeric(lookup[column], errors="coerce")
+        values = units.numeric(column)
         left = pairs["unit_id_l"].map(values).fillna(0.0)
         right = pairs["unit_id_r"].map(values).fillna(0.0)
         pairs[f"priority_{column}"] = left + right
@@ -1323,7 +1326,7 @@ PAIR_HEAD = ["unit_id_l", "unit_id_r", "track", "match_probability", "match_weig
              "veto_conflicts_import", "held_group_id"]
 
 
-def finalise_pairs(pairs: pd.DataFrame, units: pd.DataFrame) -> pd.DataFrame:
+def finalise_pairs(pairs: pd.DataFrame, units) -> pd.DataFrame:
     """The pairs file's columns, in the order LINKAGE.md lists them."""
     pairs = _priority_totals(pairs, units)
     gammas = sorted(c for c in pairs.columns if c.startswith("gamma_"))
@@ -1589,6 +1592,7 @@ def _score_pairs_file(pairs_path, out_path, units, overlay_units, models,
     used: dict = {}
     review_before = review_after = 0
     values: set = set()
+    overlay_units = vetoes.unit_lookup(overlay_units)
 
     writer = PairWriter(out_path)
     empty = None
@@ -1704,7 +1708,7 @@ def unit_counts_of(units_path, temp_dir=None) -> dict:
     return counts
 
 
-def rewrite_pairs(pairs_path, units: pd.DataFrame, review: float, high: float,
+def rewrite_pairs(pairs_path, units, review: float, high: float,
                   ruleset: dict | None = None, model_lines: dict | None = None,
                   batch_rows: int | None = None) -> int:
     """Apply the buckets and the overlays again, in place, a batch at a time.
@@ -1715,6 +1719,7 @@ def rewrite_pairs(pairs_path, units: pd.DataFrame, review: float, high: float,
     rows. Now it streams through one writer and swaps the result in.
     """
     pairs_path = Path(pairs_path)
+    units = vetoes.unit_lookup(units)
     temporary = pairs_path.with_suffix(".rewrite.parquet")
     writer = PairWriter(temporary)
     empty = None
@@ -2179,7 +2184,11 @@ def run_stage_3_score(
         release_linker(linker)
         del linker, rows
 
-    overlay_units = read_unit_projection(units_path, overlay_columns(ruleset))
+    # One index over the overlay units for the rest of the stage: the pairs
+    # file, the forced pairs and the model pass all lay the same overlays down.
+    overlay_units = vetoes.unit_lookup(
+        read_unit_projection(units_path, overlay_columns(ruleset))
+    )
     with _phase("Applying the overlays and writing the pairs", progress_callback):
         n_written = overlay_predictions(
             predictions, overlay_units, review, high, pairs_path,
@@ -2245,6 +2254,7 @@ def run_stage_3_score(
         (run_dir / BLOCKING_REPORT_FILENAME).write_text(
             json.dumps(report, indent=2), encoding="utf-8"
         )
+    write_pair_index(run_dir, progress_callback)
     elapsed = time.time() - t_start
     precision = evaluation["pair_precision"]
     _step(
@@ -2261,6 +2271,26 @@ def run_stage_3_score(
             "elapsed_seconds": round(elapsed, 1), **counts,
         })
     return counts
+
+
+def write_pair_index(run_dir, progress_callback=None) -> None:
+    """The listing index (item 6), rewritten whenever the pairs file changes.
+
+    Every path that rewrites `pairs.parquet` calls this. A path that forgets
+    costs a slow page and never a wrong answer: the reader ignores an index
+    older than the file it was made from.
+    """
+    from app.services import pairs_reader
+
+    t0 = time.time()
+    try:
+        written = pairs_reader.write_index(run_dir)
+    except Exception as error:  # noqa: BLE001 — an index is an optimisation
+        _step(f"  WARNING: the pairs index was not written ({error})",
+              progress_callback)
+        return
+    if written is not None:
+        _step(f"  Pairs index written in {time.time() - t0:.1f}s", progress_callback)
 
 
 def run_ruleset(run_dir) -> dict:
@@ -2329,6 +2359,7 @@ def rebucket(
         applied=outcome["applied"], model_lines=lines,
     )
     _write_evaluation(run_dir, evaluation)
+    write_pair_index(run_dir)
     return counts_from(unit_counts_of(units_path, temp_dir),
                        pair_counts(pairs_path, temp_dir), evaluation, outcome,
                        run_dir=run_dir)
@@ -2369,6 +2400,9 @@ def refresh_after_labels(run_dir: str, labels: pd.DataFrame | None) -> dict:
             stage_3b_model.models_from_state(run_dir)),
     )
     _write_evaluation(run_dir, evaluation)
+    # No index write here: a label does not touch `pairs.parquet`. The human
+    # overlay is joined on at read time, so the index is still the file it was
+    # made from.
     return counts_from(unit_counts_of(units_path, temp_dir),
                        pair_counts(pairs_path, temp_dir), evaluation, outcome,
                        run_dir=run_dir)

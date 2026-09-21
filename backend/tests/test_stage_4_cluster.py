@@ -203,8 +203,8 @@ def test_stage_4_writes_the_stored_clusters_fixture(run_dir):
     assert counts["held_groups_open"] == 1
     assert counts["review_queue"] == 2
     assert counts["clusters_by_status"] == {
-        "ok": 4, "conflict": 0, "too_large": 0, "weak_link": 1,
-        "mixed_ids": 0, "cross_track_ids": 0,
+        "ok": 4, "conflict": 0, "too_large": 0, "mixed_names": 0,
+        "weak_link": 1, "mixed_ids": 0, "cross_track_ids": 0,
     }
 
 
@@ -457,3 +457,246 @@ def test_the_entities_page_is_cut_in_sql(run_dir, monkeypatch):
     assert by_size["items"][0]["entity_id"] == "r01"
     assert by_size["items"][0]["n_records"] == 3
     assert {i["id_status"] for i in by_size["items"]} == {"new"}
+
+
+# ---------------------------------------------------------------------------
+# The name gate: `mixed_names`
+# ---------------------------------------------------------------------------
+#
+# The match keys have `max_distinct` and the cluster gate had nothing like it.
+# On the full PSC run `too_large` fired on 17 person clusters and missed all
+# twenty of the largest proposed person entities, one of which held 217 records
+# under 165 different names (`docs/PSC_HANDOVER.md` section 107).
+
+
+def _chain(surnames: list[str], track: str = "person"):
+    """A cluster of len(surnames) units, joined end to end by accepted pairs."""
+    ids = [f"n{i:02d}" for i in range(len(surnames))]
+    units = pd.DataFrame([
+        {"unit_id": uid, "unit_size": 1, "track": track, "name": f"Ann {s}",
+         "surname_clean": s, "existing_entity_id": None, "held_group_id": None}
+        for uid, s in zip(ids, surnames)
+    ])
+    members = pd.DataFrame([{"record_id": uid, "unit_id": uid} for uid in ids])
+    pairs = pd.DataFrame([
+        {"unit_id_l": a, "unit_id_r": b, "track": track, "match_probability": 0.99,
+         "bucket": "accept", "decided_by": "score"}
+        for a, b in zip(ids, ids[1:])
+    ])
+    return units, members, pairs
+
+
+NAME_GATE = {**SETTINGS,
+             "max_distinct_values": {"person": {"column": "surname_clean",
+                                                "count": 3}}}
+TWO_COLUMN_GATE = {**SETTINGS, "max_distinct_values": {"person": [
+    {"column": "surname_clean", "count": 3},
+    {"column": "forename_canon", "count": 2},
+]}}
+
+
+def test_a_cluster_with_more_names_than_the_limit_is_withheld():
+    units, members, pairs = _chain(["SMITH", "JONES", "PATEL", "OKONKWO"])
+    clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                       NAME_GATE)
+    assert list(summary["n_distinct_surname_clean"]) == [4]
+    assert list(summary["status"]) == ["mixed_names"]
+    assert list(summary["withheld"]) == [True]
+    # Withheld means rebuilt from the trusted edges alone, and there are none,
+    # so each unit is proposed on its own.
+    assert clusters["proposed_entity_key"].nunique() == 4
+
+
+def test_a_cluster_at_the_limit_is_proposed_whole():
+    units, members, pairs = _chain(["SMITH", "SMITH-JONES", "JONES"])
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        NAME_GATE)
+    assert list(summary["n_distinct_surname_clean"]) == [3]
+    assert list(summary["status"]) == ["ok"]
+
+
+def test_the_name_gate_is_off_when_no_track_names_a_column():
+    """Donations names none, so its trade-union clusters are never withheld
+    for holding many different names."""
+    units, members, pairs = _chain(["SMITH", "JONES", "PATEL", "OKONKWO"])
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        SETTINGS)
+    assert "n_distinct_surname_clean" not in summary.columns
+    assert list(summary["status"]) == ["ok"]
+
+
+def test_the_name_gate_only_gates_the_track_that_names_a_column():
+    units, members, pairs = _chain(["AAA LTD", "BBB LTD", "CCC LTD", "DDD LTD"],
+                                   track="organisation")
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        NAME_GATE)
+    # The column is counted for every unit — it is measured once — but only a
+    # track that named it has a limit to break.
+    assert list(summary["n_distinct_surname_clean"]) == [4]
+    assert list(summary["status"]) == ["ok"]
+
+
+def test_the_name_gate_ignores_a_column_the_units_do_not_carry():
+    units, members, pairs = _chain(["SMITH", "JONES", "PATEL", "OKONKWO"])
+    units = units.drop(columns=["surname_clean"])
+    _clusters, summary = stage_4_cluster.build_clusters(
+        units, members, pairs, NAME_GATE)
+    assert list(summary["status"]) == ["ok"]
+
+
+def test_a_blank_name_is_not_a_distinct_name():
+    units, members, pairs = _chain(["SMITH", "", "  ", None])
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        NAME_GATE)
+    assert list(summary["n_distinct_surname_clean"]) == [1]
+    assert list(summary["status"]) == ["ok"]
+
+
+def test_the_name_gate_takes_its_limit_from_the_linkage_settings():
+    from app.rules import linkage
+
+    assert stage_4_cluster.gate_settings({})["max_distinct_values"] == {}
+    assert stage_4_cluster.gate_settings(NAME_GATE)["max_distinct_values"] == {
+        "person": [{"column": "surname_clean", "count": 3}]}
+    assert linkage.max_distinct_values(
+        {"max_distinct_values": {"person": {"column": "x", "count": 0}}}) == {}
+
+
+def test_a_human_who_merged_the_whole_cluster_answers_the_name_gate_too():
+    units, members, pairs = _chain(["SMITH", "JONES", "PATEL", "OKONKWO"])
+    _clusters, summary = stage_4_cluster.build_clusters(
+        units, members, pairs, NAME_GATE,
+        decisions={"C-n00": {"kind": "merge"}},
+    )
+    assert list(summary["status"]) == ["ok"]
+    assert list(summary["withheld"]) == [False]
+
+
+def test_the_name_gate_is_a_cluster_status_the_vocabulary_can_name():
+    from app import vocabulary
+
+    assert set(stage_4_cluster.STATUS_ORDER) <= set(vocabulary.CLUSTER_STATUSES)
+    assert vocabulary.CLUSTER_STATUS["mixed_names"]["label"] == "Mixed names"
+
+
+# ---------------------------------------------------------------------------
+# Item 6: the per-run index files, and the identity that makes them safe
+# ---------------------------------------------------------------------------
+#
+# Every list reader used to rebuild a whole-run aggregate on every request. At
+# PSC scale that is 41 million pairs joined to 11.8 million units twice, and
+# `list()` aggregates that DuckDB cannot spill; at the server's 6 GB budget the
+# Entities list and a deep Pairs page ran out of memory
+# (`docs/PSC_HANDOVER.md` section 107). Stages 4 and 5 now write the answer
+# once. These tests say the answer did not change.
+
+
+def _clusters_kwargs():
+    return [
+        {"min_units": 1},
+        {"min_units": 1, "limit": 2},
+        {"min_units": 1, "limit": 2, "offset": 1},
+        {"min_units": 1, "withheld": "yes"},
+        {"min_units": 1, "track": "person"},
+        {"min_units": 1, "sort": "records", "order": "asc"},
+        {"min_units": 1, "sort": "name"},
+        {"min_units": 1, "sort": "priority"},
+        {"min_units": 1, "q": "ann"},
+        {"min_units": 1, "status": "ok"},
+    ]
+
+
+@pytest.fixture
+def indexed_run(run_dir, monkeypatch):
+    """The fixture run, through stages 4 and 5, so both indexes exist."""
+    monkeypatch.setenv("PROFILE", "donations")
+    stage_4_cluster.run_stage_4_cluster(str(run_dir), str(run_dir / "config"))
+    stage_5_entities.run_stage_5_entities(str(run_dir))
+    return run_dir
+
+
+@pytest.mark.parametrize("kwargs", _clusters_kwargs())
+def test_the_cluster_index_gives_the_answer_the_group_by_gave(indexed_run, kwargs):
+    from app.services import clusters_reader
+
+    run_dir = indexed_run
+    index = clusters_reader.index_path(run_dir)
+    assert index.is_file(), "stage 4 did not write the index"
+    with_index = clusters_reader.get_clusters(str(run_dir), **kwargs)
+    saved = index.read_bytes()
+    index.unlink()
+    try:
+        without = clusters_reader.get_clusters(str(run_dir), **kwargs)
+    finally:
+        index.write_bytes(saved)
+    assert with_index == without
+
+
+def _entities_kwargs():
+    return [
+        {},
+        {"limit": 2},
+        {"limit": 2, "offset": 1},
+        {"track": "person"},
+        {"sort": "entity_id", "order": "asc"},
+        {"sort": "name"},
+        {"sort": "priority"},
+        {"min_size": 2},
+        {"q": "ann"},
+    ]
+
+
+@pytest.mark.parametrize("kwargs", _entities_kwargs())
+def test_the_entity_index_gives_the_answer_the_group_by_gave(indexed_run, kwargs):
+    from app.services import entities_reader
+
+    run_dir = indexed_run
+    index = entities_reader.index_path(run_dir)
+    assert index.is_file(), "stage 5 did not write the index"
+    with_index = entities_reader.get_entities(str(run_dir), **kwargs)
+    saved = index.read_bytes()
+    index.unlink()
+    try:
+        without = entities_reader.get_entities(str(run_dir), **kwargs)
+    finally:
+        index.write_bytes(saved)
+    assert with_index == without
+
+
+def test_an_index_from_another_profile_is_ignored_rather_than_believed(indexed_run):
+    """The priority and consensus columns are positional in the index, so an
+    index written under a different profile would read the right names off the
+    wrong sums. It is refused instead."""
+    from app.services import clusters_reader, entities_reader
+
+    run_dir = indexed_run
+    for path in (clusters_reader.index_path(run_dir),
+                 entities_reader.index_path(run_dir)):
+        saved = path.read_bytes()
+        pd.DataFrame({"nothing": [1]}).to_parquet(path, index=False)
+        try:
+            assert clusters_reader.get_clusters(str(run_dir), min_units=1)["total"]
+            assert entities_reader.get_entities(str(run_dir))["total"]
+        finally:
+            path.write_bytes(saved)
+
+
+def test_a_track_may_gate_more_than_one_column():
+    """The full PSC run says why. Gating only the surname left every runaway
+    Sikh cluster standing: 206 records under 55 different names, all of them
+    Singh. The forename is the column those chains run away on."""
+    units, members, pairs = _chain(["SINGH", "SINGH", "SINGH", "SINGH"])
+    units["forename_canon"] = ["GURDEEP", "GURPREET", "GURMEET", "AMANDEEP"]
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        TWO_COLUMN_GATE)
+    assert list(summary["n_distinct_surname_clean"]) == [1]
+    assert list(summary["n_distinct_forename_canon"]) == [4]
+    assert list(summary["status"]) == ["mixed_names"]
+
+
+def test_one_column_under_its_limit_does_not_excuse_another_over_it():
+    units, members, pairs = _chain(["SMITH", "JONES", "PATEL", "OKONKWO"])
+    units["forename_canon"] = ["ANN", "ANN", "ANN", "ANN"]
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        TWO_COLUMN_GATE)
+    assert list(summary["status"]) == ["mixed_names"]

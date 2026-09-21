@@ -48,10 +48,15 @@ CLUSTERS_FILENAME = "clusters.parquet"
 STAGE = 4
 STAGE_NAME = "cluster"
 
-# The five statuses, in the order that decides which one is the main one.
-STATUS_ORDER = ("conflict", "too_large", "weak_link", "mixed_ids", "cross_track_ids")
+# The six statuses, in the order that decides which one is the main one.
+# `mixed_names` sits just under `too_large` because it asks the same question —
+# is this one entity at all? — of a cluster that is small enough to pass the
+# size cap and still holds people who are plainly not the same person.
+STATUS_ORDER = ("conflict", "too_large", "mixed_names", "weak_link", "mixed_ids",
+                "cross_track_ids")
 OK = "ok"
 CROSS_TRACK = "cross_track_ids"
+MIXED_NAMES = "mixed_names"
 HELD_KEY = "held_key"
 ATTRIBUTE_TIE = "attribute_tie"
 
@@ -79,7 +84,7 @@ def _step(label, progress_callback=None):
 
 
 def gate_settings(settings: dict) -> dict:
-    """The three gate limits, with the defaults `docs/ENTITIES.md` names."""
+    """The four gate limits, with the defaults `docs/ENTITIES.md` names."""
     return {
         "cluster_floor": float(settings.get("cluster_floor", linkage.DEFAULT_CLUSTER_FLOOR)),
         "max_cluster_units": int(
@@ -88,6 +93,9 @@ def gate_settings(settings: dict) -> dict:
         "max_existing_ids": int(
             settings.get("max_existing_ids", linkage.DEFAULT_MAX_EXISTING_IDS)
         ),
+        # {track: {"column", "count"}}; an empty dict turns the name gate off,
+        # which is what every profile that names no column gets.
+        "max_distinct_values": linkage.max_distinct_values(settings),
     }
 
 
@@ -354,11 +362,34 @@ def import_edges(units: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def _unit_info(con, unit_columns: set) -> None:
-    """``s4_unit_info``: the four unit columns the stage actually reads.
+def gate_columns(per_track: dict) -> list[str]:
+    """Every column the name gate counts, in a stable order, no repeats.
+
+    A track may name several — the PSC person track counts cleaned surnames AND
+    canonical forenames — and a column may be named by more than one track, so
+    it is measured once and every track that named it reads the same number.
+    """
+    out: list[str] = []
+    for limits in per_track.values():
+        for limit in limits:
+            if limit["column"] not in out:
+                out.append(limit["column"])
+    return out
+
+
+def _gate_value_sql(unit_columns: set, column: str) -> str:
+    """One gate column of a unit, blank read as nothing."""
+    if column not in unit_columns:
+        return "CAST(NULL AS VARCHAR)"
+    return f"""NULLIF(trim(CAST("{column}" AS VARCHAR)), '')"""
+
+
+def _unit_info(con, unit_columns: set, limits: dict | None = None) -> None:
+    """``s4_unit_info``: the five unit columns the stage actually reads.
 
     The PSC units file has sixty-odd columns and 15 million rows. This is the
-    only pass over it, and it takes four.
+    only pass over it, and it takes five — the fifth only when a track names a
+    column for the name gate.
     """
     label = units_module.LABEL_COLUMN
     size = "CAST(COALESCE(unit_size, 1) AS BIGINT)" if "unit_size" in unit_columns \
@@ -366,10 +397,15 @@ def _unit_info(con, unit_columns: set) -> None:
     track = "CAST(track AS VARCHAR)" if "track" in unit_columns else "CAST(NULL AS VARCHAR)"
     labelled = f'CAST("{label}" AS VARCHAR)' if label in unit_columns \
         else "CAST(NULL AS VARCHAR)"
+    gates = gate_columns((limits or {}).get("max_distinct_values") or {})
+    gate_select = "".join(
+        f", {_gate_value_sql(unit_columns, column)} AS gate_{index}"
+        for index, column in enumerate(gates)
+    )
     con.execute(f"""
         CREATE OR REPLACE TABLE s4_unit_info AS
         SELECT CAST(unit_id AS VARCHAR) AS unit_id, {size} AS unit_size,
-               {track} AS track, {labelled} AS label
+               {track} AS track, {labelled} AS label{gate_select}
         FROM {UNITS_VIEW}
     """)
     con.execute("""
@@ -400,6 +436,14 @@ def _summary(con, limits: dict, pair_columns: set, decisions: dict | None) -> pd
     else:
         weak = "SELECT NULL AS cluster_id, NULL AS lo WHERE FALSE"
 
+    gates = gate_columns(limits.get("max_distinct_values") or {})
+    distinct_select = "".join(
+        f", count(DISTINCT u.gate_{index}) AS n_{index}" for index in range(len(gates))
+    )
+    distinct_columns = "".join(
+        f"CAST(COALESCE(dv.n_{index}, 0) AS BIGINT) AS \"n_distinct_{gates[index]}\", "
+        for index in range(len(gates))
+    )
     summary = con.execute(f"""
         WITH per_cluster AS (
             SELECT c.cluster_id AS cluster_id, count(*) AS n_units,
@@ -422,6 +466,12 @@ def _summary(con, limits: dict, pair_columns: set, decisions: dict | None) -> pd
             SELECT DISTINCT cluster_id FROM mem
             WHERE label IN (SELECT label FROM shared)
         ),
+        distinct_values AS (
+            SELECT c.cluster_id AS cluster_id{distinct_select}
+            FROM s4_unit_cluster c
+            JOIN s4_unit_info u ON u.unit_id = c.unit_id
+            GROUP BY c.cluster_id
+        ),
         weak AS ({weak}),
         conflicted AS (
             SELECT DISTINCT a.cluster_id AS cluster_id
@@ -432,11 +482,13 @@ def _summary(con, limits: dict, pair_columns: set, decisions: dict | None) -> pd
         )
         SELECT pc.cluster_id, pc.n_units, pc.n_records, pc.track,
                CAST(COALESCE(ids.n, 0) AS BIGINT) AS n_existing_ids,
+               {distinct_columns}
                COALESCE(weak.lo < {float(limits['cluster_floor'])}, FALSE) AS weak_link,
                (conflicted.cluster_id IS NOT NULL) AS conflict,
                (crossed.cluster_id IS NOT NULL) AS {CROSS_TRACK}
         FROM per_cluster pc
         LEFT JOIN ids ON ids.cluster_id = pc.cluster_id
+        LEFT JOIN distinct_values dv ON dv.cluster_id = pc.cluster_id
         LEFT JOIN weak ON weak.cluster_id = pc.cluster_id
         LEFT JOIN conflicted ON conflicted.cluster_id = pc.cluster_id
         LEFT JOIN crossed ON crossed.cluster_id = pc.cluster_id
@@ -445,6 +497,21 @@ def _summary(con, limits: dict, pair_columns: set, decisions: dict | None) -> pd
 
     summary["too_large"] = summary["n_units"] > limits["max_cluster_units"]
     summary["mixed_ids"] = summary["n_existing_ids"] > limits["max_existing_ids"]
+    # The name gate. A cluster trips it when ANY column the track names shows
+    # more distinct values than that column's own limit. A track with no entry
+    # is not gated this way at all, and neither is a profile that names none.
+    per_track = limits.get("max_distinct_values") or {}
+    over = pd.Series(False, index=summary.index)
+    tracks = summary["track"]
+    for column in gates:
+        counted = summary[f"n_distinct_{column}"]
+        caps = tracks.map({
+            track: limit["count"]
+            for track, entries in per_track.items()
+            for limit in entries if limit["column"] == column
+        })
+        over = over | (counted > caps.fillna(np.inf)).fillna(False)
+    summary[MIXED_NAMES] = over.astype(bool)
     # A cluster of one unit is nothing to gate: there is no merge to doubt.
     alone = (summary["n_units"] < 2).to_numpy()
     for status in STATUS_ORDER:
@@ -459,7 +526,7 @@ def _summary(con, limits: dict, pair_columns: set, decisions: dict | None) -> pd
     }
     summary["decided"] = summary["cluster_id"].isin(merged_scopes)
     decided = summary["decided"].to_numpy()
-    for status in ("too_large", "weak_link", "mixed_ids"):
+    for status in ("too_large", MIXED_NAMES, "weak_link", "mixed_ids"):
         summary.loc[decided, status] = False
 
     # The statuses of every cluster at once. The old row-by-row build cost
@@ -478,8 +545,9 @@ def _summary(con, limits: dict, pair_columns: set, decisions: dict | None) -> pd
     summary["withheld"] = summary["status"] != OK
     return summary[[
         "cluster_id", "n_units", "n_records", "track", "n_existing_ids",
-        "weak_link", "conflict", CROSS_TRACK, "too_large", "mixed_ids",
-        "decided", "statuses", "status", "withheld",
+        *[f"n_distinct_{column}" for column in gates],
+        "weak_link", "conflict", CROSS_TRACK, "too_large",
+        MIXED_NAMES, "mixed_ids", "decided", "statuses", "status", "withheld",
     ]]
 
 
@@ -585,7 +653,7 @@ def _cluster(con, settings: dict, applied: pd.DataFrame | None,
     pair_columns = _columns(con, PAIRS_VIEW)
 
     _verdict_table(con, applied)
-    _unit_info(con, unit_columns)
+    _unit_info(con, unit_columns, limits)
     _edge_table(con, unit_columns, pair_columns)
 
     n_units = int(con.execute("SELECT count(*) FROM s4_unit_code").fetchone()[0])
@@ -761,6 +829,17 @@ def run_stage_4_cluster(
     finally:
         con.close()
         duckdb_conn.clear_spill(temp_dir)
+
+    # The queue's index. Every list reader used to rebuild its whole-run
+    # aggregate on every request, which is what ran out of memory at PSC scale
+    # (`docs/PSC_HANDOVER.md` section 107, item 6). The queue's own SQL writes
+    # it, so there is still one definition of a queue row.
+    with_index = time.time()
+    from app.services import clusters_reader
+
+    clusters_reader.write_index(run_dir)
+    _step(f"  Cluster index written in {time.time() - with_index:.1f}s",
+          progress_callback)
 
     counts = counts_from(None, summary, held, decisions)
     elapsed = time.time() - t_start

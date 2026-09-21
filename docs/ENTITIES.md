@@ -21,14 +21,17 @@ Input: `units.parquet`, `unit_members.parquet`, `pairs.parquet`, the active `pai
 | `conflict` | a human FALSE label joins two of its units |
 | `weak_link` | a scored pair inside it sits below `cluster_floor` (a linkage setting, default 0.20), so the cluster may be a chain |
 | `too_large` | more units than `max_cluster_units` (a linkage setting, default 200) |
+| `mixed_names` | its units show more than `count` distinct values of a named column. The setting is `max_distinct_values`, `{track: {"column": ..., "count": ...}}` in `linkage_settings.json`, and a track with no entry is not gated this way. PSC person is `{"column": "surname_clean", "count": 3}`; donations names none. The shape is the match keys' own `max_distinct` guard, so a reader who has met one has met both |
 | `mixed_ids` | its records carry more than `max_existing_ids` distinct `existing_entity_id` values (default 1), so it would merge groups the earlier grouping kept apart |
 | `cross_track_ids` | one earlier ID covers both a person and an organisation, so the tool keeps them as two entities |
 | `attribute_tie` | two values were equally common, so one value for the whole cluster could not be settled |
 | `held_key` | a guard on a match key stopped these records being put together; the group joins the same queue |
 
 A cluster may carry several statuses. The first in the order conflict,
-too_large, weak_link, mixed_ids, cross_track_ids is its main one. The labels a
-user sees for all of these are in `app/vocabulary.CLUSTER_STATUS`.
+too_large, mixed_names, weak_link, mixed_ids, cross_track_ids is its main one.
+`mixed_names` sits just under `too_large` because it asks the same question —
+is this one entity at all? — of a cluster small enough to pass the size cap.
+The labels a user sees for all of these are in `app/vocabulary.CLUSTER_STATUS`.
 
 4. **What is proposed.** An `ok` cluster becomes one entity. A cluster with any other status is **withheld**: it is rebuilt from trusted edges only (`import` and `human`), and each of those smaller parts becomes an entity. The withheld cluster goes to the cluster review queue. A human decision always wins, so an edge from a human TRUE label is never withheld, and a human FALSE label always separates.
 5. **Held exact groups** from stage 2 also go to the cluster review queue, with status `held_key`. Their records stay separate until a human decides.
@@ -44,7 +47,9 @@ The file is one row per **unit**, so it holds the real clusters only. A held exa
 
 The connected components are the one step DuckDB does not do, because SciPy owns that walk. It is given **integer unit codes**, never strings: `DENSE_RANK`-style coding in SQL turns each `unit_id` into a position in `0 .. n-1`, and `components(n_units, rows, cols)` refuses an array that is not an integer one. Two int32 arrays per edge is 8 bytes; two Python strings is about 150.
 
-Only four columns of `units.parquet` are read — `unit_id`, `unit_size`, `track`, `existing_entity_id`. The PSC units file carries sixty-odd.
+Only five columns of `units.parquet` are read — `unit_id`, `unit_size`, `track`, `existing_entity_id`, and the one column `max_distinct_values` names for the track, when it names one. The PSC units file carries sixty-odd.
+
+**The index files (item 6).** Stage 4 also writes `clusters_index.parquet`, one row per cluster with everything the review queue shows, and stage 5 writes `entities_index.parquet`, one row per entity with what the Entities list shows. Each is built by that list's own SQL — `clusters_reader.write_index` and `entities_reader.write_index` — so the file and the query it replaces cannot drift apart. A reader uses the index when it is there and whose columns are this profile's; it rebuilds the aggregate when it is not, so a run from an older pipeline still opens. Without them, every request joined two multi-gigabyte parquets and grouped them with `list()` aggregates DuckDB cannot spill, which is what ran out of memory in the server's 6 GB budget.
 
 ## Entity IDs and the registry
 

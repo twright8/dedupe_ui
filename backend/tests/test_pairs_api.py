@@ -462,3 +462,186 @@ def test_the_page_still_carries_every_unit_column(db_path, data_dir):
     assert page["items"], "nothing to check"
     for side in ("left", "right"):
         assert set(page["items"][0][side]) == set(units.columns)
+
+
+# ---------------------------------------------------------------------------
+# Item 6: the listing index
+# ---------------------------------------------------------------------------
+
+
+_INDEX_CASES = [
+    {},
+    {"sort": "score", "order": "asc"},
+    {"sort": "priority"},
+    {"sort": "name", "order": "asc"},
+    {"sort": "useful", "order": "desc"},
+    {"bucket": "accept"},
+    {"bucket": "review", "decided_by": "score"},
+    {"track": "person"},
+    {"q": "a", "sort": "score"},
+    {"sort": "score", "offset": 1, "limit": 2},
+    {"min_score": 0.5, "max_score": 1.0},
+    {"held": "hide"},
+    {"vetoed": "no"},
+]
+
+
+@pytest.mark.parametrize("kwargs", _INDEX_CASES)
+def test_the_listing_index_gives_the_answer_the_two_joins_gave(db_path, data_dir,
+                                                               kwargs):
+    """The index is the pairs file with the two unit joins already done. It has
+    to answer exactly as the joins did — the same total, the same chip counts
+    and the same items, in the same order."""
+    from app.services import pairs_reader
+
+    _seed_run(db_path, data_dir)
+    run_dir = str(data_dir / "runs" / RUN_ID)
+    # The same call stage 3 makes when the pairs file is final.
+    index = pairs_reader.write_index(run_dir)
+    assert index.is_file()
+
+    with_index = pairs_reader.get_pairs(run_dir, **kwargs)
+    saved = index.read_bytes()
+    index.unlink()
+    try:
+        without = pairs_reader.get_pairs(run_dir, **kwargs)
+    finally:
+        index.write_bytes(saved)
+    assert with_index == without
+
+
+def test_the_index_answers_the_detail_and_the_histogram_the_same_way(db_path,
+                                                                    data_dir):
+    from app.services import pairs_reader
+
+    _seed_run(db_path, data_dir)
+    run_dir = str(data_dir / "runs" / RUN_ID)
+    index = pairs_reader.write_index(run_dir)
+    pair_id = pairs_reader.get_pairs(run_dir, limit=1)["items"][0]["pair_id"]
+
+    with_index = (pairs_reader.get_pair(run_dir, pair_id),
+                  pairs_reader.get_histogram(run_dir, bins=10),
+                  pairs_reader.get_histogram(run_dir, track="person", bins=10))
+    saved = index.read_bytes()
+    index.unlink()
+    try:
+        without = (pairs_reader.get_pair(run_dir, pair_id),
+                   pairs_reader.get_histogram(run_dir, bins=10),
+                   pairs_reader.get_histogram(run_dir, track="person", bins=10))
+    finally:
+        index.write_bytes(saved)
+    assert with_index == without
+
+
+def test_an_index_older_than_the_pairs_file_is_ignored(db_path, data_dir):
+    """A path that rewrites `pairs.parquet` and forgets the index costs a slow
+    page, never a wrong answer."""
+    import os
+
+    from app.services import pairs_reader
+
+    _seed_run(db_path, data_dir)
+    run_dir = str(data_dir / "runs" / RUN_ID)
+    index = pairs_reader.write_index(run_dir)
+    pairs = pairs_reader.pairs_path(run_dir)
+    expected = pairs_reader.get_pairs(run_dir)
+
+    os.utime(index, (1, 1))
+    assert not pairs_reader._index_fits(
+        index, pairs, _column_names_of(pairs))
+    assert pairs_reader.get_pairs(run_dir) == expected
+
+
+def _column_names_of(path):
+    import pyarrow.parquet as pq
+
+    return list(pq.ParquetFile(path).schema_arrow.names)
+
+
+def test_rewriting_the_pairs_and_the_index_keeps_them_in_step(db_path, data_dir):
+    """What a re-bucket, an apply-model and a revert-model all do: rewrite the
+    pairs file, then rewrite the index from it."""
+    from app.pipeline.dedupe import stage_3_score
+    from app.services import pairs_reader
+
+    _seed_run(db_path, data_dir)
+    run_dir = str(data_dir / "runs" / RUN_ID)
+    pairs = pairs_reader.pairs_path(run_dir)
+    pairs_reader.write_index(run_dir)
+
+    units = pd.read_parquet(data_dir / "runs" / RUN_ID / "units.parquet")
+    stage_3_score.rewrite_pairs(pairs, units, 0.10, 0.99)
+    stage_3_score.write_pair_index(run_dir)
+
+    index = pairs_reader.pair_index_path(run_dir)
+    assert pairs_reader._index_fits(index, pairs, _column_names_of(pairs))
+    from_index = pairs_reader.get_pairs(run_dir)
+    saved = index.read_bytes()
+    index.unlink()
+    try:
+        assert pairs_reader.get_pairs(run_dir) == from_index
+    finally:
+        index.write_bytes(saved)
+
+
+def test_the_chip_counts_are_cached_and_the_cache_knows_when_it_is_stale(db_path,
+                                                                         data_dir):
+    """The chips describe the whole run and ignore the filters, so they are the
+    same seventeen numbers on every page of every search — and at PSC scale
+    they cost a pass over 41 million pairs. The file names what it was computed
+    from, so nothing has to remember to refresh it."""
+    from app.services import pairs_reader
+
+    _seed_run(db_path, data_dir)
+    run_dir = str(data_dir / "runs" / RUN_ID)
+    pairs_reader.write_index(run_dir)
+    cache = pairs_reader.pair_counts_path(run_dir)
+    assert not cache.is_file()
+
+    first = pairs_reader.get_pairs(run_dir)
+    assert cache.is_file()
+    assert pairs_reader.get_pairs(run_dir)["counts"] == first["counts"]
+
+    # A cache that names different inputs is not used. Rewriting the pairs file
+    # is the clearest case: the counts are recomputed and the file rewritten.
+    import json
+
+    stale = json.loads(cache.read_text(encoding="utf-8"))
+    stale["counts"] = {key: -1 for key in stale["counts"]}
+    cache.write_text(json.dumps(stale), encoding="utf-8")
+    assert pairs_reader.get_pairs(run_dir)["counts"]["all"] == -1  # it is believed
+
+    stale["stamp"]["pairs_size"] = 1
+    cache.write_text(json.dumps(stale), encoding="utf-8")
+    assert pairs_reader.get_pairs(run_dir)["counts"] == first["counts"]
+
+
+def test_a_label_written_since_the_cache_makes_it_stale(db_path, data_dir):
+    from app.services import pairs_reader
+
+    _seed_run(db_path, data_dir)
+    run_dir = str(data_dir / "runs" / RUN_ID)
+    pairs_reader.write_index(run_dir)
+    unlabelled = pairs_reader.get_pairs(run_dir)["counts"]
+
+    labels = pd.DataFrame([{
+        "record_id_a": "r1", "record_id_b": "r2", "is_match": "TRUE",
+        "reviewer": "t", "created_at": "2026-01-01", "notes": None,
+        "evidence_url": None, "provenance": "manual", "held_out": 0,
+    }])
+    pairs = pairs_reader.pairs_path(run_dir)
+    # The cache was computed with no labels, so it cannot answer for these.
+    assert pairs_reader.cached_counts(run_dir, pairs, None) == unlabelled
+    assert pairs_reader.cached_counts(run_dir, pairs, labels) is None
+
+    labelled = pairs_reader.get_pairs(run_dir, labels=labels)["counts"]
+    assert pairs_reader.cached_counts(run_dir, pairs, labels) == labelled
+    # And the two answers do not overwrite each other's correctness.
+    assert pairs_reader.get_pairs(run_dir)["counts"] == unlabelled
+    assert pairs_reader.get_pairs(run_dir, labels=labels)["counts"] == labelled
+
+    # A note is not an answer, so it does not move a chip.
+    noted = labels.copy()
+    noted.loc[0, "notes"] = "had another look"
+    assert pairs_reader._labels_fingerprint(noted) == \
+        pairs_reader._labels_fingerprint(labels)

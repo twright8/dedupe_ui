@@ -26,9 +26,13 @@ from app.services.clusters_reader import (  # the same helpers, one definition
     _json_safe,
     _rows,
 )
+from app.services import index_chunks
 from app.services.records_reader import describe_columns
 
 ENTITIES_FILENAME = "entities.parquet"
+#: One row per entity, with everything the Entities list shows. Written by
+#: stage 5 (`write_index`); a run without one is read the old way.
+ENTITY_INDEX_FILENAME = "entities_index.parquet"
 RECORDS_FILENAME = "records.parquet"
 REPORT_FILENAME = "entity_report.json"
 
@@ -60,6 +64,10 @@ def entities_path(run_dir: str) -> Path:
 
 def report_path(run_dir: str) -> Path:
     return Path(run_dir) / REPORT_FILENAME
+
+
+def index_path(run_dir: str) -> Path:
+    return Path(run_dir) / ENTITY_INDEX_FILENAME
 
 
 def _open(run_dir: str):
@@ -99,42 +107,157 @@ _STRONGEST = (
 _NAME_JOIN = "chr(1)"
 
 
-def _base_sql(run_dir: str, record_columns: list[str], entity_columns: list[str],
-              priority: list[str], consensus: list[str]) -> tuple[str, list]:
+def _projection_sql(run_dir: str, record_columns: list[str],
+                    entity_columns: list[str], priority: list[str],
+                    consensus: list[str]) -> tuple[str, list]:
+    """The join, projected to the columns the group-by reads and no others.
+
+    `entities.parquet` is one row per record and `records.parquet` is the run's
+    whole input. This is the only pass over either of them.
+    """
     name = "CAST(r.name AS VARCHAR)" if "name" in record_columns \
         else "CAST(NULL AS VARCHAR)"
     label = "NULLIF(trim(CAST(r.existing_entity_id AS VARCHAR)), '')" \
         if "existing_entity_id" in record_columns else "CAST(NULL AS VARCHAR)"
+    stored_status = "CAST(e.id_status AS VARCHAR)" \
+        if "id_status" in entity_columns else "CAST(NULL AS VARCHAR)"
     priority_select = "".join(
-        f', sum(TRY_CAST(r."{column}" AS DOUBLE)) AS "priority_{index}"'
+        f', TRY_CAST(r."{column}" AS DOUBLE) AS "p_{index}"'
         for index, column in enumerate(priority)
     )
     consensus_select = "".join(
-        f', any_value(e."{column}_entity") AS "attr_{index}"'
-        f', any_value(e."{column}_entity_basis") AS "attr_basis_{index}"'
+        f', e."{column}_entity" AS "a_{index}"'
+        f', e."{column}_entity_basis" AS "ab_{index}"'
         for index, column in enumerate(consensus)
     )
-    stored_status = "any_value(CAST(e.id_status AS VARCHAR))" \
-        if "id_status" in entity_columns else "CAST(NULL AS VARCHAR)"
     sql = f"""
         SELECT CAST(e.entity_id AS VARCHAR) AS entity_id,
-               any_value(e.track) AS track,
-               any_value(e.cluster_id) AS cluster_id,
-               count(*) AS n_records,
-               count(DISTINCT CAST(e.unit_id AS VARCHAR)) AS n_units,
-               list_sort(list_distinct(list(e.entity_basis))) AS bases,
-               list_slice(list_sort(list_distinct(list({name}))), 1, {MAX_NAMES}) AS names,
-               min({name}) AS first_name,
-               list_slice(list_sort(list_distinct(list({label}))), 1, {MAX_NAMES})
-                   AS existing_entity_ids,
-               {stored_status} AS stored_id_status
+               e.track AS track, e.cluster_id AS cluster_id,
+               CAST(e.unit_id AS VARCHAR) AS unit_id,
+               e.entity_basis AS entity_basis,
+               {stored_status} AS stored_id_status,
+               {name} AS nm, {label} AS lbl
                {priority_select}{consensus_select}
         FROM read_parquet(?) e
         JOIN read_parquet(?) r
           ON CAST(r.record_id AS VARCHAR) = CAST(e.record_id AS VARCHAR)
-        GROUP BY CAST(e.entity_id AS VARCHAR)
     """
     return sql, [str(entities_path(run_dir)), str(Path(run_dir) / RECORDS_FILENAME)]
+
+
+def _aggregate_sql(source: str, priority: list[str], consensus: list[str],
+                   where: str = "") -> str:
+    """One row per entity, over `_projection_sql`'s columns."""
+    priority_select = "".join(
+        f', sum("p_{index}") AS "priority_{index}"' for index in range(len(priority))
+    )
+    consensus_select = "".join(
+        f', any_value("a_{index}") AS "attr_{index}"'
+        f', any_value("ab_{index}") AS "attr_basis_{index}"'
+        for index in range(len(consensus))
+    )
+    return f"""
+        SELECT entity_id,
+               any_value(track) AS track,
+               any_value(cluster_id) AS cluster_id,
+               count(*) AS n_records,
+               count(DISTINCT unit_id) AS n_units,
+               list_sort(list_distinct(list(entity_basis))) AS bases,
+               list_slice(list_sort(list_distinct(list(nm))), 1, {MAX_NAMES}) AS names,
+               min(nm) AS first_name,
+               list_slice(list_sort(list_distinct(list(lbl))), 1, {MAX_NAMES})
+                   AS existing_entity_ids,
+               any_value(stored_id_status) AS stored_id_status
+               {priority_select}{consensus_select}
+        FROM {source}{where}
+        GROUP BY entity_id
+    """
+
+
+def _group_sql(run_dir: str, record_columns: list[str], entity_columns: list[str],
+               priority: list[str], consensus: list[str]) -> tuple[str, list]:
+    """One row per entity, grouped out of the two big files.
+
+    At PSC scale that is 15 million rows joined and grouped to 8.5 million, with
+    ``list()`` aggregates DuckDB cannot spill, on every request. Stage 5 runs it
+    once and `write_index` keeps the answer.
+    """
+    projection, params = _projection_sql(run_dir, record_columns, entity_columns,
+                                         priority, consensus)
+    return _aggregate_sql(f"({projection})", priority, consensus), params
+
+
+#: What a list row is built from, before the priority and consensus columns.
+INDEX_COLUMNS = ("entity_id", "track", "cluster_id", "n_records", "n_units",
+                 "bases", "names", "first_name", "existing_entity_ids",
+                 "stored_id_status")
+
+
+def _index_columns(priority: list[str], consensus: list[str]) -> list[str]:
+    out = list(INDEX_COLUMNS)
+    out += [f"priority_{i}" for i in range(len(priority))]
+    for i in range(len(consensus)):
+        out += [f"attr_{i}", f"attr_basis_{i}"]
+    return out
+
+
+def _index_fits(index: Path, priority: list[str], consensus: list[str]) -> bool:
+    """An index whose columns are not exactly the ones this profile asks for is
+    ignored: the priority and consensus columns are positional, so a profile
+    that has changed since the stage ran would read the wrong sums."""
+    if not index.is_file():
+        return False
+    try:
+        import pyarrow.parquet as pq
+
+        held = list(pq.ParquetFile(index).schema_arrow.names)
+    except Exception:
+        return False
+    return held == _index_columns(priority, consensus)
+
+
+def write_index(run_dir, chunks: int | None = None) -> Path | None:
+    """Write the per-entity index. Stage 5 calls this when it has finished.
+
+    **In chunks, because a `list()` aggregate cannot spill.** One group-by
+    producing 8.5 million rows with list columns in them builds a hash table
+    DuckDB pins, and it fails at any memory limit a server would set — this is
+    the same shape as the 61-way join of `docs/PSC_HANDOVER.md` section 104.
+    The join is materialised once, then the groups are split by a hash of the
+    entity id and written a fraction at a time. Each pass is a scan of a narrow
+    table, and the parts are concatenated by a plain scan, which streams.
+    """
+    run_dir = Path(run_dir)
+    if not entities_path(run_dir).is_file() or not (run_dir / RECORDS_FILENAME).is_file():
+        return None
+    out = index_path(run_dir)
+    con = duckdb_conn.reader_connect(run_dir)
+    try:
+        record_columns = _column_names(con, run_dir / RECORDS_FILENAME)
+        entity_columns = _column_names(con, entities_path(run_dir))
+        priority = [c for c in get_profile().priority_columns if c in record_columns]
+        consensus = _consensus_columns(entity_columns)
+        projection, params = _projection_sql(str(run_dir), record_columns,
+                                             entity_columns, priority, consensus)
+        con.execute(f"CREATE OR REPLACE TABLE er_index_src AS {projection}", params)
+        index_chunks.write(
+            con, out,
+            lambda where: _aggregate_sql("er_index_src", priority, consensus, where),
+            key="entity_id", chunks=chunks, work=run_dir / "duckdb_tmp",
+            prefix="entities_index",
+        )
+    finally:
+        con.close()
+    return out
+
+
+def _base_sql(run_dir: str, record_columns: list[str], entity_columns: list[str],
+              priority: list[str], consensus: list[str]) -> tuple[str, list]:
+    """The per-entity rows: off the index when there is one, grouped when not."""
+    index = index_path(run_dir)
+    if _index_fits(index, priority, consensus):
+        return "SELECT * FROM read_parquet(?)", [str(index)]
+    return _group_sql(run_dir, record_columns, entity_columns, priority, consensus)
 
 
 def _item(row: dict, priority: list[str], consensus: list[str],

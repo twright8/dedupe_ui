@@ -274,6 +274,12 @@ def test_the_tuples_the_backend_validates_against_come_from_here():
     assert entities_reader.ID_STATUSES is vocabulary.ID_STATUSES
     assert pairs_reader.BUCKETS is vocabulary.BUCKETS
     assert pairs_reader.DECIDED_BY is vocabulary.DECIDED_BY
+
+    from app.rules import linkage, vetoes
+
+    assert linkage.BUCKETS is vocabulary.BUCKETS
+    assert linkage.DECIDED_BY is vocabulary.DECIDED_BY
+    assert set(vetoes.OPERATORS) == set(vocabulary.VETO_OPS)
     assert clusters_reader.STATUSES is vocabulary.CLUSTER_STATUSES
     assert exact_groups_reader.AGREEMENTS is vocabulary.AGREEMENTS
     assert pair_labels.PROVENANCES is vocabulary.LABEL_PROVENANCES

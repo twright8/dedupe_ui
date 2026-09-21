@@ -1776,6 +1776,86 @@
       "_measured": "Two clearly different forenames are siblings or spouses at one address, not one person. Review and not reject: a filing may carry a middle name where another carries a first name, and the nickname lookup has already had its chance, so a human decides."
     },
     {
+      "id": "v3",
+      "track": "person",
+      "description": "Two clearly different surnames, and nothing else says these are one person: the full postcodes do not agree and neither do the middle names.",
+      "when": [
+        {
+          "column": "surname_clean",
+          "op": "similarity_lt",
+          "value": 0.85
+        },
+        {
+          "column": "postcode_clean",
+          "op": "not_equal_or_missing"
+        },
+        {
+          "column": "middle_clean",
+          "op": "not_equal_or_missing"
+        }
+      ],
+      "action": "reject",
+      "reason": "Surnames {left} and {right}, with no shared postcode or middle name",
+      "_measured": "Blocking route pb5 pairs two people who share a forename sound and a date of birth and do NOT share a surname sound. It exists to catch a surname changed at marriage, and at full scale it is what joins strangers: 848,976 of the 6,390,630 accepted person pairs had two different surnames, and nineteen of the twenty largest proposed person entities were built from them. The threshold is 0.85 Jaro-Winkler on the cleaned surname, read off the full run: among accepted pairs with different surnames the share that also agree on a middle name is 29.1% at 0.95 and over, 20.1% from 0.90 to 0.95 and 18.6% from 0.85 to 0.90, then falls to 11.3% from 0.80 to 0.85 and 4.6% from 0.70 to 0.80 — against 42.8% for an accepted pair whose surnames match. Below 0.85 the surname difference stops behaving like a spelling variant. This rule hits 638,883 accepted pairs and rejects them. It removes no accepted pair whose surname and whose full date of birth both agree, because it cannot fire on one."
+    },
+    {
+      "id": "v4",
+      "track": "person",
+      "description": "Two clearly different surnames are never joined without a person looking, even when the address or the middle name agrees.",
+      "when": [
+        {
+          "column": "surname_clean",
+          "op": "similarity_lt",
+          "value": 0.85
+        }
+      ],
+      "action": "review",
+      "reason": "Surnames {left} and {right}",
+      "_measured": "A surname changed at marriage is a real merge and almost always keeps the address, so v3 leaves it alone. It must still not be made without a person: this rule caps every clearly-different-surname pair at review, so 70,224 accepted pairs that v3 spares — the ones the full postcode or the middle name corroborates — go to a reviewer instead of being merged in silence. Review and not reject, because the corroboration is real evidence and a human can read it."
+    },
+    {
+      "id": "v5",
+      "track": "person",
+      "description": "Two clearly different middle names, two different birth months and no shared postcode: these are two people with the same first and last name.",
+      "when": [
+        {
+          "column": "middle_clean",
+          "op": "similarity_lt",
+          "value": 0.7
+        },
+        {
+          "column": "dob_month_clean",
+          "op": "differs"
+        },
+        {
+          "column": "postcode_clean",
+          "op": "not_equal_or_missing"
+        }
+      ],
+      "action": "reject",
+      "reason": "Middle names {left} and {right}, born in different months and at different addresses",
+      "_measured": "The second family of bad merges keeps the surname and changes everything else: Kenneth John Cowan of Suffolk born March 1971 was accepted against Kenneth Gordon Cowan of Ayrshire born November 1972 at p = 0.9636, and Jason James Wignall of Devon born October 1986 against Jason David Wignall of Lancashire born June 1986 at p = 0.9967. Both middle names are filed, both are plainly different, the birth months differ and the addresses are hundreds of miles apart. The 0.7 threshold is v2's, so 'clearly different' means the same thing for a forename and for a middle name; JOHN against JOHN PAUL scores 0.91 and is not touched. This rule hits 157,640 accepted pairs, 82,220 of which no other rule catches. It needs both middle names to be present, so a filing that carries one and not the other is left alone."
+    },
+    {
+      "id": "v6",
+      "track": "person",
+      "description": "A different birth year and a different birth month are two different dates of birth, not one date filed twice.",
+      "when": [
+        {
+          "column": "dob_year_clean",
+          "op": "abs_diff_gte",
+          "value": 1
+        },
+        {
+          "column": "dob_month_clean",
+          "op": "differs"
+        }
+      ],
+      "action": "reject",
+      "reason": "Born {left} and {right}, and not in the same month",
+      "_measured": "v1 leaves one year of slack for an off-by-one filing. This rule says the slack was for a slip, and a birth month that also differs shows it was not a slip: two independent errors in one date is not how a register goes wrong. It hits 279,652 accepted pairs, 204,148 of which no other rule catches — Kirsten Cherie Walker of SG11, a New Zealander born April 1974, was accepted against Kirsten Walker of RH20, British, born February 1973, and neither v3 nor v5 can see it, because the surname matches and only one side filed a middle name. The cost is 11,190 pairs that share a full postcode, where a genuine misfiling would show; they are rejected too, because a filed date of birth is the register's identity field and two of them are two people."
+    },
+    {
       "id": "ov1",
       "track": "organisation",
       "description": "Two different registration numbers are two registrations.",

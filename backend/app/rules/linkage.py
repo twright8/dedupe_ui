@@ -12,6 +12,8 @@ scoring stage and the Config screen's validation agree on what is allowed. A
 
 import re
 
+from app import vocabulary
+
 TRACK_KEYS = ("person", "organisation")
 
 # The fixed allow-list from LINKAGE.md. The UI offers these and nothing else,
@@ -57,8 +59,10 @@ DEFAULT_CLUSTER_FLOOR = 0.20
 DEFAULT_MAX_CLUSTER_UNITS = 200
 DEFAULT_MAX_EXISTING_IDS = 1
 
-BUCKETS = ("accept", "review", "reject")
-DECIDED_BY = ("score", "import", "human")
+# One definition each, in `app/vocabulary.py`, so a label and a validation
+# message can never name a value this module does not know.
+BUCKETS = vocabulary.BUCKETS
+DECIDED_BY = vocabulary.DECIDED_BY
 
 # The hot-key blocking control (docs/LINKAGE.md). A blocking rule may carry
 # these four optional keys; a rule without them blocks exactly as it always did.
@@ -953,7 +957,7 @@ def _check_block_control(rule: dict, sql: str, path: str, track: str,
     mode = rule.get("on_oversize")
     if "on_oversize" in rule and mode not in ON_OVERSIZE:
         _error(errors, f"{path}.on_oversize",
-               f"on_oversize must be one of {', '.join(ON_OVERSIZE)}")
+               vocabulary.choice_error("on_oversize", mode, ON_OVERSIZE))
         mode = None
 
     refine = rule.get("refine_with")
@@ -988,6 +992,71 @@ def _check_block_control(rule: dict, sql: str, path: str, track: str,
         _error(errors, f"{path}.max_block_size",
                "A rule with no 'l.column = r.column' has no blocks to size, so "
                "it cannot take a hot-key control")
+
+
+def max_distinct_values(settings: dict) -> dict:
+    """``{track: [{"column": str, "count": int}, ...]}`` — the stage 4 name gate.
+
+    A track may name more than one column, because a runaway cluster does not
+    always run away on the same one: the PSC person track needs both the
+    surname and the forename, and gating only the surname leaves every
+    "<different forename> Singh" cluster standing. One column may still be
+    written as a bare object rather than a list of one.
+
+    A malformed entry is dropped rather than guessed at; `validate_linkage_settings`
+    is what tells the user about it.
+    """
+    raw = (settings or {}).get("max_distinct_values")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, list[dict]] = {}
+    for track, spec in raw.items():
+        if track not in TRACK_KEYS:
+            continue
+        limits = []
+        for entry in (spec if isinstance(spec, list) else [spec]):
+            if not isinstance(entry, dict):
+                continue
+            column = entry.get("column")
+            count = entry.get("count")
+            if not isinstance(column, str) or not column:
+                continue
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                continue
+            limits.append({"column": column, "count": count})
+        if limits:
+            out[track] = limits
+    return out
+
+
+def _check_max_distinct_values(settings: dict, errors: list[dict]) -> None:
+    raw = (settings or {}).get("max_distinct_values")
+    if raw is None:
+        return
+    path = "linkage_settings.max_distinct_values"
+    if not isinstance(raw, dict):
+        _error(errors, path, "max_distinct_values must be an object keyed by track")
+        return
+    for track, spec in raw.items():
+        if track not in TRACK_KEYS:
+            _error(errors, f"{path}.{track}",
+                   vocabulary.choice_error("track", track, TRACK_KEYS))
+            continue
+        entries = spec if isinstance(spec, list) else [spec]
+        if not entries or not all(isinstance(e, dict) for e in entries):
+            _error(errors, f"{path}.{track}",
+                   "Each track needs a column and a count, or a list of them")
+            continue
+        for index, entry in enumerate(entries):
+            at = f"{path}.{track}" + (f"[{index}]" if isinstance(spec, list) else "")
+            column = entry.get("column")
+            if not isinstance(column, str) or not column:
+                _error(errors, f"{at}.column",
+                       "max_distinct_values needs a column to count the values of")
+            count = entry.get("count")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                _error(errors, f"{at}.count",
+                       "count must be a whole number of 1 or more")
 
 
 def _check_track(track: str, config: dict, known: set[str], errors: list[dict]) -> None:
@@ -1031,8 +1100,8 @@ def _check_track(track: str, config: dict, known: set[str], errors: list[dict]) 
             function = spec.get("splink_function")
             if function not in COMPARISON_FUNCTIONS:
                 _error(errors, f"{path}.splink_function",
-                       "splink_function must be one of "
-                       f"{', '.join(COMPARISON_FUNCTIONS)}")
+                       vocabulary.choice_error("splink_function", function,
+                                               COMPARISON_FUNCTIONS))
             elif function == NUMERIC_DIFFERENCE:
                 _check_numeric_difference(spec, path, errors)
             column = spec.get("column")

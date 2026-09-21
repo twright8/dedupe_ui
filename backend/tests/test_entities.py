@@ -1415,3 +1415,4 @@ def test_a_cluster_detail_reads_the_members_once_not_once_per_unit(
     # and every unit still got its own members
     for unit in detail["units"]:
         assert unit["members"], unit["unit_id"]
+

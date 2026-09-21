@@ -341,6 +341,13 @@ CLUSTER_STATUS: dict[str, dict] = {
             "accept line is too low, or a match key is too loose."
         ),
     },
+    "mixed_names": {
+        "label": "Mixed names",
+        "definition": (
+            "This cluster holds more different values of a name or a birth year "
+            "than one person could have, so it is really several people."
+        ),
+    },
     "weak_link": {
         "label": "Weak link",
         "definition": (
@@ -372,6 +379,46 @@ CLUSTER_STATUS: dict[str, dict] = {
             "Two values were equally common, so one value for the whole cluster "
             "could not be settled."
         ),
+    },
+}
+
+VETO_OP_QUESTION = "What a veto rule compares"
+
+#: ``ruleset.vetoes[].when[].op`` — the pair operators `app/rules/vetoes.py`
+#: runs. Every one asks a question about the LEFT unit's value and the RIGHT
+#: unit's value of one column. All but the second are false when either side is
+#: missing, so missing data cannot trigger a veto rule by accident.
+VETO_OP: dict[str, dict] = {
+    "differs": {
+        "label": "Different",
+        "definition": "Both sides have a value and the two are not the same.",
+    },
+    "not_equal_or_missing": {
+        "label": "Not the same, or missing",
+        "definition": (
+            "The two values are different, or one side has no value at all. "
+            "Use it to say that nothing here corroborates the pair."
+        ),
+    },
+    "abs_diff_gt": {
+        "label": "Further apart than",
+        "definition": "Both sides are numbers and the gap between them is over the limit.",
+    },
+    "abs_diff_gte": {
+        "label": "At least this far apart",
+        "definition": "Both sides are numbers and the gap between them reaches the limit.",
+    },
+    "similarity_lt": {
+        "label": "Less alike than",
+        "definition": "Both sides have a value and the two look less alike than the limit.",
+    },
+    "both_in_and_differ": {
+        "label": "Two different words from a list",
+        "definition": "Both values are on the named token lists and they are not the same.",
+    },
+    "no_overlap": {
+        "label": "Nothing in common",
+        "definition": "Both sides hold a set of values and the two sets share nothing.",
     },
 }
 
@@ -656,6 +703,7 @@ IMPORT_AGREEMENTS = tuple(IMPORT_AGREEMENT)
 EXACT_GROUP_STATUSES = tuple(EXACT_GROUP_STATUS)
 CLUSTER_STATUSES = tuple(CLUSTER_STATUS)
 RUN_STATUSES = tuple(RUN_STATUS)
+VETO_OPS = tuple(VETO_OP)
 ANSWERS = tuple(ANSWER)
 TRACKS = tuple(TRACK)
 ANSWER_SOURCES = tuple(ANSWER_SOURCE)
@@ -798,6 +846,11 @@ def as_dict() -> dict:
                 "question": CLUSTER_STATUS_QUESTION,
                 "definition": "What the gate found when it looked at this cluster.",
                 "values": _values(CLUSTER_STATUS),
+            },
+            "veto_op": {
+                "question": VETO_OP_QUESTION,
+                "definition": "What one condition of a veto rule asks about a pair.",
+                "values": _values(VETO_OP),
             },
             "run_status": {
                 "question": RUN_STATUS_QUESTION,

@@ -131,6 +131,21 @@ def _open(run_dir: str):
 
 LABEL_TABLE = "pair_labels_frame"
 
+#: The listing, materialised: one row per pair carrying every column the list,
+#: the histogram and the detail read, with the two unit joins already done.
+#: Written by stage 3 (`write_index`). Without it every request joined 41
+#: million pairs to 11.8 million units twice and did it three times a page
+#: (`docs/PSC_HANDOVER.md` section 107, item 6).
+PAIR_INDEX_FILENAME = "pairs_index.parquet"
+
+#: The chips above the pairs list, cached. They describe the WHOLE run and
+#: ignore the filters, so they are the same seventeen numbers on every page of
+#: every search — and computing them costs a pass over 41 million pairs. The
+#: file names what it was computed from, so it is used only when nothing has
+#: moved, and the reader rewrites it whenever it has. Nothing else has to
+#: remember to refresh it.
+PAIR_COUNTS_FILENAME = "pairs_counts.json"
+
 # The human overlay, joined on at read time. pairs.parquet holds the score and
 # the import overlay and nothing else, because a label write must not rewrite a
 # file that will one day hold millions of rows. A label names two RECORDS, so
@@ -195,6 +210,213 @@ def _unit_cte(unit_columns: list[str], narrow: bool) -> str:
     wanted = [c for c in _NARROW_UNIT_COLUMNS
               if c == "unit_id" or c in unit_columns]
     return "SELECT " + ", ".join(f'"{c}"' for c in wanted) + " FROM read_parquet(?)"
+
+
+def pair_index_path(run_dir: str) -> Path:
+    return Path(run_dir) / PAIR_INDEX_FILENAME
+
+
+#: The columns the two unit joins exist to produce. Everything else on the
+#: listing is already a column of `pairs.parquet`.
+_DERIVED_COLUMNS = ("import_agreement", "left_name", "right_name")
+
+
+def pair_counts_path(run_dir: str) -> Path:
+    return Path(run_dir) / PAIR_COUNTS_FILENAME
+
+
+def _labels_fingerprint(labels) -> str:
+    """What the chip counts depend on, out of the labels: which pairs carry an
+    answer and what the answer is. A reviewer's note does not move a count."""
+    import hashlib
+
+    if labels is None or not len(labels):
+        return "none"
+    wanted = [c for c in ("record_id_a", "record_id_b", "is_match")
+              if c in labels.columns]
+    if len(wanted) < 3:
+        return "unknown"
+    rows = labels[wanted].astype(str).agg("\x00".join, axis=1).tolist()
+    digest = hashlib.sha256()
+    for row in sorted(rows):
+        digest.update(row.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _counts_stamp(run_dir: str, pairs: Path, labels) -> dict:
+    index = pair_index_path(run_dir)
+    return {
+        "pairs_mtime": pairs.stat().st_mtime if pairs.is_file() else None,
+        "pairs_size": pairs.stat().st_size if pairs.is_file() else None,
+        "index_mtime": index.stat().st_mtime if index.is_file() else None,
+        "labels": _labels_fingerprint(labels),
+    }
+
+
+def cached_counts(run_dir: str, pairs: Path, labels) -> dict | None:
+    """The stored chip counts, when they were computed from exactly this."""
+    path = pair_counts_path(run_dir)
+    if not path.is_file():
+        return None
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if stored.get("stamp") != _counts_stamp(run_dir, pairs, labels):
+        return None
+    counts = stored.get("counts")
+    return counts if isinstance(counts, dict) else None
+
+
+def store_counts(run_dir: str, pairs: Path, labels, counts: dict) -> None:
+    """Keep the chip counts beside the run. A failure here is not an error:
+    the next request simply computes them again."""
+    try:
+        pair_counts_path(run_dir).write_text(
+            json.dumps({"stamp": _counts_stamp(run_dir, pairs, labels),
+                        "counts": counts}),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _index_fits(index: Path, pairs: Path, pair_columns: list[str]) -> bool:
+    """Whether the index may be believed.
+
+    Three questions, all cheap, none of them a scan: is it there, is it at
+    least as new as the pairs file it was made from, and does it carry this
+    run's own columns and rows? Every path that rewrites `pairs.parquet`
+    rewrites the index with it, and this is the belt to that brace — a stale
+    index is IGNORED rather than served, so a missed call site costs a slow
+    page and never a wrong answer.
+    """
+    if not index.is_file() or not pairs.is_file():
+        return False
+    try:
+        if index.stat().st_mtime < pairs.stat().st_mtime:
+            return False
+        import pyarrow.parquet as pq
+
+        held = pq.ParquetFile(index)
+        if held.metadata.num_rows != pq.ParquetFile(pairs).metadata.num_rows:
+            return False
+        names = set(held.schema_arrow.names)
+    except Exception:
+        return False
+    wanted = set(pair_columns) | set(_DERIVED_COLUMNS)
+    return wanted <= names
+
+
+#: What the index stores on top of `pairs.parquet`'s own columns. `pair_id` and
+#: the two lowered names are NOT stored: they are the same strings again, and at
+#: 41 million rows that was two gigabytes of file to save a `lower()` the filter
+#: scan does anyway.
+_INDEX_EXTRA = """,
+           CAST(p.unit_id_l AS VARCHAR) AS unit_id_l,
+           CAST(p.unit_id_r AS VARCHAR) AS unit_id_r,
+           CASE
+               WHEN lu.existing_entity_id IS NOT NULL
+                    AND ru.existing_entity_id IS NOT NULL
+                    AND lu.existing_entity_id = ru.existing_entity_id THEN 'agrees'
+               WHEN lu.existing_entity_id IS NOT NULL
+                    AND ru.existing_entity_id IS NOT NULL THEN 'disagrees'
+               ELSE 'unknown'
+           END AS import_agreement,
+           CAST(lu.name AS VARCHAR) AS left_name,
+           CAST(ru.name AS VARCHAR) AS right_name"""
+
+#: The columns the reader builds back out of the stored ones.
+_INDEX_DERIVED = f"""
+           x.unit_id_l || '{PAIR_ID_SEPARATOR}' || x.unit_id_r AS pair_id,
+           lower(COALESCE(x.left_name, '')) AS left_name_lower,
+           lower(COALESCE(x.right_name, '')) AS right_name_lower,"""
+
+
+def _index_source_sql(unit_columns: list[str]) -> str:
+    """What `write_index` stores: every pair column, plus what the unit joins
+    are for. The joins happen once here instead of on every request."""
+    name_l = "CAST(lu.name AS VARCHAR)" if "name" in unit_columns \
+        else "CAST(NULL AS VARCHAR)"
+    name_r = "CAST(ru.name AS VARCHAR)" if "name" in unit_columns \
+        else "CAST(NULL AS VARCHAR)"
+    extra = _INDEX_EXTRA.replace("CAST(lu.name AS VARCHAR)", name_l) \
+                        .replace("CAST(ru.name AS VARCHAR)", name_r)
+    return f"""
+    WITH p AS (SELECT * FROM read_parquet(?)),
+         u AS ({_unit_cte(unit_columns, narrow=True)})
+    SELECT p.* EXCLUDE (unit_id_l, unit_id_r){extra}
+    FROM p
+    JOIN u lu ON CAST(lu.unit_id AS VARCHAR) = CAST(p.unit_id_l AS VARCHAR)
+    JOIN u ru ON CAST(ru.unit_id AS VARCHAR) = CAST(p.unit_id_r AS VARCHAR)
+"""
+
+
+def _index_sql(with_labels: bool, row_filter: str = "") -> str:
+    """The same projection as `_base_sql(narrow=True)`, read off the index.
+
+    The index holds the score's own bucket, so the human overlay is laid over
+    it here exactly as it is laid over `pairs.parquet` — a label write still
+    costs an insert and not a rewrite.
+    """
+    label_select = _LABEL_SELECT.replace("p.bucket", "x.bucket") \
+                                .replace("p.decided_by", "x.decided_by") \
+        if with_labels else _NO_LABEL_SELECT.replace("p.bucket", "x.bucket") \
+                                            .replace("p.decided_by", "x.decided_by")
+    return f"""
+    WITH x AS (SELECT *, file_row_number AS _row
+               FROM read_parquet(?, file_row_number=true){row_filter}),{
+        _LABEL_CTE if with_labels else ""}
+         _base AS (SELECT 1)
+    SELECT x.* EXCLUDE (bucket, decided_by, right_name),{_INDEX_DERIVED}{label_select}
+           x.right_name AS right_name
+    FROM x
+    {"LEFT JOIN lab ON lab.unit_id_l = x.unit_id_l AND lab.unit_id_r = x.unit_id_r"
+     if with_labels else ""}
+"""
+
+
+def _indexed(run_dir: str, pairs: Path, pair_columns: list[str]) -> bool:
+    return _index_fits(pair_index_path(run_dir), pairs, pair_columns)
+
+
+def _listing(run_dir: str, pairs: Path, units: Path, pair_columns: list[str],
+             unit_columns: list[str], with_labels: bool,
+             label_params: list[str], row_filter: str = "") -> tuple[str, list]:
+    """The narrow listing and its bound parameters — off the index, or not."""
+    index = pair_index_path(run_dir)
+    if _index_fits(index, pairs, pair_columns):
+        return _index_sql(with_labels, row_filter), [str(index), *label_params]
+    return (_base_sql(unit_columns, with_labels, narrow=True),
+            [str(pairs), str(units), *label_params])
+
+
+def write_index(run_dir) -> Path | None:
+    """Write the listing index. Stage 3 calls this once the pairs file is final.
+
+    The list's own SQL builds it, so the file and the query it replaces cannot
+    drift apart.
+    """
+    run_dir = Path(run_dir)
+    pairs = pairs_path(run_dir)
+    units = units_path(run_dir)
+    if not pairs.is_file() or not units.is_file():
+        return None
+    out = pair_index_path(run_dir)
+    con = duckdb_conn.reader_connect(run_dir)
+    try:
+        unit_columns = _column_names(con, units)
+        sql = _index_source_sql(unit_columns)
+        temporary = out.with_suffix(".building.parquet")
+        # ZSTD, not the default: the index is the run's largest file after the
+        # pairs themselves, and it is read one column at a time.
+        con.execute(f"COPY ({sql}) TO '{str(temporary).replace(chr(39), chr(39) * 2)}' "
+                    f"(FORMAT PARQUET, COMPRESSION ZSTD)", [str(pairs), str(units)])
+    finally:
+        con.close()
+    temporary.replace(out)
+    return out
 
 
 def _base_sql(unit_columns: list[str], with_labels: bool = False,
@@ -478,9 +700,10 @@ def get_pairs(
         has_model = MODEL_SCORE_COLUMN in pair_columns
         has_veto = "vetoed_by" in pair_columns
         with_labels, label_params = _prepare_labels(con, run_dir, labels)
-        # Everything but the page reads three unit columns, not sixty-eight.
-        base = _base_sql(unit_columns, with_labels, narrow=True)
-        base_params = [str(pairs), str(units), *label_params]
+        # Everything but the page reads three unit columns, not sixty-eight —
+        # and off the index it reads no unit columns at all.
+        base, base_params = _listing(run_dir, pairs, units, pair_columns,
+                                     unit_columns, with_labels, label_params)
 
         where, params = _filters(track, bucket, decided_by, import_state, held,
                                  min_score, max_score, q, labelled,
@@ -490,7 +713,8 @@ def get_pairs(
         vetoed_sql = "vetoed_by IS NOT NULL" if has_veto else "FALSE"
         conflict_sql = "veto_conflicts_import" if \
             "veto_conflicts_import" in pair_columns else "FALSE"
-        counts_row = con.execute(
+        counts = cached_counts(run_dir, pairs, labels)
+        counts_row = None if counts else con.execute(
             f"""SELECT count(*),
                        count(*) FILTER (WHERE bucket = 'accept'),
                        count(*) FILTER (WHERE bucket = 'review'),
@@ -511,15 +735,20 @@ def get_pairs(
                 FROM ({base})""",
             base_params,
         ).fetchone()
-        counts = dict(zip(
-            ("all", "accept", "review", "reject", "score", "import", "human",
-             "import_agrees", "import_disagrees", "import_unknown", "held",
-             "labelled", "unlabelled", "person", "organisation",
-             "vetoed", "veto_conflicts_import"),
-            (int(v) for v in counts_row),
-        ))
+        if counts_row is not None:
+            counts = dict(zip(
+                ("all", "accept", "review", "reject", "score", "import", "human",
+                 "import_agrees", "import_disagrees", "import_unknown", "held",
+                 "labelled", "unlabelled", "person", "organisation",
+                 "vetoed", "veto_conflicts_import"),
+                (int(v) for v in counts_row),
+            ))
+            store_counts(run_dir, pairs, labels, counts)
 
-        total = int(con.execute(
+        # With no filter at all the filtered total IS the whole-run count, which
+        # the chips have just given. At 41 million pairs that scan was a third
+        # of the time a first page took.
+        total = int(counts["all"]) if not where else int(con.execute(
             f"SELECT count(*) FROM ({base}){where_sql}", [*base_params, *params]
         ).fetchone()[0])
 
@@ -527,11 +756,14 @@ def get_pairs(
         if sort_key == "useful":
             # The weight needs the biggest priority in the RUN, not in the page
             # or the filtered set, or the order would move as a filter narrows.
-            total = " + ".join(f'COALESCE("priority_{c}", 0)' for c in priority)
+            # NOT `total`: that is the filtered row count, and naming the sum
+            # the same thing sent a SQL string back to the browser where a
+            # number belonged.
+            priority_sum = " + ".join(f'COALESCE("priority_{c}", 0)' for c in priority)
             priority_max = None
-            if total:
+            if priority_sum:
                 priority_max = con.execute(
-                    f"SELECT max({total}) FROM ({base})", base_params
+                    f"SELECT max({priority_sum}) FROM ({base})", base_params
                 ).fetchone()[0]
             parts = _usefulness_sql(has_model, priority, priority_max)
             columns = ", ".join(f"{sql} AS {name}" for name, sql in parts.items())
@@ -549,13 +781,36 @@ def get_pairs(
             "useful": "_usefulness",
         }[sort_key]
 
-        # The page, in two steps. The first picks fifty pair ids out of the
-        # narrow query; the second fetches the two whole unit rows for each of
-        # them. `units.parquet` is written in `unit_id` order, so the id filter
-        # is answered from the row-group statistics rather than by a scan.
+        # The page, in three steps when there is an index. The first sorts two
+        # columns rather than thirty and takes fifty row numbers — a deep page
+        # otherwise materialises `offset + limit` whole rows. The second reads
+        # exactly those rows back, which parquet answers from its row-group
+        # statistics. The third fetches the two whole unit rows for each of
+        # them; `units.parquet` is written in `unit_id` order, so that filter is
+        # answered the same way.
+        page_listing, page_params = listing, (extra_params or base_params)
+        page_limit, page_offset = limit, offset
+        if _indexed(run_dir, pairs, pair_columns):
+            wanted = [int(row[0]) for row in con.execute(
+                f"""SELECT _row FROM ({listing}){where_sql}
+                    ORDER BY {sort_sql} {order_sql} NULLS LAST, pair_id ASC
+                    LIMIT ? OFFSET ?""",
+                [*(extra_params or base_params), *params, limit, offset],
+            ).fetchall()]
+            rows_sql = ", ".join(str(row) for row in wanted) or "-1"
+            narrowed, narrowed_params = _listing(
+                run_dir, pairs, units, pair_columns, unit_columns, with_labels,
+                label_params, row_filter=f" WHERE file_row_number IN ({rows_sql})")
+            if sort_key == "useful":
+                narrowed = f"SELECT *, {columns} FROM ({narrowed})"
+            page_listing, page_params = narrowed, narrowed_params
+            # The rows are already the page: the filter and the window have
+            # been applied, so applying them again would drop them.
+            where_sql, params = "", []
+            page_limit, page_offset = max(1, len(wanted)), 0
         cursor = con.execute(
             f"""WITH page AS (
-                    SELECT * FROM ({listing}){where_sql}
+                    SELECT * FROM ({page_listing}){where_sql}
                     ORDER BY {sort_sql} {order_sql} NULLS LAST, pair_id ASC
                     LIMIT ? OFFSET ?
                 ),
@@ -569,7 +824,7 @@ def get_pairs(
                 LEFT JOIN wu lu ON CAST(lu.unit_id AS VARCHAR) = page.unit_id_l
                 LEFT JOIN wu ru ON CAST(ru.unit_id AS VARCHAR) = page.unit_id_r
                 ORDER BY {sort_sql} {order_sql} NULLS LAST, pair_id ASC""",
-            [*(extra_params or base_params), *params, limit, offset, str(units)],
+            [*page_params, *params, page_limit, page_offset, str(units)],
         )
         items = [_item(row, priority, gammas) for row in _rows(cursor)]
     finally:
@@ -907,10 +1162,27 @@ def get_pair(run_dir: str, pair_id: str, labels=None) -> dict | None:
         priority = _priority_columns(pair_columns)
         gammas = _gamma_columns(pair_columns)
         with_labels, label_params = _prepare_labels(con, run_dir, labels)
-        base = _base_sql(unit_columns, with_labels)
+        # The same two steps the page takes: find the row in the narrow
+        # listing, then fetch the two whole unit rows for it. Reading all
+        # sixty-eight unit columns for every pair in the run to show one of
+        # them is what made this 6.8 seconds at PSC scale.
+        base, base_params = _listing(run_dir, pairs, units, pair_columns,
+                                     unit_columns, with_labels, label_params)
         rows = _rows(con.execute(
-            f"SELECT * FROM ({base}) WHERE unit_id_l = ? AND unit_id_r = ?",
-            [str(pairs), str(units), *label_params, left_id, right_id],
+            f"""WITH page AS (
+                    SELECT * FROM ({base})
+                    WHERE unit_id_l = ? AND unit_id_r = ?
+                ),
+                wu AS (
+                    SELECT * FROM read_parquet(?)
+                    WHERE CAST(unit_id AS VARCHAR) IN (
+                        SELECT unit_id_l FROM page UNION SELECT unit_id_r FROM page)
+                )
+                SELECT page.*, lu AS left_unit, ru AS right_unit
+                FROM page
+                LEFT JOIN wu lu ON CAST(lu.unit_id AS VARCHAR) = page.unit_id_l
+                LEFT JOIN wu ru ON CAST(ru.unit_id AS VARCHAR) = page.unit_id_r""",
+            [*base_params, left_id, right_id, str(units)],
         ))
         if not rows:
             return None
@@ -999,10 +1271,18 @@ def model_explanation(run_dir: str, left_id: str, right_id: str,
 
         profile = get_profile()
         fitted = corpus_lib.for_run(run_dir, units_path(run_dir), track, profile)
-        # The units frame is read whole only when a feature builder needs more
-        # than the corpus gives it; the two units themselves are all the rest of
-        # the explanation touches.
-        units = pd.read_parquet(units_path(run_dir))
+        # THE TWO UNITS, BY KEY. This used to read `units.parquet` whole — 1.8
+        # GB and 11.8 million rows at PSC scale, to explain one pair, on a
+        # screen a reviewer opens once per pair. The corpus statistics are the
+        # only whole-run numbers the explanation needs, and they are already
+        # read back from the run's folder above.
+        # `pd.read_parquet` with a filter, not DuckDB, so the two units arrive
+        # with exactly the dtypes a whole read would have given them: the
+        # feature builders are written against those.
+        units = pd.read_parquet(
+            units_path(run_dir),
+            filters=[("unit_id", "in", [str(left_id), str(right_id)])],
+        )
         return explain_lib.explain(row.reset_index(drop=True), units, track,
                                    model.version, events=events,
                                    profile=profile, corpus=fitted,
@@ -1033,9 +1313,9 @@ def get_histogram(run_dir: str, track: str | None = None, bins: int = DEFAULT_BI
         has_model = MODEL_SCORE_COLUMN in pair_columns
         with_labels, label_params = _prepare_labels(con, run_dir, labels)
         # The histogram counts; it never shows a unit column.
-        base = _base_sql(unit_columns, with_labels, narrow=True)
+        base, base_params = _listing(run_dir, pairs, units, pair_columns,
+                                     unit_columns, with_labels, label_params)
         where_sql = " WHERE track = ?" if track is not None else ""
-        base_params = [str(pairs), str(units), *label_params]
 
         def _bin(column: str) -> list[dict]:
             cursor = con.execute(
