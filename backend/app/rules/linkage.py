@@ -69,7 +69,15 @@ ON_OVERSIZE = ("refine", "drop")
 # so the list has to stay short. A rule that puts more keys than this over the
 # limit does not have a hot-key problem; it is a coarse rule, and refining a few
 # thousand separate key values one by one is not what this control is for.
-MAX_INLINE_KEYS = 5000
+#: How many oversized key values the control will inline into a rule's SQL.
+#: The keys have nowhere else to live — a Splink blocking rule is a predicate
+#: over ``l.`` and ``r.`` columns — so this is the cap on how coarse a rule the
+#: control can fix. The PSC person routes need 11,725 to 91,047 of them at
+#: ``max_block_size: 20`` on the full snapshot, which generates 4.8 MB of SQL
+#: across the six rules and takes under a second a rule to build. It is
+#: deliberately not unlimited: a rule needing millions of keys is a rule to
+#: rewrite, not to patch.
+MAX_INLINE_KEYS = 100_000
 
 # Joins the parts of a composite blocking key into one string. Unit separator:
 # it cannot appear in a cleaned value, so two different keys cannot collide.
@@ -123,12 +131,31 @@ def comparisons(track_config: dict) -> list[dict]:
     return [c for c in value if isinstance(c, dict)] if isinstance(value, list) else []
 
 
-def em_rules(track_config: dict) -> list[str]:
-    """The EM training rules, falling back to the blocking rules when absent."""
+def em_entries(track_config: dict) -> list[dict]:
+    """The EM training rules as dicts, whether written as SQL text or as one.
+
+    An entry may carry the same four hot-key keys a prediction rule may
+    (``docs/LINKAGE.md``). It has to be able to: an EM rule is priced against
+    the same ``max_pairs`` and nothing downstream trims it, and PSC's person
+    rule "both name sounds agree" makes **582,535,879** training pairs on the
+    full snapshot against 94,743,605 for the whole of prediction. The blocks
+    that do it are the placeholder-name blocks of section 19 of
+    ``PSC_HANDOVER.md``, which is what the control is for.
+    """
     value = track_config.get("em_blocking_rules")
     if isinstance(value, list) and value:
-        return [str(v) for v in value if isinstance(v, str) and v.strip()]
-    return [rule["sql"] for rule in blocking_rules(track_config)]
+        entries = []
+        for item in value:
+            rule = as_rule(item)
+            if str(rule.get("sql") or "").strip():
+                entries.append(rule)
+        return entries
+    return [dict(rule) for rule in blocking_rules(track_config)]
+
+
+def em_rules(track_config: dict) -> list[str]:
+    """The EM training rules' SQL, before any hot-key control."""
+    return [str(rule["sql"]) for rule in em_entries(track_config)]
 
 
 def max_pairs(track_config: dict) -> int:
@@ -1031,13 +1058,23 @@ def _check_track(track: str, config: dict, known: set[str], errors: list[dict]) 
     elif isinstance(em, list):
         for index, rule in enumerate(em):
             path = f"{base}.em_blocking_rules[{index}]"
-            if not isinstance(rule, str) or not rule.strip():
-                _error(errors, path, "An EM blocking rule must be SQL text")
+            if isinstance(rule, str):
+                sql = rule
+            elif isinstance(rule, dict):
+                sql = rule.get("sql")
+            else:
+                sql = None
+            if not isinstance(sql, str) or not sql.strip():
+                _error(errors, path,
+                       "An EM blocking rule must be SQL text, or an object with "
+                       "a 'sql' key")
                 continue
-            for column in sorted(sql_columns(rule)):
+            for column in sorted(sql_columns(sql)):
                 if column not in known:
                     _error(errors, path,
                            f"'{column}' is not a column of the {track} track")
+            if isinstance(rule, dict):
+                _check_block_control(rule, sql, path, track, known, errors)
 
     budget = config.get("max_pairs", DEFAULT_MAX_PAIRS)
     if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
@@ -1069,7 +1106,9 @@ def untrainable_comparisons(config: dict) -> list[int]:
     rules = config.get("em_blocking_rules")
     if not isinstance(rules, list) or not rules:
         return []
-    held = [columns_held_equal(rule) for rule in rules if isinstance(rule, str)]
+    held = [columns_held_equal(str(as_rule(rule).get("sql") or ""))
+            for rule in rules
+            if isinstance(rule, (str, dict)) and str(as_rule(rule).get("sql") or "").strip()]
     if not held:
         return []
     comparisons = config.get("comparisons")

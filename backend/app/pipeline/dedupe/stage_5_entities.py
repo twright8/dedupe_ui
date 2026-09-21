@@ -67,6 +67,15 @@ PROPOSED_COLUMNS = ("record_id", "unit_id", "entity_key", "cluster_id", "track",
 # in the projection and it would mint different ids.
 MINT_COLUMNS = ("record_id", "track", "existing_entity_id", "company_number_padded")
 
+# The proposal columns the hook is handed. ``unit_id`` and ``cluster_id`` are
+# two more copies of a 37-character id per record and neither shipped hook
+# reads either; at the full PSC snapshot they were about 9 GB of the mint
+# frame. ``basis`` goes the same way. ``track`` stays, because dropping it
+# would stop pandas suffixing the record side's ``track`` to ``track_y`` and
+# the PSC hook would start finding a column it has never found — see
+# ``docs/ENTITIES.md``, "the frame the hook receives".
+MINT_PROPOSED_COLUMNS = ("record_id", "entity_key", "track")
+
 
 def _step(label, progress_callback=None):
     message = f"[{time.strftime('%H:%M:%S')}] {label}"
@@ -175,7 +184,8 @@ def resolve_ids(
 
     # Rule 3: none, so the profile mints one from the members themselves.
     minting = summary.loc[summary["n_claims"] == 0, "entity_key"]
-    members = proposed[proposed["entity_key"].isin(set(minting))]
+    members = proposed.loc[proposed["entity_key"].isin(set(minting)),
+                           [c for c in MINT_PROPOSED_COLUMNS if c in proposed.columns]]
     with_records = members.merge(records, on="record_id", how="left") if len(members) \
         else members
     minted = profile.mint_entity_ids(with_records) if len(with_records) \
@@ -700,10 +710,11 @@ def _mint_frame(con, record_columns: list[str], claimed_keys: bool) -> pd.DataFr
     prefix. Reproducing that exactly is the point — this slice moves memory, not
     behaviour.
     """
-    shared = [c for c in record_columns if c in PROPOSED_COLUMNS and c != "record_id"]
+    shared = [c for c in record_columns
+              if c in MINT_PROPOSED_COLUMNS and c != "record_id"]
     left = ", ".join(
         f'p.{name} AS "{name}_x"' if name in shared else f"p.{name}"
-        for name in PROPOSED_COLUMNS
+        for name in MINT_PROPOSED_COLUMNS
     )
     right = ", ".join(
         f'r."{name}" AS "{name}_y"' if name in shared else f'r."{name}"'

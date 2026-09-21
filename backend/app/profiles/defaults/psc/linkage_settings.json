@@ -4,33 +4,70 @@
       "blocking_rules": [
         {
           "id": "pb1",
-          "description": "deduping route 1: surname sound plus both parts of the date of birth. The workhorse \u2014 it measured 19.2M pairs over 5.16M representatives there, which is the route the pair budget is really sized for.",
-          "sql": "l.surname_metaphone = r.surname_metaphone AND l.dob_year_clean = r.dob_year_clean AND l.dob_month_clean = r.dob_month_clean"
+          "description": "deduping route 1: surname sound plus both parts of the date of birth. The workhorse — it measured 19.2M pairs over 5.16M representatives there, which is the route the pair budget is really sized for.",
+          "sql": "l.surname_metaphone = r.surname_metaphone AND l.dob_year_clean = r.dob_year_clean AND l.dob_month_clean = r.dob_month_clean",
+          "max_block_size": 20,
+          "on_oversize": "refine",
+          "refine_with": [
+            "postcode_district"
+          ],
+          "drop_above": 60
         },
         {
           "id": "pb2",
           "description": "deduping route 2: first three letters of the surname, the forename initial and the date of birth. Catches a surname the metaphone splits.",
-          "sql": "substr(l.surname_clean, 1, 3) = substr(r.surname_clean, 1, 3) AND l.forename_initial = r.forename_initial AND l.dob_year_clean = r.dob_year_clean AND l.dob_month_clean = r.dob_month_clean"
+          "sql": "substr(l.surname_clean, 1, 3) = substr(r.surname_clean, 1, 3) AND l.forename_initial = r.forename_initial AND l.dob_year_clean = r.dob_year_clean AND l.dob_month_clean = r.dob_month_clean",
+          "max_block_size": 20,
+          "on_oversize": "refine",
+          "refine_with": [
+            "postcode_district"
+          ],
+          "drop_above": 60
         },
         {
           "id": "pb3",
-          "description": "deduping route 3: the middle-name-robust fingerprint \u2014 the sorted letters of forename and surname. Catches a filing that carries a middle name against one that does not.",
-          "sql": "l.name_fingerprint = r.name_fingerprint AND l.name_fingerprint <> ''"
+          "description": "deduping route 3: the middle-name-robust fingerprint — the sorted letters of forename and surname. Catches a filing that carries a middle name against one that does not.",
+          "sql": "l.name_fingerprint = r.name_fingerprint AND l.name_fingerprint <> ''",
+          "max_block_size": 20,
+          "on_oversize": "refine",
+          "refine_with": [
+            "postcode_district"
+          ],
+          "drop_above": 60
         },
         {
           "id": "pb4",
           "description": "deduping route 4, the typo rescue: same postcode district and same surname sound, where a mistyped date of birth would have hidden the pair from route 1.",
-          "sql": "l.postcode_district = r.postcode_district AND l.surname_metaphone = r.surname_metaphone"
+          "sql": "l.postcode_district = r.postcode_district AND l.surname_metaphone = r.surname_metaphone",
+          "max_block_size": 20,
+          "on_oversize": "refine",
+          "refine_with": [
+            "dob_year_clean",
+            "dob_month_clean"
+          ],
+          "drop_above": 60
         },
         {
           "id": "pb5",
           "description": "deduping route 5, the marriage route: the forename sound and the date of birth agree while the surname sound does not. Route 1 already has the same-sound pairs; this is the one that finds a changed surname. deduping measured the current routes catching only 42.9% of 37,467 verified surname-change pairs, and this lifting it to 67.2%.",
-          "sql": "l.forename_metaphone = r.forename_metaphone AND l.dob_year_clean = r.dob_year_clean AND l.dob_month_clean = r.dob_month_clean AND l.surname_metaphone <> r.surname_metaphone"
+          "sql": "l.forename_metaphone = r.forename_metaphone AND l.dob_year_clean = r.dob_year_clean AND l.dob_month_clean = r.dob_month_clean AND l.surname_metaphone <> r.surname_metaphone",
+          "max_block_size": 20,
+          "on_oversize": "refine",
+          "refine_with": [
+            "postcode_district"
+          ],
+          "drop_above": 60
         },
         {
           "id": "pb6",
           "description": "deduping route 6, the no-date rescue: both name sounds agree and at least one side has no usable birth year, so route 1 could never have seen the pair.",
-          "sql": "l.surname_metaphone = r.surname_metaphone AND l.forename_metaphone = r.forename_metaphone AND (l.dob_year_clean IS NULL OR r.dob_year_clean IS NULL)"
+          "sql": "l.surname_metaphone = r.surname_metaphone AND l.forename_metaphone = r.forename_metaphone AND (l.dob_year_clean IS NULL OR r.dob_year_clean IS NULL)",
+          "max_block_size": 20,
+          "on_oversize": "refine",
+          "refine_with": [
+            "postcode_district"
+          ],
+          "drop_above": 60
         }
       ],
       "comparisons": [
@@ -111,35 +148,68 @@
         }
       ],
       "em_blocking_rules": [
-        "l.surname_metaphone = r.surname_metaphone AND l.forename_metaphone = r.forename_metaphone",
-        "l.dob_year_clean = r.dob_year_clean AND l.dob_month_clean = r.dob_month_clean AND l.postcode_district = r.postcode_district"
+        {
+          "sql": "l.surname_metaphone = r.surname_metaphone AND l.forename_metaphone = r.forename_metaphone",
+          "max_block_size": 60,
+          "on_oversize": "drop"
+        },
+        {
+          "sql": "l.dob_year_clean = r.dob_year_clean AND l.dob_month_clean = r.dob_month_clean AND l.postcode_district = r.postcode_district",
+          "max_block_size": 60,
+          "on_oversize": "drop"
+        }
       ],
-      "max_pairs": 20000000,
+      "max_pairs": 150000000,
       "_lost_in_translation": "deduping used three custom comparison ladders. (1) dob_joint is now BUILT: dob_year_clean is a custom.NumericDifferenceAtThresholds with thresholds [0, 1] — equal, within 1, all other — and the month stays a separate exact comparison, so agreeing on both is two pieces of evidence. (2) address_freq: postcode levels split by how many records share that postcode (rare <=20, mid <=1000, then district). cl.PostcodeComparison has the geographic ladder but not the frequency split; the junk-postcode nullify removes the worst of it and the model sees postcode_equal and postcode_district_equal. (3) Every comparison there ended in a fixed neutral else with the EM output clamped so no interior level could become a penalty; this document has no clamp, so a level CAN learn a penalty here.",
       "_em_note": "Two rules on purpose. Splink cannot estimate a comparison whose columns the training rule holds equal, so one rule fixes the name sounds (and estimates the date of birth, nationality and postcode) and the other fixes the date of birth (and estimates the names). With the single name+DOB rule this file shipped with, dob_year_clean came back m=None on every level: the comparison was dead weight, and pairs 37 birth-years apart scored 1.0.",
-      "_em_cost_note": "The second rule carries postcode_district as well, and it is there for cost, not for accuracy. Year plus month alone is far too coarse to block on: it puts 449,397 sample units into 1,058 blocks and makes 170,613,604 training pairs, against 2.4M for the whole of prediction. That is what hung the first re-score — 53 GB of DuckDB spill and a 40-minute timeout. Adding the district takes it to 165,464 pairs over 331,596 blocks while still leaving both name comparisons free to be estimated, which is the rule's whole purpose. It covers 418,915 of 449,397 person units (93.2%); the rest have no postcode and simply do not train this rule. The budget check now prices em_blocking_rules too, so a regression here fails the run instead of hanging it."
+      "_em_cost_note": "The second rule carries postcode_district as well, and it is there for cost, not for accuracy. Year plus month alone is far too coarse to block on: it puts 449,397 sample units into 1,058 blocks and makes 170,613,604 training pairs, against 2.4M for the whole of prediction. That is what hung the first re-score — 53 GB of DuckDB spill and a 40-minute timeout. Adding the district takes it to 165,464 pairs over 331,596 blocks while still leaving both name comparisons free to be estimated, which is the rule's whole purpose. It covers 418,915 of 449,397 person units (93.2%); the rest have no postcode and simply do not train this rule. The budget check now prices em_blocking_rules too, so a regression here fails the run instead of hanging it. AT FULL SCALE BOTH RULES NEED THE HOT-KEY CONTROL, and that is why an em_blocking_rule may now carry one. On the 2026-09-18 snapshot's 11,205,785 person units the first rule makes 582,535,879 training pairs uncontrolled - three and a half times the 170M rule that spilled 53 GB and hung a whole session, and about 180 GB of spill at the 312 bytes a pair those two retain_ flags cost. With on_oversize 'drop' over 60 it is 43,054,672, and the second rule is 105,630,616 uncontrolled and 58,985,721 controlled. No refine column is used, so nothing is held equal that was not held equal before and both guards stay clean. What is dropped from TRAINING is the placeholder-name hot blocks of PSC_HANDOVER.md section 19; prediction still sees those units under its own control, and a model should not be learning its weights from FLTS and PRSNS.",
+      "_block_control_note": "Every route refines an oversized block on postcode_district, which is the one column independent of a name-sound or date-of-birth key; pb4 already fixes the district and refines on the date of birth instead. Priced on the full 2026-09-18 snapshot's 11,205,785 person units: the six routes fall from 1,901,943,106 pairs to 94,743,605, and each one drops about 79,000 units as too common to compare on that rule. on_oversize 'drop' alone would cut slightly more and cost pb5 4,720,900 units - 42% of the track - which is why it is refine and not drop. PSC_HANDOVER.md section 104."
     },
     "organisation": {
       "blocking_rules": [
         {
           "id": "ob1",
           "description": "Same core name. deduping's first corporate route.",
-          "sql": "l.name_core = r.name_core AND l.name_core <> ''"
+          "sql": "l.name_core = r.name_core AND l.name_core <> ''",
+          "max_block_size": 20,
+          "on_oversize": "refine",
+          "refine_with": [
+            "postcode_district"
+          ],
+          "drop_above": 60
         },
         {
           "id": "ob2",
           "description": "Same core-name sound and the same kind of body, so a GmbH and a trust of similar name are not compared.",
-          "sql": "l.name_core_metaphone = r.name_core_metaphone AND l.type_bucket = r.type_bucket"
+          "sql": "l.name_core_metaphone = r.name_core_metaphone AND l.type_bucket = r.type_bucket",
+          "max_block_size": 20,
+          "on_oversize": "refine",
+          "refine_with": [
+            "postcode_district"
+          ],
+          "drop_above": 60
         },
         {
           "id": "ob3",
           "description": "Same registration number, whatever the name says.",
-          "sql": "l.regnum_clean = r.regnum_clean"
+          "sql": "l.regnum_clean = r.regnum_clean",
+          "max_block_size": 20,
+          "on_oversize": "refine",
+          "refine_with": [
+            "postcode_district"
+          ],
+          "drop_above": 60
         },
         {
           "id": "ob4",
           "description": "Same first word of the core name and the same postcode district: a renamed company at one address.",
-          "sql": "l.name_first_token = r.name_first_token AND l.postcode_district = r.postcode_district"
+          "sql": "l.name_first_token = r.name_first_token AND l.postcode_district = r.postcode_district",
+          "max_block_size": 20,
+          "on_oversize": "refine",
+          "refine_with": [
+            "type_bucket"
+          ],
+          "drop_above": 60
         }
       ],
       "comparisons": [
@@ -204,11 +274,21 @@
         }
       ],
       "em_blocking_rules": [
-        "l.name_core_metaphone = r.name_core_metaphone AND l.type_bucket = r.type_bucket",
-        "l.regnum_clean = r.regnum_clean"
+        {
+          "sql": "l.name_core_metaphone = r.name_core_metaphone AND l.type_bucket = r.type_bucket",
+          "max_block_size": 60,
+          "on_oversize": "drop"
+        },
+        {
+          "sql": "l.regnum_clean = r.regnum_clean",
+          "max_block_size": 60,
+          "on_oversize": "drop"
+        }
       ],
       "max_pairs": 5000000,
-      "_em_note": "Two rules, so no comparison is held equal by all of them. With only the name+type rule, type_bucket never varied inside the training block and came back untrained \u2014 the same silent failure the person track had."
+      "_em_note": "Two rules, so no comparison is held equal by all of them. With only the name+type rule, type_bucket never varied inside the training block and came back untrained — the same silent failure the person track had.",
+      "_block_control_note": "Same control, refining on postcode_district except ob4, whose key already fixes it and which refines on type_bucket. 164,706,223 pairs to 1,832,607 over 593,640 units.",
+      "_em_cost_note": "Both rules carry the same hot-key control. On the full snapshot's 593,640 organisation units they are 48,450,086 and 26,960,626 pairs uncontrolled and 639,077 and 349,935 with on_oversize 'drop' over 60."
     }
   },
   "em_iterations": 20,
@@ -218,5 +298,5 @@
   "match_probability_threshold_candidate": 0.05,
   "match_probability_threshold_high": 0.95,
   "match_probability_threshold_review": 0.5,
-  "_budget_note": "max_pairs is sized for the 500,000-record development sample, where the person routes cost a few million pairs. deduping measured its six routes at 19.2M / 7.3M / 3.2M / 0.18M pairs over 5.16 MILLION representatives, so the full 16-million-record snapshot will need this raised to roughly 60,000,000 for the person track, and the blocking cost check (D17) has to pass before Splink starts. The budget is deliberately left at the sample's scale so a full run fails loudly rather than quietly taking the machine."
+  "_budget_note": "max_pairs is sized from the priced full-snapshot total with about 1.5x headroom: the person track's six routes make at most 94,743,605 blocked comparisons after the hot-key control, and its worst EM training rule 58,985,721 after its own, so 150,000,000 covers both with room. The organisation track's routes make 1,832,607 and its worst EM rule 639,077, so 5,000,000 is already generous. Both figures are linkage.price_rule group arithmetic on the run's own units.parquet, confirmed against Splink's own count_comparisons_from_blocking_rule before the run. PSC_HANDOVER.md section 104."
 }

@@ -182,25 +182,48 @@ _LABEL_JOIN = """
                  AND lab.unit_id_r = CAST(p.unit_id_r AS VARCHAR)"""
 
 
-def _base_sql(unit_columns: list[str], with_labels: bool = False) -> str:
+#: The unit columns anything but the page itself reads. The counts, the total,
+#: every filter and every sort need these three and nothing else; the other
+#: sixty-five are only ever shown, and only for the fifty rows on the page.
+_NARROW_UNIT_COLUMNS = ("unit_id", "existing_entity_id", "name")
+
+
+def _unit_cte(unit_columns: list[str], narrow: bool) -> str:
+    if not narrow:
+        return "SELECT * FROM read_parquet(?)"
+    wanted = [c for c in _NARROW_UNIT_COLUMNS
+              if c == "unit_id" or c in unit_columns]
+    return "SELECT " + ", ".join(f'"{c}"' for c in wanted) + " FROM read_parquet(?)"
+
+
+def _base_sql(unit_columns: list[str], with_labels: bool = False,
+              narrow: bool = False) -> str:
     """The one query the list, the detail and the histogram all read from.
 
     DuckDB binds ``?`` in the order it meets them in the text: the pairs file,
     the units file, then — when there are labels — the members file twice, once
     for each side of a label.
+
+    *narrow* reads three unit columns instead of all of them and leaves the
+    ``left_unit`` / ``right_unit`` structs out. It is the same rows, the same
+    filters and the same order — it just does not carry the sixty-odd columns
+    that only the page shows. The list asks three questions of this query (the
+    chip counts, the filtered total, the page), and at PSC scale carrying the
+    whole unit row through all three was most of the time.
     """
+    struct = "" if narrow else """
+           lu AS left_unit,
+           ru AS right_unit,"""
     sql = f"""
     WITH p AS (SELECT * FROM read_parquet(?)),
-         u AS (SELECT * FROM read_parquet(?)),{_LABEL_CTE if with_labels else ""}
+         u AS ({_unit_cte(unit_columns, narrow)}),{_LABEL_CTE if with_labels else ""}
          _base AS (SELECT 1)
     SELECT p.* EXCLUDE (unit_id_l, unit_id_r, bucket, decided_by),
            CAST(p.unit_id_l AS VARCHAR) AS unit_id_l,
            CAST(p.unit_id_r AS VARCHAR) AS unit_id_r,
            CAST(p.unit_id_l AS VARCHAR) || '{PAIR_ID_SEPARATOR}'
                || CAST(p.unit_id_r AS VARCHAR) AS pair_id,{
-        _LABEL_SELECT if with_labels else _NO_LABEL_SELECT}
-           lu AS left_unit,
-           ru AS right_unit,
+        _LABEL_SELECT if with_labels else _NO_LABEL_SELECT}{struct}
            CASE
                WHEN lu.existing_entity_id IS NOT NULL
                     AND ru.existing_entity_id IS NOT NULL
@@ -454,7 +477,8 @@ def get_pairs(
         has_model = MODEL_SCORE_COLUMN in pair_columns
         has_veto = "vetoed_by" in pair_columns
         with_labels, label_params = _prepare_labels(con, run_dir, labels)
-        base = _base_sql(unit_columns, with_labels)
+        # Everything but the page reads three unit columns, not sixty-eight.
+        base = _base_sql(unit_columns, with_labels, narrow=True)
         base_params = [str(pairs), str(units), *label_params]
 
         where, params = _filters(track, bucket, decided_by, import_state, held,
@@ -524,11 +548,27 @@ def get_pairs(
             "useful": "_usefulness",
         }[sort_key]
 
+        # The page, in two steps. The first picks fifty pair ids out of the
+        # narrow query; the second fetches the two whole unit rows for each of
+        # them. `units.parquet` is written in `unit_id` order, so the id filter
+        # is answered from the row-group statistics rather than by a scan.
         cursor = con.execute(
-            f"""SELECT * FROM ({listing}){where_sql}
-                ORDER BY {sort_sql} {order_sql} NULLS LAST, pair_id ASC
-                LIMIT ? OFFSET ?""",
-            [*(extra_params or base_params), *params, limit, offset],
+            f"""WITH page AS (
+                    SELECT * FROM ({listing}){where_sql}
+                    ORDER BY {sort_sql} {order_sql} NULLS LAST, pair_id ASC
+                    LIMIT ? OFFSET ?
+                ),
+                wu AS (
+                    SELECT * FROM read_parquet(?)
+                    WHERE CAST(unit_id AS VARCHAR) IN (
+                        SELECT unit_id_l FROM page UNION SELECT unit_id_r FROM page)
+                )
+                SELECT page.*, lu AS left_unit, ru AS right_unit
+                FROM page
+                LEFT JOIN wu lu ON CAST(lu.unit_id AS VARCHAR) = page.unit_id_l
+                LEFT JOIN wu ru ON CAST(ru.unit_id AS VARCHAR) = page.unit_id_r
+                ORDER BY {sort_sql} {order_sql} NULLS LAST, pair_id ASC""",
+            [*(extra_params or base_params), *params, limit, offset, str(units)],
         )
         items = [_item(row, priority, gammas) for row in _rows(cursor)]
     finally:
@@ -845,7 +885,8 @@ def get_histogram(run_dir: str, track: str | None = None, bins: int = DEFAULT_BI
         unit_columns = _column_names(con, units)
         has_model = MODEL_SCORE_COLUMN in pair_columns
         with_labels, label_params = _prepare_labels(con, run_dir, labels)
-        base = _base_sql(unit_columns, with_labels)
+        # The histogram counts; it never shows a unit column.
+        base = _base_sql(unit_columns, with_labels, narrow=True)
         where_sql = " WHERE track = ?" if track is not None else ""
         base_params = [str(pairs), str(units), *label_params]
 

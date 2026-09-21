@@ -413,38 +413,84 @@ def _unit_rows(con, run_dir: str, unit_ids: list[str]) -> list[dict]:
     return [{k: _json_safe(v) for k, v in row.items()} for row in _rows(cursor)]
 
 
-def _members_of(con, run_dir: str, unit_id: str) -> tuple[list[dict], bool]:
+def _grouped(cursor, cap: int) -> dict[str, tuple[list[dict], bool]]:
+    """Rows carrying a ``_unit`` column, split per unit and capped per unit."""
+    found: dict[str, list[dict]] = {}
+    for row in _rows(cursor):
+        unit_id = str(row.pop("_unit"))
+        found.setdefault(unit_id, []).append(
+            {k: _json_safe(v) for k, v in row.items()})
+    return {unit: (rows[:cap], len(rows) > cap) for unit, rows in found.items()}
+
+
+def _members_for(con, run_dir: str, unit_ids: list[str]
+                 ) -> dict[str, tuple[list[dict], bool]]:
+    """Every shown unit's member records, in one query rather than one each.
+
+    A cluster shows up to ``MAX_UNITS`` units, and this used to run a query per
+    unit — each one a scan of ``unit_members.parquet`` joined to
+    ``records.parquet``. On the 500,000-record sample one cluster detail took
+    twelve seconds; at sixteen million records both files are thirty times
+    bigger and the call is made once per unit shown. One query with a window
+    function does the same work once.
+    """
     members = Path(run_dir) / UNIT_MEMBERS_FILENAME
     records = Path(run_dir) / RECORDS_FILENAME
-    if not members.is_file() or not records.is_file():
-        return [], False
+    if not members.is_file() or not records.is_file() or not unit_ids:
+        return {}
+    marks = ", ".join("?" * len(unit_ids))
     cursor = con.execute(
-        """SELECT r.* FROM read_parquet(?) m
-           JOIN read_parquet(?) r
-             ON CAST(r.record_id AS VARCHAR) = CAST(m.record_id AS VARCHAR)
-           WHERE CAST(m.unit_id AS VARCHAR) = ?
-           ORDER BY CAST(r.record_id AS VARCHAR) LIMIT ?""",
-        [str(members), str(records), str(unit_id), MAX_MEMBERS + 1],
+        f"""SELECT * EXCLUDE (_rank) FROM (
+                SELECT r.*, CAST(m.unit_id AS VARCHAR) AS _unit,
+                       row_number() OVER (
+                           PARTITION BY CAST(m.unit_id AS VARCHAR)
+                           ORDER BY CAST(r.record_id AS VARCHAR)
+                       ) AS _rank
+                FROM read_parquet(?) m
+                JOIN read_parquet(?) r
+                  ON CAST(r.record_id AS VARCHAR) = CAST(m.record_id AS VARCHAR)
+                WHERE CAST(m.unit_id AS VARCHAR) IN ({marks})
+            ) WHERE _rank <= ?
+            ORDER BY _unit, CAST(record_id AS VARCHAR)""",
+        [str(members), str(records), *unit_ids, MAX_MEMBERS + 1],
     )
-    rows = [{k: _json_safe(v) for k, v in row.items()} for row in _rows(cursor)]
-    return rows[:MAX_MEMBERS], len(rows) > MAX_MEMBERS
+    return _grouped(cursor, MAX_MEMBERS)
+
+
+def _events_for(con, run_dir: str, unit_ids: list[str]
+                ) -> dict[str, tuple[list[dict], bool]]:
+    """Every shown unit's evidence rows, in one query. See ``_members_for``."""
+    members = Path(run_dir) / UNIT_MEMBERS_FILENAME
+    events = Path(run_dir) / EVENTS_FILENAME
+    if not members.is_file() or not events.is_file() or not unit_ids:
+        return {}
+    marks = ", ".join("?" * len(unit_ids))
+    cursor = con.execute(
+        f"""SELECT * EXCLUDE (_rank) FROM (
+                SELECT e.*, CAST(m.unit_id AS VARCHAR) AS _unit,
+                       row_number() OVER (
+                           PARTITION BY CAST(m.unit_id AS VARCHAR)
+                           ORDER BY e.date DESC NULLS LAST
+                       ) AS _rank
+                FROM read_parquet(?) m
+                JOIN read_parquet(?) e
+                  ON CAST(e.record_id AS VARCHAR) = CAST(m.record_id AS VARCHAR)
+                WHERE CAST(m.unit_id AS VARCHAR) IN ({marks})
+            ) WHERE _rank <= ?
+            ORDER BY _unit, _rank""",
+        [str(members), str(events), *unit_ids, MAX_EVENTS + 1],
+    )
+    return _grouped(cursor, MAX_EVENTS)
+
+
+def _members_of(con, run_dir: str, unit_id: str) -> tuple[list[dict], bool]:
+    """One unit's member records. ``_members_for`` for a whole screen's worth."""
+    return _members_for(con, run_dir, [str(unit_id)]).get(str(unit_id), ([], False))
 
 
 def _events_of(con, run_dir: str, unit_id: str) -> tuple[list[dict], bool]:
-    members = Path(run_dir) / UNIT_MEMBERS_FILENAME
-    events = Path(run_dir) / EVENTS_FILENAME
-    if not members.is_file() or not events.is_file():
-        return [], False
-    cursor = con.execute(
-        """SELECT e.* FROM read_parquet(?) m
-           JOIN read_parquet(?) e
-             ON CAST(e.record_id AS VARCHAR) = CAST(m.record_id AS VARCHAR)
-           WHERE CAST(m.unit_id AS VARCHAR) = ?
-           ORDER BY e.date DESC NULLS LAST LIMIT ?""",
-        [str(members), str(events), str(unit_id), MAX_EVENTS + 1],
-    )
-    rows = [{k: _json_safe(v) for k, v in row.items()} for row in _rows(cursor)]
-    return rows[:MAX_EVENTS], len(rows) > MAX_EVENTS
+    """One unit's evidence rows. ``_events_for`` for a whole screen's worth."""
+    return _events_for(con, run_dir, [str(unit_id)]).get(str(unit_id), ([], False))
 
 
 def _held_detail(con, run_dir: str, cluster_id: str, decisions: dict,
@@ -472,6 +518,10 @@ def _held_detail(con, run_dir: str, cluster_id: str, decisions: dict,
         return None
     members = [{k: _json_safe(v) for k, v in row.items()} for row in rows]
     units = []
+    record_ids = [str(member["record_id"]) for member in members]
+    # A held group's "units" are its records, one each, so the record id is the
+    # unit id and the batch lookup is the same one the real clusters use.
+    events_by_unit = _events_for(con, run_dir, record_ids) if with_events else {}
     for member in members:
         record_id = str(member["record_id"])
         unit = {"unit_id": record_id, "unit_size": 1,
@@ -479,7 +529,8 @@ def _held_detail(con, run_dir: str, cluster_id: str, decisions: dict,
                 "proposed_entity_key": record_id,
                 "members": [member], "members_truncated": False}
         if with_events:
-            unit["events"], unit["events_truncated"] = _events_of(con, run_dir, record_id)
+            unit["events"], unit["events_truncated"] = \
+                events_by_unit.get(record_id, ([], False))
         units.append(unit)
     return {
         "cluster_id": cluster_id,
@@ -535,15 +586,15 @@ def get_cluster(run_dir: str, cluster_id: str, decisions: dict | None = None,
         shown_ids = unit_ids[:MAX_UNITS]
         unit_rows = _unit_rows(con, run_dir, shown_ids)
 
+        by_unit = _members_for(con, run_dir, shown_ids)
+        events_by_unit = _events_for(con, run_dir, shown_ids) if with_events else {}
         for unit in unit_rows:
-            unit["proposed_entity_key"] = part_of.get(str(unit["unit_id"]))
-            unit["members"], unit["members_truncated"] = _members_of(
-                con, run_dir, str(unit["unit_id"])
-            )
+            key = str(unit["unit_id"])
+            unit["proposed_entity_key"] = part_of.get(key)
+            unit["members"], unit["members_truncated"] = by_unit.get(key, ([], False))
             if with_events:
-                unit["events"], unit["events_truncated"] = _events_of(
-                    con, run_dir, str(unit["unit_id"])
-                )
+                unit["events"], unit["events_truncated"] = \
+                    events_by_unit.get(key, ([], False))
 
         edges = _edges(con, run_dir, shown_ids, part_of)
         total_records = con.execute(

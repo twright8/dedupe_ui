@@ -475,9 +475,54 @@ MINT_WIDTH = 10
 
 
 def _single(values) -> str | None:
-    """The one non-null value in *values*, or None when they disagree."""
+    """The one non-null value in *values*, or None when they disagree.
+
+    The reference statement of the rule. ``_agreed_numbers`` is the same thing
+    for a whole frame at once; the tests hold the two together.
+    """
     distinct = {v for v in values if isinstance(v, str) and v}
     return next(iter(distinct)) if len(distinct) == 1 else None
+
+
+def _strings(values: pd.Series) -> pd.Series:
+    """*values* with everything that is not a non-empty string made null.
+
+    ``_single`` tests ``isinstance(v, str)`` per value. Under a string dtype
+    that is exactly ``notna()``, and under a string dtype is how a column read
+    back from parquet arrives, so the fast path is the normal one. An object
+    column falls back to the per-value test, which is what it means.
+    """
+    if str(values.dtype) != "object":
+        text = values.where(values.notna(), None).astype(object)
+    else:
+        text = values.map(lambda v: v if isinstance(v, str) else None)
+    return text.where(text.notna() & (text != ""), None)
+
+
+def _agreed_numbers(members: pd.DataFrame) -> pd.Series:
+    """Per ``entity_key``, the one padded GB company number its records agree on.
+
+    ``_single`` over a group-by, without the per-group Python call: a key with
+    exactly one distinct non-empty value takes it, and the minimum of a set of
+    one is that one value.
+    """
+    if "company_number_padded" not in members.columns:
+        return pd.Series(dtype="object")
+    frame = pd.DataFrame({
+        "entity_key": members["entity_key"].to_numpy(),
+        "number": _strings(members["company_number_padded"]).to_numpy(),
+    })
+    frame = frame[frame["number"].notna()]
+    if not len(frame):
+        return pd.Series(dtype="object")
+    grouped = frame.groupby("entity_key", sort=False)["number"]
+    agreed = grouped.min()[grouped.nunique() == 1]
+    if not len(agreed):
+        return pd.Series(dtype="object")
+    # ``str.match`` is ``re.match``, and the pattern carries its own anchors,
+    # so this is exactly the ``GB_NUMBER_RE.match`` the loop did per key.
+    keep = agreed.astype(str).str.match(GB_NUMBER_RE.pattern)
+    return agreed[keep.fillna(False)].astype(object)
 
 
 def mint_entity_ids(members: pd.DataFrame, profile: Profile) -> pd.Series:
@@ -487,29 +532,41 @@ def mint_entity_ids(members: pd.DataFrame, profile: Profile) -> pd.Series:
     that number as its id — the number names the company itself, so nothing
     minted could be more durable. Everything else takes the next counter value
     for its track, and the counter only goes up, so a number is never reused.
+
+    Nothing here is per entity. The full PSC snapshot mints about 11.3 million
+    ids, and the loop this replaced ran the format string that many times and
+    built a dict of the same size. The counter is a running total over the keys
+    in sorted order, which is a ``cumsum`` over the keys that need one — so the
+    id a key gets is the id the loop gave it, and the high-water mark the
+    profile keeps moves by exactly the number minted.
     """
     keys = members["entity_key"].drop_duplicates().sort_values()
     if not len(keys):
         return pd.Series(dtype="object")
+    index = pd.Index(keys.to_numpy(), name="entity_key")
 
-    by_key = members.groupby("entity_key", sort=False)
-    assigned: dict = {}
-    if "company_number_padded" in members.columns:
-        for key, number in by_key["company_number_padded"].agg(_single).items():
-            if isinstance(number, str) and GB_NUMBER_RE.match(number):
-                assigned[key] = number
+    assigned = _agreed_numbers(members).reindex(index)
+    needs_mint = assigned.isna()
+    # 1, 2, 3 ... over the keys that need minting, in the sorted key order the
+    # loop walked, so the nth of them takes the nth counter value.
+    rank = needs_mint.cumsum()
 
-    tracks = by_key["track"].first() if "track" in members.columns else None
+    if "track" in members.columns:
+        tracks = members.groupby("entity_key", sort=False)["track"].first()
+        prefix = tracks.reindex(index).astype(object).map(MINT_PREFIX)
+        prefix = prefix.where(prefix.notna(), "PSCP")
+    else:
+        prefix = pd.Series("PSCP", index=index, dtype=object)
+
     counter = int(getattr(profile, "_entity_counter", 0))
-    for key in keys:
-        if key in assigned:
-            continue
-        track = str(tracks.get(key, "person")) if tracks is not None else "person"
-        counter += 1
-        assigned[key] = f"{MINT_PREFIX.get(track, 'PSCP')}-{counter:0{MINT_WIDTH}d}"
-    profile._entity_counter = counter
+    numbers = (rank + counter).astype("int64").astype(str).str.zfill(MINT_WIDTH)
+    minted = prefix.astype(str) + "-" + numbers
+    profile._entity_counter = counter + int(needs_mint.sum())
 
-    return pd.Series([assigned[k] for k in keys], index=keys.to_numpy())
+    return pd.Series(
+        assigned.where(~needs_mint, minted).to_numpy(dtype=object),
+        index=index.to_numpy(),
+    )
 
 
 def _id_rank(identifier) -> tuple[int, str]:

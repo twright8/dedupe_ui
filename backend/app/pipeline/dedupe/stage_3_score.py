@@ -51,6 +51,11 @@ logging.getLogger("splink").setLevel(logging.INFO)
 # `decided_by` when a veto is what put the pair where it is (docs/PAIRS_API.md).
 DECIDED_BY_VETO = "veto"
 
+#: How much generated blocking SQL the blocking report will carry. A hot-key
+#: control inlines every oversized key, which is megabytes at PSC scale, and
+#: the report is served to a browser.
+MAX_REPORTED_SQL = 20_000
+
 PAIRS_FILENAME = "pairs.parquet"
 # Splink's raw predictions, one file per track, narrowed to the columns the
 # pairs file keeps. Deleted once the overlays have been laid over them.
@@ -227,8 +232,12 @@ def budget_columns(config: dict) -> list[str]:
         if control:
             wanted |= {c for c in (control.get("refine_with") or [])
                        if isinstance(c, str)}
-    for rule in linkage.em_rules(config):
-        wanted |= set(linkage.sql_columns(rule))
+    for rule in linkage.em_entries(config):
+        wanted |= set(linkage.sql_columns(rule["sql"]))
+        control = linkage.block_control(rule)
+        if control:
+            wanted |= {c for c in (control.get("refine_with") or [])
+                       if isinstance(c, str)}
     return sorted(wanted)
 
 
@@ -356,6 +365,63 @@ def count_blocking_pairs(track_units: pd.DataFrame, sql: str, db_api) -> int:
     return int(counts["number_of_comparisons_to_be_scored_post_filter_conditions"])
 
 
+def count_rule_pairs(rows: pd.DataFrame, rule: dict, controlled_sql: str,
+                     track: str, db_api, temp_dir=None) -> int:
+    """The pairs one rule makes, counted by whichever counter can count it.
+
+    Splink's own counter is used wherever it can be, because it is the thing
+    that will do the blocking. **It cannot count a refined rule.** The control
+    generates ``<the rule> AND (<key> NOT IN (...) OR <refine columns agree>)``,
+    and an ``OR`` stops Splink's blocking analyser recognising the equi-join at
+    all: it falls back to the cartesian bound and refuses. Measured on the full
+    snapshot's 593,640 organisation units — ``on_oversize: "drop"`` counts fine
+    and agrees with ``price_rule`` to the pair (25,558 both ways), and
+    ``on_oversize: "refine"`` raises ``exceeded max_rows_limit`` with a bound of
+    3.524e+11, which is 593,640 squared over two.
+
+    ``price_rule`` prices the control natively, in DuckDB group arithmetic. It
+    was checked against materialised pairs in sixteen cases on the sample
+    (``PSC_HANDOVER.md`` section 19) and against Splink's own count here, so it
+    is used for a refined rule and Splink's counter for everything else.
+    """
+    control = linkage.block_control(rule)
+    if control is None or control.get("on_oversize") != "refine":
+        try:
+            return count_blocking_pairs(rows, controlled_sql, db_api)
+        except (TypeError, ValueError):
+            # Splink refused. It does that for a rule whose pre-filter count is
+            # over its own `max_rows_limit` as well as for a refined one: PSC's
+            # pb5 blocks on the forename sound and the date of birth and then
+            # filters on `l.surname_metaphone <> r.surname_metaphone`, and at
+            # 11.2 million person units the block before that filter is over a
+            # billion pairs. Price it here instead of losing the run.
+            pass
+    # `price_rule` applies the control itself, so it is given the rule as it was
+    # written. Handing it the generated SQL would apply the control twice.
+    con = duckdb_conn.connect(temp_dir)
+    try:
+        return int(linkage.price_rule(con, rows, rule, track)["pairs"])
+    finally:
+        con.close()
+
+
+def count_uncontrolled_pairs(rows: pd.DataFrame, rule: dict, track: str,
+                             temp_dir=None) -> int:
+    """What the rule would cost with no control, for the report to show beside.
+
+    Always ``price_rule``: it is exact for every shipped rule but pb6, it never
+    refuses, and this figure is shown rather than acted on.
+    """
+    con = duckdb_conn.connect(temp_dir)
+    try:
+        return int(linkage.price_rule(
+            con, rows, {k: v for k, v in rule.items()
+                        if k not in linkage.BLOCK_CONTROL_KEYS},
+            track)["pairs_before"])
+    finally:
+        con.close()
+
+
 def controlled_rules(rows: pd.DataFrame, rules: list[dict], track: str,
                      temp_dir=None, progress_callback=None) -> list[dict]:
     """The blocking rules with their hot-key controls built into the SQL.
@@ -379,8 +445,9 @@ def controlled_rules(rows: pd.DataFrame, rules: list[dict], track: str,
                 out.append(rule)
                 continue
             out.append({**rule, "sql": linkage.controlled_sql(con, rows, rule, track)})
-            _step(f"  {track}/{rule['id']}: {linkage.control_description(rule)}",
-                  progress_callback)
+            # An EM entry written as plain SQL has no id of its own.
+            _step(f"  {track}/{rule.get('id') or 'em'}: "
+                  f"{linkage.control_description(rule)}", progress_callback)
         return out
     finally:
         con.close()
@@ -417,6 +484,7 @@ def blocking_budget_report(
     """
     report = {"memory_limit": memory_limit(), "tracks": {}}
     failure: BlockingBudgetError | None = None
+    temp = Path(units).parent / "duckdb_tmp" if isinstance(units, (str, Path)) else None
 
     for track in linkage.TRACK_KEYS:
         config = linkage.track_settings(settings, track)
@@ -432,8 +500,8 @@ def blocking_budget_report(
             if len(rows) > 1 else rules
         counted = []
         for rule, controlled in zip(rules, priced):
-            pairs = count_blocking_pairs(rows, controlled["sql"], db_api) \
-                if len(rows) > 1 else 0
+            pairs = count_rule_pairs(rows, rule, controlled["sql"], track,
+                                     db_api, temp) if len(rows) > 1 else 0
             entry = {
                 "id": rule["id"],
                 "description": rule["description"],
@@ -443,10 +511,15 @@ def blocking_budget_report(
             if linkage.block_control(rule) is not None:
                 entry["control"] = linkage.block_control(rule)
                 entry["control_description"] = linkage.control_description(rule)
-                entry["sql_after_control"] = controlled["sql"]
+                # The generated SQL inlines every hot key, which at PSC scale is
+                # megabytes. The report is served to a browser, so it carries
+                # the size rather than the text.
+                entry["sql_after_control_bytes"] = len(controlled["sql"])
+                if len(controlled["sql"]) <= MAX_REPORTED_SQL:
+                    entry["sql_after_control"] = controlled["sql"]
                 if len(rows) > 1:
-                    entry["pairs_before_control"] = count_blocking_pairs(
-                        rows, rule["sql"], db_api)
+                    entry["pairs_before_control"] = count_uncontrolled_pairs(
+                        rows, rule, track, temp)
             counted.append(entry)
             _step(
                 f"  {track}/{rule['id']}: {pairs:,} pairs — {rule['sql']}",
@@ -469,13 +542,28 @@ def blocking_budget_report(
         # "2.4M of 20M, under budget" and let it through, because it only ever
         # looked at the prediction rules.
         em_counted = []
-        for index, sql in enumerate(linkage.em_rules(config), start=1):
-            pairs = count_blocking_pairs(rows, sql, db_api) if len(rows) > 1 else 0
+        em_entries = linkage.em_entries(config)
+        # An EM rule may carry a hot-key control too, and it is priced after it
+        # for the same reason a prediction rule is: the budget has to price
+        # what will actually run. PSC's person em1 is 582,535,879 training
+        # pairs uncontrolled and 43,054,672 with `drop` over 60.
+        em_priced = controlled_rules(rows, em_entries, track,
+                                     progress_callback=progress_callback) \
+            if len(rows) > 1 else em_entries
+        for index, (entry, controlled) in enumerate(zip(em_entries, em_priced), start=1):
+            sql = controlled["sql"]
+            pairs = count_rule_pairs(rows, entry, sql, track, db_api,
+                                     temp) if len(rows) > 1 else 0
             em_counted.append({
                 "id": f"em{index}",
                 "description": "EM training rule",
-                "sql": sql,
+                "sql": entry["sql"],
+                "sql_after_control_bytes": len(sql),
                 "pairs": pairs,
+                **({"control": linkage.block_control(entry),
+                    "control_description": linkage.control_description(entry),
+                    "sql_before_control": entry["sql"]}
+                   if linkage.block_control(entry) is not None else {}),
             })
             _step(f"  {track}/em{index}: {pairs:,} training pairs — {sql}",
                   progress_callback)
@@ -532,8 +620,8 @@ def _splink_frame(rows: pd.DataFrame, config: dict,
     wanted = ["unit_id"]
     for rule in linkage.blocking_rules(config):
         wanted.extend(sorted(linkage.sql_columns(rule["sql"])))
-    for rule in linkage.em_rules(config):
-        wanted.extend(sorted(linkage.sql_columns(rule)))
+    for rule in linkage.em_entries(config):
+        wanted.extend(sorted(linkage.sql_columns(rule["sql"])))
     for rule in extra_sql or []:
         wanted.extend(sorted(linkage.sql_columns(rule)))
     wanted.extend(_comparison_columns(config))
@@ -636,8 +724,14 @@ def train_track(
     )
     _step(f"  u done ({time.time() - t0:.1f}s)", progress_callback)
 
-    # Labels never train Splink (D9): m comes from EM, u from sampling.
-    for rule in linkage.em_rules(config):
+    # Labels never train Splink (D9): m comes from EM, u from sampling. A
+    # training rule may carry a hot-key control, and it is applied here for the
+    # same reason it is applied to a prediction rule: the pairs inside a hot
+    # block are never made rather than made and thrown away.
+    for rule in controlled_rules(frame, linkage.em_entries(config), track,
+                                 temp_dir=run_dir / "duckdb_tmp",
+                                 progress_callback=progress_callback):
+        rule = rule["sql"]
         _step(f"  EM on {rule}...", progress_callback)
         t0 = time.time()
         try:
@@ -1672,28 +1766,33 @@ def run_stage_3_score(
     units_path = run_dir / units_module.UNITS_FILENAME
     members_path = run_dir / units_module.UNIT_MEMBERS_FILENAME
     pairs_path = run_dir / PAIRS_FILENAME
-    groups = pd.read_parquet(run_dir / EXACT_GROUPS_FILENAME)
     events_path = run_dir / EVENTS_FILENAME
 
-    records = pd.read_parquet(run_dir / RECORDS_FILENAME)
-    events = pd.read_parquet(events_path) if events_path.is_file() else None
-    with _phase(f"Building units from {len(records):,} records", progress_callback):
-        units, members = units_module.build_units(
-            records, groups, events, temp_dir=temp_dir)
-        units.to_parquet(units_path, index=False)
-        members.to_parquet(members_path, index=False)
-        write_scored_units(run_dir, units)
-        unit_counts = units_module.counts_from(units)
+    # The records, the groups and the units are files from here on. The build
+    # reads them in DuckDB and writes the two parquets itself; it never holds
+    # the units frame and this stage never holds the records one. Reading them
+    # into pandas and writing them back was tens of gigabytes at fifteen
+    # million records (`PSC_HANDOVER.md`, section 24).
+    records_path = run_dir / RECORDS_FILENAME
+    n_records = units_module.record_count(records_path)
+    with _phase(f"Building units from {n_records:,} records", progress_callback):
+        units_module.build_units_files(
+            records_path, run_dir / EXACT_GROUPS_FILENAME, units_path, members_path,
+            events_path if events_path.is_file() else None, temp_dir=temp_dir,
+        )
+        units_module.write_fingerprint(
+            units_path, run_dir / SCORED_UNITS_FILENAME, temp_dir)
+        unit_counts = units_module.counts_from_file(units_path, temp_dir)
     _step(f"  {unit_counts['units_total']:,} units", progress_callback)
 
     # Everything after this reads projections off the two files just written.
-    # The whole records frame is sixty-odd columns and the whole units frame is
-    # the same again; holding either of them through the rest of the stage is
-    # what stopped this scaling. Stage 3 needs four unit columns for the
-    # overlays and three record columns for the evaluation.
-    del records, units, members, events
-    overlay_units = read_unit_projection(units_path, overlay_columns(ruleset))
-
+    # Stage 3 needs four unit columns for the overlays and three record columns
+    # for the evaluation, out of the sixty-odd each of them carries.
+    #
+    # The overlay projection and the exact groups are read where they are used,
+    # not here. Both are O(units) and O(records), both are needed only after
+    # Splink has finished and been released, and holding them across training
+    # and prediction adds their whole size to the stage's peak for nothing.
     freed = clear_duckdb_tmp(temp_dir)
     if freed:
         _step(f"  Cleared {freed / 2**30:.1f} GB of spill left by an earlier run",
@@ -1743,6 +1842,7 @@ def run_stage_3_score(
         release_linker(linker)
         del linker, rows
 
+    overlay_units = read_unit_projection(units_path, overlay_columns(ruleset))
     with _phase("Applying the overlays and writing the pairs", progress_callback):
         n_written = overlay_predictions(
             predictions, overlay_units, review, high, pairs_path,
@@ -1758,6 +1858,7 @@ def run_stage_3_score(
                 render_score_histogram(pairs_path, track, run_dir / "diagnostics",
                                        review, high, temp_dir, progress_callback)
 
+    groups = pd.read_parquet(run_dir / EXACT_GROUPS_FILENAME)
     outcome = label_outcomes_from_files(labels, members_path, groups)
     forced = forced_pairs(outcome["applied"], pairs_path, units_path)
     outcome["forced"] = int(len(forced))

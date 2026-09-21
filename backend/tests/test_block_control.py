@@ -486,16 +486,45 @@ def test_a_good_control_validates():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("profile", ["donations", "psc"])
-def test_the_shipped_settings_carry_no_control_and_still_validate(profile):
+def test_the_donations_settings_carry_no_control_and_still_validate():
+    """The no-op guarantee: donations blocks exactly as it did before this existed."""
     settings = json.loads(
-        (DEFAULTS / profile / "linkage_settings.json").read_text(encoding="utf-8")
+        (DEFAULTS / "donations" / "linkage_settings.json").read_text(encoding="utf-8")
     )
     for track, config in settings["tracks"].items():
         for spec in linkage.blocking_rules(config):
             assert linkage.block_control(spec) is None
             assert linkage.control_description(spec) == ""
             assert set(spec) == {"id", "description", "sql"}
+        for entry in linkage.em_entries(config):
+            assert linkage.block_control(entry) is None
+
+
+def test_every_psc_route_carries_the_control_the_full_snapshot_needs():
+    """PSC turns it on, and `PSC_HANDOVER.md` section 104 says what it measured.
+
+    Uncontrolled, the six person routes make 1,901,943,106 pairs over the full
+    snapshot's 11,205,785 person units, and the first EM training rule makes
+    582,535,879 on its own. Nothing runs without this.
+    """
+    settings = json.loads(
+        (DEFAULTS / "psc" / "linkage_settings.json").read_text(encoding="utf-8")
+    )
+    for track, config in settings["tracks"].items():
+        for spec in linkage.blocking_rules(config):
+            control = linkage.block_control(spec)
+            assert control is not None, f"{track}/{spec['id']}"
+            assert control["on_oversize"] == "refine"
+            assert control["refine_with"], f"{track}/{spec['id']}"
+            # The whole point: a route may not refine on a column its own key
+            # already fixes, or it splits nothing.
+            fixed = linkage.columns_held_equal(spec["sql"])
+            assert not (set(control["refine_with"]) & fixed), \
+                f"{track}/{spec['id']} refines on a column its key already fixes"
+        for entry in linkage.em_entries(config):
+            control = linkage.block_control(entry)
+            assert control is not None
+            assert control["on_oversize"] == "drop"
 
 
 def test_blocking_rules_carries_the_control_through_untouched():
@@ -509,3 +538,215 @@ def test_blocking_rules_carries_the_control_through_untouched():
     assert first["refine_with"] == ["forename_initial"]
     assert first["drop_above"] == 200
     assert set(second) == {"id", "description", "sql"}
+
+
+# ---------------------------------------------------------------------------
+# The control on an EM training rule
+# ---------------------------------------------------------------------------
+# An EM rule is priced against the same `max_pairs` and nothing downstream
+# trims it, so a coarse one is more dangerous than a coarse prediction rule.
+# PSC's person em1 — "both name sounds agree" — makes 582,535,879 training
+# pairs on the full snapshot against 94,743,605 for the whole of prediction,
+# and 43,054,672 with `drop` over 60. See PSC_HANDOVER.md, section 104.
+
+
+def test_an_em_rule_may_be_written_as_text_or_as_an_object():
+    config = {"em_blocking_rules": [
+        "l.surname = r.surname",
+        {"sql": "l.postcode = r.postcode", "max_block_size": 60,
+         "on_oversize": "drop"},
+    ]}
+    entries = linkage.em_entries(config)
+    assert [e["sql"] for e in entries] == ["l.surname = r.surname",
+                                           "l.postcode = r.postcode"]
+    assert linkage.block_control(entries[0]) is None
+    assert linkage.block_control(entries[1]) == {
+        "max_block_size": 60, "on_oversize": "drop",
+        "refine_with": [], "drop_above": None,
+    }
+    # The text form is what every existing caller reads, and it is unchanged.
+    assert linkage.em_rules(config) == ["l.surname = r.surname",
+                                        "l.postcode = r.postcode"]
+
+
+def test_an_em_rule_with_no_rules_still_falls_back_to_the_blocking_rules():
+    config = {"blocking_rules": [{"id": "b1", "description": "",
+                                  "sql": "l.surname = r.surname"}]}
+    assert [e["sql"] for e in linkage.em_entries(config)] == ["l.surname = r.surname"]
+
+
+def test_an_em_rule_object_with_no_sql_is_refused():
+    settings = default_linkage_settings()
+    settings["tracks"]["person"]["em_blocking_rules"] = [{"max_block_size": 60}]
+    assert _messages(_check(settings), "em_blocking_rules") == [
+        "An EM blocking rule must be SQL text, or an object with a 'sql' key"
+    ]
+
+
+def test_an_em_rule_control_is_validated_like_any_other():
+    settings = default_linkage_settings()
+    settings["tracks"]["person"]["em_blocking_rules"] = [
+        {"sql": "l.surname_metaphone = r.surname_metaphone",
+         "max_block_size": 0, "on_oversize": "drop"}
+    ]
+    assert _messages(_check(settings), "max_block_size")
+
+    settings["tracks"]["person"]["em_blocking_rules"] = [
+        {"sql": "l.surname_metaphone = r.surname_metaphone",
+         "max_block_size": 60, "on_oversize": "drop"}
+    ]
+    assert _messages(_check(settings), "em_blocking_rules") == []
+
+
+def test_an_em_rule_object_still_counts_towards_the_untrainable_guard():
+    """The guard reads the rule's columns, whichever form it is written in."""
+    settings = default_linkage_settings()
+    person = settings["tracks"]["person"]
+    column = person["comparisons"][0]["column"]
+    person["em_blocking_rules"] = [
+        {"sql": f"l.{column} = r.{column}", "max_block_size": 60,
+         "on_oversize": "drop"},
+    ]
+    assert linkage.untrainable_comparisons(person) == [0]
+    assert any("em_blocking_rule" in w["message"]
+               for w in linkage.linkage_warnings(settings))
+
+
+def test_the_em_control_removes_the_hot_block_from_the_training_set(tmp_path):
+    """The pairs a dropped block would have made are never built."""
+    import duckdb as _duckdb
+
+    rows = [{"unit_id": f"u{n}", "track": "person",
+             "surname_metaphone": "HOT" if n < 40 else f"S{n}",
+             "forename_metaphone": "HOT" if n < 40 else f"F{n}"}
+            for n in range(60)]
+    units = pd.DataFrame(rows)
+    sql = ("l.surname_metaphone = r.surname_metaphone AND "
+           "l.forename_metaphone = r.forename_metaphone")
+    con = _duckdb.connect()
+    try:
+        plain = linkage.price_rule(con, units, {"sql": sql}, "person")
+        dropped = linkage.price_rule(
+            con, units,
+            {"sql": sql, "max_block_size": 20, "on_oversize": "drop"}, "person")
+    finally:
+        con.close()
+    assert plain["pairs"] == 40 * 39 // 2
+    assert dropped["pairs"] == 0
+    assert dropped["units_dropped"] == 40
+
+
+def test_the_budget_prices_an_em_rule_after_its_control(tmp_path):
+    """A budget that prices the uncontrolled rule is not a budget."""
+    from app.pipeline.dedupe import stage_3_score
+
+    units = pd.DataFrame([
+        {"unit_id": f"u{n}", "track": "person",
+         "surname_metaphone": "HOT" if n < 40 else f"S{n}",
+         "forename_metaphone": "HOT" if n < 40 else f"F{n}",
+         "surname_clean": f"S{n}"}
+        for n in range(60)
+    ])
+    sql = ("l.surname_metaphone = r.surname_metaphone AND "
+           "l.forename_metaphone = r.forename_metaphone")
+    settings = {"tracks": {"person": {
+        "blocking_rules": [{"id": "b1", "description": "",
+                            "sql": "l.surname_clean = r.surname_clean"}],
+        "em_blocking_rules": [{"sql": sql, "max_block_size": 20,
+                               "on_oversize": "drop"}],
+        "max_pairs": 1000,
+    }}}
+    db_api = stage_3_score._db_api(tmp_path)
+    report, failure = stage_3_score.blocking_budget_report(units, settings, db_api)
+    em = report["tracks"]["person"]["em_rules"][0]
+
+    assert em["pairs"] == 0, "the hot block never reaches the training set"
+    assert em["control"]["on_oversize"] == "drop"
+    assert em["sql"] == sql, "the report shows the rule as it was written"
+    assert em["sql_after_control_bytes"] > len(sql), "and the size of what ran"
+    assert report["tracks"]["person"]["em_over_budget"] is False
+    assert failure is None
+
+
+def test_the_budget_prices_a_refined_rule_with_price_rule(tmp_path):
+    """Splink cannot count a refined rule, so the budget counts it itself.
+
+    The control generates ``… AND (key NOT IN (…) OR refine columns agree)``,
+    and that ``OR`` stops Splink's blocking analyser seeing the equi-join: it
+    falls back to the cartesian bound and refuses. On the full snapshot's
+    593,640 organisation units it asked for a limit above 3.524e+11, which is
+    593,640 squared over two. The number here has to be the rule's real cost,
+    not the square of the unit count, and it has to be priced from the rule as
+    written rather than from the SQL the control already generated.
+    """
+    from app.pipeline.dedupe import stage_3_score
+
+    units = pd.DataFrame([
+        {"unit_id": f"u{n}", "track": "person",
+         "surname_metaphone": "HOT" if n < 40 else f"S{n}",
+         "forename_initial": "A" if n % 2 else "B"}
+        for n in range(60)
+    ])
+    rule = {"id": "b1", "description": "",
+            "sql": "l.surname_metaphone = r.surname_metaphone",
+            "max_block_size": 20, "on_oversize": "refine",
+            "refine_with": ["forename_initial"], "drop_above": 60}
+    settings = {"tracks": {"person": {"blocking_rules": [rule],
+                                      "max_pairs": 10_000_000}}}
+    con = duckdb.connect()
+    try:
+        expected = linkage.price_rule(con, units, rule, "person")["pairs"]
+    finally:
+        con.close()
+
+    report, failure = stage_3_score.blocking_budget_report(
+        units, settings, stage_3_score._db_api(tmp_path))
+    priced = report["tracks"]["person"]["rules"][0]
+
+    assert expected == 2 * (20 * 19 // 2), "the hot block splits on the initial"
+    assert priced["pairs"] == expected
+    assert priced["pairs"] < len(units) ** 2, "not the cartesian bound"
+    assert failure is None
+
+
+def test_a_rule_splink_will_not_count_is_priced_rather_than_lost(tmp_path):
+    """Splink refuses more rules than the refined ones, and a run must survive it.
+
+    PSC's pb5 blocks on the forename sound and the date of birth and then
+    filters on `l.surname_metaphone <> r.surname_metaphone`. Splink counts the
+    block before the filter, and at 11.2 million person units that is over its
+    own `max_rows_limit`, so it returns the string "exceeded max_rows_limit"
+    where an integer belongs. That killed a full-scale stage 3 in the budget
+    check, before anything was scored.
+    """
+    from app.pipeline.dedupe import stage_3_score
+
+    units = pd.DataFrame([
+        {"unit_id": f"u{n}", "track": "person", "forename_metaphone": "F",
+         "surname_metaphone": f"S{n % 3}"} for n in range(30)
+    ])
+    rule = {"id": "b1", "description": "",
+            "sql": ("l.forename_metaphone = r.forename_metaphone AND "
+                    "l.surname_metaphone <> r.surname_metaphone")}
+
+    class Refuses:
+        """Stands in for Splink when it will not give a number."""
+
+    def refuse(*args, **kwargs):
+        raise ValueError("invalid literal for int() with base 10: "
+                         "'exceeded max_rows_limit, see warning'")
+
+    real = stage_3_score.count_blocking_pairs
+    stage_3_score.count_blocking_pairs = refuse
+    try:
+        pairs = stage_3_score.count_rule_pairs(units, rule, rule["sql"],
+                                               "person", Refuses(), tmp_path)
+    finally:
+        stage_3_score.count_blocking_pairs = real
+
+    con = duckdb.connect()
+    try:
+        expected = linkage.price_rule(con, units, rule, "person")["pairs"]
+    finally:
+        con.close()
+    assert pairs == expected == 30 * 29 // 2 - 3 * (10 * 9 // 2)

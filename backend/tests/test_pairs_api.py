@@ -392,3 +392,69 @@ def test_evidence_rows_come_back_when_a_profile_has_no_date_column(
     assert [row["company_number"] for row in body["events"]["left"]] == \
         ["00000002", "00000001"]
     assert body["events"]["right"][0]["company_number"] == "00000003"
+
+
+# ---------------------------------------------------------------------------
+# The narrow list query (PSC scale)
+# ---------------------------------------------------------------------------
+
+
+def _wide_items(run_dir, **kwargs):
+    """``get_pairs`` with the unit projection turned off, as it used to be."""
+    from app.services import pairs_reader
+
+    real = pairs_reader._base_sql
+
+    def wide(unit_columns, with_labels=False, narrow=False):
+        return real(unit_columns, with_labels, narrow=False)
+
+    pairs_reader._base_sql = wide
+    try:
+        return pairs_reader.get_pairs(run_dir, **kwargs)
+    finally:
+        pairs_reader._base_sql = real
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"sort": "score", "order": "desc"},
+    {"sort": "priority", "order": "desc"},
+    {"sort": "name", "order": "asc"},
+    {"sort": "useful", "order": "desc"},
+    {"bucket": "accept", "sort": "score"},
+    {"q": "a", "sort": "score"},
+    {"sort": "score", "offset": 1, "limit": 2},
+])
+def test_the_narrow_query_gives_the_page_the_wide_one_gave(db_path, data_dir, kwargs):
+    """Reading three unit columns instead of sixty-eight must move nothing.
+
+    The list asks the same query three times — the chip counts, the filtered
+    total, the page — and only the page ever shows a unit column. Carrying the
+    whole unit row through all three was most of the time at PSC scale, so it
+    now carries three columns and fetches the rest for the page's fifty rows.
+    """
+    from app.services import pairs_reader
+
+    _seed_run(db_path, data_dir)
+    run_dir = str(data_dir / "runs" / RUN_ID)
+
+    narrow = pairs_reader.get_pairs(run_dir, **kwargs)
+    wide = _wide_items(run_dir, **kwargs)
+
+    assert narrow["total"] == wide["total"]
+    assert narrow["counts"] == wide["counts"]
+    assert [i["pair_id"] for i in narrow["items"]] == [i["pair_id"] for i in wide["items"]]
+    assert narrow["items"] == wide["items"]
+
+
+def test_the_page_still_carries_every_unit_column(db_path, data_dir):
+    """The struct on the page is the whole unit row, not the narrow projection."""
+    from app.services import pairs_reader
+
+    _seed_run(db_path, data_dir)
+    run_dir = str(data_dir / "runs" / RUN_ID)
+    page = pairs_reader.get_pairs(run_dir, limit=1)
+    units = pd.read_parquet(data_dir / "runs" / RUN_ID / "units.parquet")
+
+    assert page["items"], "nothing to check"
+    for side in ("left", "right"):
+        assert set(page["items"][0][side]) == set(units.columns)

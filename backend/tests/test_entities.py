@@ -1261,3 +1261,109 @@ def test_reclustering_a_held_group_merge_is_quick_and_counts_honestly(
     assert counts["labelsTotal"] == client.get("/api/labels").json()["total"] == 2
     assert counts["labelsTrue"] == 2
     assert counts["labelsFalse"] == 0
+
+
+# ---------------------------------------------------------------------------
+# What the minting hook is handed
+# ---------------------------------------------------------------------------
+
+
+def _mint_frames(monkeypatch) -> list:
+    """Capture every frame ``mint_entity_ids`` is called with."""
+    seen = []
+    original = DonationsProfile.mint_entity_ids
+
+    def spy(self, members):
+        seen.append(members)
+        return original(self, members)
+
+    monkeypatch.setattr(DonationsProfile, "mint_entity_ids", spy)
+    return seen
+
+
+def _mint_inputs():
+    clusters = pd.DataFrame({
+        "unit_id": ["u1", "u2", "u3"],
+        "cluster_id": ["c1", "c1", "c2"],
+        "proposed_entity_key": ["c1", "c1", "c2"],
+        "track": ["person"] * 3,
+        "edge_source": [None, None, None],
+    })
+    members = pd.DataFrame({
+        "unit_id": ["u1", "u2", "u3"],
+        "record_id": ["r1", "r2", "r3"],
+    })
+    records = pd.DataFrame({
+        "record_id": ["r1", "r2", "r3"],
+        "track": ["person"] * 3,
+        "name": ["A", "B", "C"],
+        "existing_entity_id": [None, None, None],
+        "postcode": ["X1 1XX"] * 3,
+    })
+    return clusters, members, records
+
+
+def test_the_mint_hook_is_not_handed_the_unit_and_cluster_ids(monkeypatch):
+    """Four copies of a 37-character id per record; the hooks read two.
+
+    ``unit_id`` and ``cluster_id`` were about 9 GB of the mint frame at the
+    full PSC snapshot and neither shipped hook looks at either.
+    """
+    seen = _mint_frames(monkeypatch)
+    clusters, members, records = _mint_inputs()
+    stage_5_entities.build_entities(clusters, members, records, {},
+                                    profile=DonationsProfile())
+    assert seen, "the hook was never called"
+    for frame in seen:
+        assert "unit_id" not in frame.columns
+        assert "cluster_id" not in frame.columns
+        assert "basis" not in frame.columns
+        # and it still carries everything the two shipped hooks read
+        assert {"entity_key", "record_id"} <= set(frame.columns)
+
+
+def test_narrowing_the_mint_frame_does_not_move_an_entity_id(monkeypatch):
+    """The frame is smaller; every minted id is the one it was."""
+    clusters, members, records = _mint_inputs()
+    entities, _ = stage_5_entities.build_entities(
+        clusters, members, records, {}, profile=DonationsProfile())
+    wide = stage_5_entities.MINT_PROPOSED_COLUMNS
+    monkeypatch.setattr(stage_5_entities, "MINT_PROPOSED_COLUMNS",
+                        stage_5_entities.PROPOSED_COLUMNS)
+    try:
+        before, _ = stage_5_entities.build_entities(
+            clusters, members, records, {}, profile=DonationsProfile())
+    finally:
+        monkeypatch.setattr(stage_5_entities, "MINT_PROPOSED_COLUMNS", wide)
+    assert list(entities["entity_id"]) == list(before["entity_id"])
+
+
+def test_a_cluster_detail_reads_the_members_once_not_once_per_unit(
+    client, db_path, data_dir, monkeypatch
+):
+    """One query for the whole screen's members, not one per unit shown.
+
+    Each of those queries was a scan of ``unit_members.parquet`` joined to
+    ``records.parquet``. On the 500,000-record PSC sample one cluster detail
+    took twelve seconds; at sixteen million records both files are thirty
+    times bigger and the call was made once per unit, up to two hundred times.
+    """
+    run_dir = _seed_run(db_path, data_dir)
+    _cluster(db_path, run_dir)
+
+    calls = []
+    real = clusters_reader._members_for
+
+    def counted(con, rd, unit_ids):
+        calls.append(list(unit_ids))
+        return real(con, rd, unit_ids)
+
+    monkeypatch.setattr(clusters_reader, "_members_for", counted)
+    detail = client.get(f"/api/runs/{RUN_ID}/clusters/C-1").json()
+
+    assert len(detail["units"]) > 1, "a one-unit cluster proves nothing"
+    assert len(calls) == 1
+    assert len(calls[0]) == len(detail["units"])
+    # and every unit still got its own members
+    for unit in detail["units"]:
+        assert unit["members"], unit["unit_id"]

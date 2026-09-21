@@ -77,6 +77,13 @@ DEFAULT_AGGREGATE_BATCH = 500_000
 WRITE_THREADS_ENV = "UNIT_WRITE_THREADS"
 DEFAULT_WRITE_THREADS = 4
 
+#: How many per-column vote tables are folded into ``voted`` at once. A hash
+#: join's build side is pinned and cannot be spilled, so joining all of a
+#: sixty-column frame's votes in one statement is bounded by nothing — see
+#: ``_vote_table``.
+VOTE_JOIN_BATCH_ENV = "UNIT_VOTE_JOIN_BATCH"
+DEFAULT_VOTE_JOIN_BATCH = 8
+
 #: What ``astype(str)`` produces here. pandas 3 has a ``str`` dtype; pandas 2
 #: gives object. The unit ids carried that dtype in the old build, so they
 #: still do.
@@ -130,6 +137,18 @@ def _quote(name: str) -> str:
 def _text(value) -> str:
     """A SQL string literal."""
     return "'" + str(value).replace("'", "''") + "'"
+
+
+#: What Python's ``str.strip()`` removes from an ASCII string. DuckDB's bare
+#: ``trim`` takes spaces and nothing else, and the pandas build trimmed the
+#: existing entity id with ``str.strip()``, so a label ending in a tab would
+#: have come out differently in the two builds.
+_TRIM_CHARS = " \t\n\r\v\f"
+
+
+def _trim(expression: str) -> str:
+    """``str.strip()`` for an ASCII label, in SQL."""
+    return f"trim({expression}, {_text(_TRIM_CHARS)})"
 
 
 def _nullable(values, keep, index) -> pd.Series:
@@ -227,14 +246,22 @@ def representatives(joined: pd.DataFrame, columns: list[str],
 
 
 def _vote_sql(source: str, column: str) -> str:
-    """The modal vote for one column: most frequent non-null, ties to min id."""
+    """The modal vote for one column: most frequent non-null, ties to min id.
+
+    ``record_id`` is compared as text, because that is the rule
+    ``docs/LINKAGE.md`` states and the pandas build compared strings — it put
+    the ids through ``astype(str)`` before anything grouped them. The cast is
+    free inside ``build_units_files``, where the column is already VARCHAR, and
+    it is what makes ``representatives()`` obey the rule for a caller whose
+    frame still carries integer ids.
+    """
     quoted = _quote(column)
     return f"""
         SELECT unit_id, {quoted} FROM (
             SELECT unit_id, {quoted},
                    row_number() OVER (
                        PARTITION BY unit_id
-                       ORDER BY count(*) DESC, min(record_id) ASC
+                       ORDER BY count(*) DESC, min(CAST(record_id AS VARCHAR)) ASC
                    ) AS vote_rank
             FROM {source}
             WHERE {quoted} IS NOT NULL
@@ -453,6 +480,14 @@ def aggregate_batch_rows() -> int:
         return DEFAULT_AGGREGATE_BATCH
 
 
+def vote_join_batch() -> int:
+    try:
+        return max(1, int(os.environ.get(VOTE_JOIN_BATCH_ENV,
+                                         DEFAULT_VOTE_JOIN_BATCH)))
+    except ValueError:
+        return DEFAULT_VOTE_JOIN_BATCH
+
+
 def write_threads() -> int:
     try:
         return max(1, int(os.environ.get(WRITE_THREADS_ENV,
@@ -565,6 +600,73 @@ def _profile_aggregates(con, has_events: bool, pooled_units: int,
     return dtypes, empty, columns
 
 
+def _vote_table(con, represented: list[str], batch: int) -> None:
+    """``voted``: one row per pooled unit, one column per represented column.
+
+    **The joins have to be batched.** Each column's vote is its own table, and
+    joining all of them to the unit list in one statement gives DuckDB one hash
+    table per column, all live at once. A hash join's build side is *pinned* —
+    the buffer manager cannot evict it — so the memory limit does not bound it
+    and the query fails rather than spilling. At the full PSC snapshot that is
+    61 hash tables over 1.8 million pooled units, and it died on an 8 GB limit
+    with ``failed to pin block of size 256.0 KiB (7.4 GiB/7.4 GiB used)``.
+
+    So ``voted`` is grown a batch of columns at a time. Each step has at most
+    *batch* hash tables live, and each vote table is dropped once it has been
+    folded in. The cost is rewriting ``voted`` once per batch, which is a
+    sequential scan and write of a table with at most one row per pooled unit —
+    a third of the records at PSC scale and a sixteenth on the sample.
+    """
+    for index, column in enumerate(represented):
+        con.execute(f"CREATE OR REPLACE TABLE vote_{index} AS "
+                    + _vote_sql("pooled", column))
+    con.execute("CREATE OR REPLACE TABLE voted AS SELECT unit_id FROM pooled_sizes")
+    for start in range(0, len(represented), max(1, batch)):
+        chunk = list(enumerate(represented))[start:start + max(1, batch)]
+        joins = "\n".join(
+            f"LEFT JOIN vote_{index} v{index} ON v{index}.unit_id = u.unit_id"
+            for index, _ in chunk
+        )
+        columns = "".join(f", v{index}.{_quote(column)}" for index, column in chunk)
+        con.execute(f"""
+            CREATE OR REPLACE TABLE voted_next AS
+            SELECT u.*{columns} FROM voted u
+            {joins}
+        """)
+        con.execute("DROP TABLE voted")
+        con.execute("ALTER TABLE voted_next RENAME TO voted")
+        for index, _ in chunk:
+            con.execute(f"DROP TABLE vote_{index}")
+
+
+def _check_aggregate_columns(agg_columns, represented, priority) -> None:
+    """A hook column a unit of one could not be given a value for.
+
+    The hook runs over the pooled units only, because a unit of one is its own
+    representative and the record already carries the answer. That holds
+    exactly while every column the hook returns is also a records column: both
+    shipped profiles are in that case, and the donations run was measured
+    column by column against the record's own value for all 16,410
+    single-record units.
+
+    A hook that invents a column is a different thing. The pooled units would
+    get it and every unit of one would get a null, and nothing would say so.
+    The pandas build ran the hook over every unit, so this is where that
+    contract narrowed, and it fails here rather than in the file.
+    """
+    known = set(represented) | set(priority)
+    unknown = [c for c in agg_columns if c not in known]
+    if unknown:
+        raise ValueError(
+            "Profile.aggregate_unit_columns returned "
+            + ", ".join(repr(c) for c in unknown)
+            + ", which the records do not carry. The hook runs over the pooled "
+            "units only, so a unit of one has no value to fall back on and the "
+            "column would be null for every single-record unit. Add the column "
+            "to the records, or compute it in the profile's loader."
+        )
+
+
 def _write(con, sql: str, path, dtypes: dict, empty: set) -> None:
     """Write the result of *sql* to parquet, with the dtypes pandas will read.
 
@@ -643,7 +745,7 @@ def build_units_files(records, groups, units_path, members_path,
         represented = _representative_columns(record_columns, priority)
         has_label = LABEL_COLUMN in record_columns
         label = _quote(LABEL_COLUMN)
-        trimmed = f"trim(CAST(r.{label} AS VARCHAR))"
+        trimmed = _trim(f"CAST(r.{label} AS VARCHAR)")
         merged = _text(keys.MERGED)
 
         # A floating point total depends on the order the values are added in,
@@ -685,7 +787,7 @@ def build_units_files(records, groups, units_path, members_path,
             CREATE OR REPLACE TABLE held AS
             SELECT CAST(record_id AS VARCHAR) AS record_id,
                    min(CAST(group_id AS VARCHAR)) AS held_group_id
-            FROM grp WHERE CAST(status AS VARCHAR) <> {merged}
+            FROM grp WHERE CAST(status AS VARCHAR) IS DISTINCT FROM {merged}
             GROUP BY 1
         """)
         # Every record with its unit, which is unit_members and nothing else.
@@ -738,10 +840,10 @@ def build_units_files(records, groups, units_path, members_path,
                     CREATE OR REPLACE TABLE labels AS
                     WITH lab AS (
                         SELECT DISTINCT unit_id,
-                               trim(CAST({label} AS VARCHAR)) AS label
+                               {_trim(f'CAST({label} AS VARCHAR)')} AS label
                         FROM pooled
                         WHERE {label} IS NOT NULL
-                          AND trim(CAST({label} AS VARCHAR)) <> ''
+                          AND {_trim(f'CAST({label} AS VARCHAR)')} <> ''
                     )
                     SELECT unit_id,
                            string_agg(label, {_text(ID_SEPARATOR)} ORDER BY label)
@@ -758,23 +860,7 @@ def build_units_files(records, groups, units_path, members_path,
                     WHERE false
                 """)
             # -- the per-column modal vote ------------------------------------
-            for index, column in enumerate(represented):
-                con.execute(f"CREATE OR REPLACE TABLE vote_{index} AS "
-                            + _vote_sql("pooled", column))
-            joins = "\n".join(
-                f"LEFT JOIN vote_{index} v{index} ON v{index}.unit_id = u.unit_id"
-                for index in range(len(represented))
-            )
-            columns = "".join(
-                f", v{index}.{_quote(column)}"
-                for index, column in enumerate(represented)
-            )
-            con.execute(f"""
-                CREATE OR REPLACE TABLE voted AS
-                SELECT u.unit_id{columns}
-                FROM (SELECT unit_id FROM pooled_sizes) u
-                {joins}
-            """)
+            _vote_table(con, represented, vote_join_batch())
 
         # -- the priority columns are summed, not voted on --------------------
         if priority and pooled_units:
@@ -816,6 +902,7 @@ def build_units_files(records, groups, units_path, members_path,
         # -- the profile's own per-unit columns -------------------------------
         agg_dtypes, agg_empty, agg_columns = _profile_aggregates(
             con, has_events, pooled_units, batch_rows)
+        _check_aggregate_columns(agg_columns, represented, priority)
 
         # -- the output schema, in the order the pandas build wrote it --------
         head = ["unit_id", "unit_size", "held_group_id", LABEL_COLUMN,
@@ -1013,6 +1100,75 @@ def counts_from(units: pd.DataFrame) -> dict:
     for track, n in by_track.items():
         counts[f"units_{track}"] = int(n)
     return counts
+
+
+def counts_from_file(units_path, temp_dir=None) -> dict:
+    """``counts_from`` without reading the units frame.
+
+    The same answer, counted in DuckDB off the parquet. At the full PSC
+    snapshot the ``track`` column alone is about a gigabyte of pandas, read
+    once for two integers.
+    """
+    path = os.fspath(units_path)
+    has_track = "track" in set(pq.ParquetFile(path).schema_arrow.names)
+    con = duckdb_conn.connect(temp_dir)
+    try:
+        total = con.execute(
+            f"SELECT count(*) FROM read_parquet({_text(path)})").fetchone()[0]
+        counts = {"units_total": int(total)}
+        if has_track:
+            rows = con.execute(
+                f"SELECT track, count(*) AS n FROM read_parquet({_text(path)}) "
+                "WHERE track IS NOT NULL GROUP BY track ORDER BY n DESC, track"
+            ).fetchall()
+            for track, n in rows:
+                counts[f"units_{track}"] = int(n)
+    finally:
+        con.close()
+    return counts
+
+
+def _fingerprint_sql(units_path) -> str:
+    path = os.fspath(units_path)
+    names = set(pq.ParquetFile(path).schema_arrow.names)
+    size = '"unit_size"' if "unit_size" in names else "CAST(1 AS BIGINT)"
+    return (f'SELECT CAST("unit_id" AS VARCHAR) AS unit_id, '
+            f"CAST({size} AS BIGINT) AS unit_size "
+            f"FROM read_parquet({_text(path)}) ORDER BY unit_id")
+
+
+def fingerprint_from_file(units_path, temp_dir=None) -> pd.DataFrame:
+    """``unit_id`` and ``unit_size`` off the parquet, as two narrow columns."""
+    con = duckdb_conn.connect(temp_dir)
+    try:
+        frame = con.execute(_fingerprint_sql(units_path)).df()
+    finally:
+        con.close()
+    frame["unit_id"] = frame["unit_id"].astype(str)
+    return frame
+
+
+def write_fingerprint(units_path, out_path, temp_dir=None) -> None:
+    """``fingerprint_from_file`` straight to parquet, never through pandas.
+
+    ``scored_units.parquet`` is two columns of every unit. At the full PSC
+    snapshot the frame is about 1.5 GB and the copy pandas makes on the way to
+    the file is another, for a file the run reads once and only on a re-run.
+    """
+    con = duckdb_conn.connect(temp_dir)
+    try:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        con.execute(f"COPY ({_fingerprint_sql(units_path)}) "
+                    f"TO {_text(os.fspath(out_path))} (FORMAT parquet)")
+    finally:
+        con.close()
+
+
+def record_count(records) -> int:
+    """How many rows a records source holds, from a parquet footer if it is one."""
+    if isinstance(records, pd.DataFrame):
+        return len(records)
+    return int(pq.ParquetFile(os.fspath(records)).metadata.num_rows)
 
 
 def track_units(units: pd.DataFrame, track: str) -> pd.DataFrame:

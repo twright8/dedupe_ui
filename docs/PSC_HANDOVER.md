@@ -1625,6 +1625,14 @@ So the sample is 157 entities short of where it was, and the whole of that
 difference is the token lists being right rather than sampled. Anyone comparing
 a future run to section 14 should compare to this table instead.
 
+> **Superseded in part by sections 100 to 104**, written by the session of
+> 2026-09-21 under the project interpreter. `build_units` is verified and
+> wired into stage 3, the four failing tests are gone, stage 5 is narrowed and
+> vectorised, the refine column is found and priced, and the full snapshot is
+> loaded, cleaned, keyed and unitised again with every count reproduced. Read
+> 104 before planning anything: turning the hot-key control on for the first
+> time found two faults in it that only exist above ten million units.
+
 ## 99. Where the session of 2026-09-18/19 stopped (written by the coordinating session)
 
 State of the code: `main` = `378e4c2` plus one docs commit, all deployed to the server and green. Everything after that is on the branch `wip/psc-scale` (this commit): stage 3 streaming, stages 4 and 5 out of core, the corpus persistence, the hot-key block control, the loader's chunk files, the rebuilt PSC token lists, and a partly finished DuckDB rewrite of `build_units` in `app/pipeline/dedupe/units.py` (an agent was mid-edit when the session ended: review that file first, and `git diff main -- backend/app/pipeline/dedupe/units.py`).
@@ -1638,3 +1646,772 @@ THE INTERPRETER TRAP. The laptop's default `python` is miniconda (pandas 2.3.1, 
 Open, in order: (1) finish and verify `build_units` out of core (identity on the donations run and the PSC sample; a 32x tiling); (2) the four tests above; (3) stage 5: stop handing `unit_id`/`cluster_id` to `mint_entity_ids`, and vectorise `psc.mint_entity_ids` (it loops over every entity); (4) a refine column for the hot-key control that is independent of the blocking key (the forename initial is not); (5) the owner-approved full-scale run, stages 3 to 5, estimate first (section 24), vetoes on, `max_pairs` 150,000,000, disk floor 15 GB; (6) stage 2's 13 GB peak; (7) postcode still outweighs surname on the PSC person track.
 
 Full-snapshot outputs of stages 0 to 2 (made under miniconda, fine as a scale proof): `/home/tomwright/psc_scratch/pscfull/runs/psc_full`. 11,799,425 entities after the exact keys with the rebuilt token lists.
+
+## 100. Session of 2026-09-21 — items 1 and 2
+
+Everything in this section and the ones after it was measured under the
+**project interpreter**, `backend/.venv/bin/python` (pandas 3.0.6, pyarrow
+25.0.1, duckdb 1.5.5). Where a figure disagrees with sections 15 to 26, this
+one is the right one.
+
+### 1. `build_units` in DuckDB: verified, and one thing it was not wired into
+
+The rewrite is correct. The old pandas build is saved at
+`/home/tomwright/psc_scratch/agent_units2/old_units.py`, and
+`/home/tomwright/psc_scratch/full_venv/verify_units.py` runs both over the same
+stored inputs and compares every value with the missing ones normalised, plus
+every dtype and the column order.
+
+| run | records | units | old vs new | against the stored `units.parquet` |
+|---|---|---|---|---|
+| donations `don_veto` | 51,839 | 22,375 | **identical** | **identical** |
+| PSC `psc_final` (sample) | 499,971 | 480,968 | **identical** | one dtype |
+
+`unit_members` is identical in both. The one dtype is `unit_id`: the stored
+sample file says `object` because it was written under miniconda's pandas 2.3.1,
+where `astype(str)` gives object; under pandas 3 it is the `str` dtype. The
+donations file, written under pandas 3.0.6, matches exactly. **It is the
+interpreter, not the code** — checked by reading the `pandas_version` out of
+each file's footer. Speed on the sample: 45.6 s old, 27.6 s new.
+
+**The defect worth having found.** `stage_3_score` never called the out-of-core
+entry point. It read `records.parquet` whole into pandas, called the in-memory
+`build_units`, which writes the two files and reads them **back** into pandas,
+and then wrote them out again with `to_parquet`. Every gigabyte the rewrite
+saved was spent again by its only caller. Stage 3 now calls
+`build_units_files` with the paths and never holds either frame;
+`scored_units.parquet` and the unit counts come off the written file through
+two new helpers, `units.fingerprint_from_file` and `units.counts_from_file`.
+
+**What the read found, and what was fixed.**
+
+- *Identifier quoting.* Every column name already went through `_quote`. Pinned
+  with a test that puts a column called `odd" name, x` through the build.
+- *The tie-break.* `min(record_id)` is now `min(CAST(record_id AS VARCHAR))`.
+  Inside the build the column is already VARCHAR so nothing moves, but
+  `representatives()` is a public entry point and the rule `LINKAGE.md` states
+  is text order — `"10"` before `"9"`.
+- *A group row with no status.* The build read `status <> 'merged'`, and SQL
+  makes that NULL, not true, so a row with a null status joined no unit and its
+  held group vanished. pandas compared `None == 'merged'` and held it. Now
+  `IS DISTINCT FROM`.
+- *Trimming the existing entity id.* The pandas build used `str.strip()`;
+  DuckDB's bare `trim` takes spaces and nothing else, so a label ending in a
+  tab would have differed. `_trim` now names the whole ASCII whitespace set.
+- *The profile's aggregate hook.* It runs over the pooled units only, which is
+  right exactly while every column it returns is also a records column — both
+  shipped profiles are. A hook that invents a column would have given every
+  unit of one a silent null, because the pandas build ran over every unit. That
+  now raises with the column named.
+- *`held_group_id` smallest, `existing_entity_ids` sorted and `" | "`-joined,
+  the priority sum, the column order, zero pooled units and zero records* were
+  all read against the old build and are right. The last two now have tests.
+
+`tests/test_units.py` is 19 tests, up from 11.
+
+### 2. Stage 5 at scale
+
+**(a) The mint frame.** `Profile.mint_entity_ids` was handed `unit_id`,
+`cluster_id` and `basis` beside `record_id` and `entity_key`. Neither shipped
+hook reads any of the three, and at the full snapshot `unit_id` and
+`cluster_id` alone are two more copies of a 37-character id per record — about
+9 GB. The proposal side is now `MINT_PROPOSED_COLUMNS`: `record_id`,
+`entity_key`, `track`. **`track` stays on purpose.** Dropping it would stop
+pandas suffixing the record side's `track` to `track_y`, the PSC hook would
+start finding a `track` column it has never found, and every PSC organisation
+id would change. `docs/ENTITIES.md` says so.
+
+**(b) The per-entity loop.** `psc.mint_entity_ids` walked the sorted keys one
+at a time — 11.3 million iterations at full scale, building a dict of the same
+size — and called `_single` once per group. Both are whole-frame now: the
+counter is a `cumsum` over the keys that need one, so the nth key needing an id
+still takes the nth counter value and the high-water mark moves by exactly the
+number minted. At 2,000,000 keys: **1.87 s against 4.94 s**, same ids.
+`_loop_mint` in `tests/test_psc_profile.py` keeps the old walk and holds the two
+together over every case the rule distinguishes. Worth knowing: the shipped PSC
+ruleset derives no `company_number_padded`, so on a shipped run every id takes
+the counter branch and the agreed-number branch is untested by the data.
+
+**(c) `routers/entities.py`.** `_id_statuses` opened a bare `duckdb.connect()`
+and read every row of `entities.parquet` — eleven million at full scale — on
+every entities request, to build a map the reader then ignores, because
+`id_status` is a column of the file and `_base_sql` already selects it as
+`stored_id_status`. A file too old to have the column had nothing to build the
+map from, so the old code returned `{}` for that case too. It now returns `{}`
+always. The other two bare connections in the file are on `duckdb_conn.connect`
+with the run's temp directory, so they carry the memory cap and the spill
+limit.
+
+**Proof it is all a no-op.** Stage 5 was re-run on a copy of both finished runs
+and `entities.parquet` compared column by column, plus `entity_report.json`:
+donations `don_veto` 51,839 rows identical, PSC `psc_final` 499,971 rows and
+**458,192 entities** identical, which is section 26's figure.
+
+Full suite under the project interpreter: **1,375 passed** (1,359 before, 16
+tests added).
+
+## 101. What the web tool needs to show a finished run
+
+Written while the full run was loading, so the shape is here and section 104
+carries the full-scale sizes.
+
+### The files
+
+A run folder is `<DATA_DIR>/runs/<run_id>`. These are the ones a reader opens;
+the sizes are the 500,000-record sample, and the full snapshot is roughly 24 to
+30 times each.
+
+| file | written by | read by | sample |
+|---|---|---|---|
+| `records.parquet` | stage 1 | records list and detail, every group, cluster and entity detail, the evaluation | 66 MB |
+| `units.parquet` | stage 3 | pairs list and detail, clusters, entities, blocking | 79 MB |
+| `unit_members.parquet` | stage 3 | every detail that shows a unit's records; the label overlay | 33 MB |
+| `pairs.parquet` | stage 3 | pairs list, pair detail, the histogram, cluster edges | 58 MB |
+| `clusters.parquet` | stage 4 | the review queue and the cluster detail | 48 MB |
+| `entities.parquet` | stage 5 | the Entities tab and the publish preview | 68 MB |
+| `exact_groups.parquet` | stage 2 | the exact-groups list and detail, held groups in the queue | 1.8 MB |
+| `events.parquet` | stage 0 | the evidence rows on a unit, when the profile has any | 20 MB |
+| `records_raw.parquet` | stage 0 | nothing the UI reads; kept so stage 1 can re-run | 38 MB |
+| `scored_units.parquet` | stage 3 | `never_scored` — which units no run has compared | 16 MB |
+| `config/ruleset.json`, `config/linkage_settings.json` | the run | the run's own rules, and the config version a reader shows | 2 files |
+| `blocking_report.json` | stage 3 | the blocking tab: pairs per rule, the budget, the control | 5 KB |
+| `score_eval.json` | stage 3 | precision and recall against the existing labels | 18 KB |
+| `exact_eval.json` | stage 2 | the same for the match keys alone | 2 KB |
+| `entity_report.json` | stage 5 | the entity summary and the collisions | 10 KB |
+| `contradictions.json` | stage 3 | FALSE labels an exact key contradicts | small |
+| `splink_model_person.json`, `splink_model_organisation.json` | stage 3 | the model tab's learned weights | 15 KB each |
+| `diagnostics/*.html` | stage 3 | the six Splink charts, served as files | small |
+
+`duckdb_tmp/` is spill. It is not needed and should not be copied.
+
+### Getting the run into the instance's database
+
+**There was no way to do this.** A `runs` row is only ever written by
+`POST /api/runs`, which creates the row and *then* runs the pipeline into the
+folder. A folder built anywhere else was invisible to the tool.
+
+`backend/scripts/adopt_run.py` is that path.
+
+```bash
+# on the server, with the folder already under <DATA_DIR>/runs/
+cd /srv/dedupe/backend
+.venv/bin/python scripts/adopt_run.py /srv/dedupe/data/runs/psc_full \
+    --db /srv/dedupe/data/app.db \
+    --label "PSC full snapshot 2026-09-18" \
+    --counts /srv/dedupe/data/runs/psc_full/counts.json \
+    --input-filename persons-with-significant-control-snapshot-2026-09-18.zip
+```
+
+It writes the `runs` row a completed run would have had — `status` `complete`,
+`started_at` and `finished_at` from the folder's own mtimes, the thresholds out
+of `config/linkage_settings.json`, and `counts_json` — and the
+`config_versions` row the run's config snapshot describes, reusing an existing
+version when the text matches so adopting several runs of one configuration
+leaves one version.
+
+`--counts` is the union of what the five stages returned, in the pipeline's
+snake_case. Every key it leaves out is derived from the folder itself: row
+counts of the five parquets, the bucket counts out of `pairs.parquet`, the
+distinct entity ids, and whatever the report JSONs hold. So a folder with no
+counts file still shows its numbers.
+
+**It never overwrites.** A run id the database already holds is refused with a
+message naming it, unless the row is exactly the one the script would write, in
+which case it says "already registered" and changes nothing. Re-running it is
+safe. `tests/test_adopt_run.py` is twelve tests, including one that adopts a
+folder and then asks `GET /api/runs` for it.
+
+### Copying the run to the server
+
+```bash
+rsync -av --progress \
+  --exclude duckdb_tmp --exclude records_raw.parquet \
+  /home/tomwright/psc_scratch/full_venv/fulldata/runs/psc_full/ \
+  tom@server:/srv/dedupe/data/runs/psc_full/
+```
+
+`records_raw.parquet` is excluded because nothing the UI reads opens it; keep
+it if stage 1 may be re-run on the server.
+
+## 102. The readers at PSC scale
+
+Timed through the reader functions directly against the finished 500,000-record
+sample run (`psc_final`: 1,143,522 pairs, 480,968 units, 458,192 entities),
+under the project interpreter. Two of them were already over the two-second
+line at a thirtieth of the full snapshot.
+
+| call | before | after |
+|---|---|---|
+| records list, page 1 | 0.09 s | 0.10 s |
+| records list, person, page 40 | 0.09 s | 0.10 s |
+| exact groups list, page 1 | 0.08 s | 0.11 s |
+| **pairs list sorted by score** | **2.51 s** | **1.21 s** |
+| **pairs list sorted by priority** | **3.32 s** | **1.20 s** |
+| **pairs list, review bucket, by score** | **2.34 s** | **0.88 s** |
+| clusters queue, page 1 | 0.46 s | 0.54 s |
+| entities list, page 1 | 0.47 s | 0.53 s |
+| entities list sorted by size | 0.44 s | 0.51 s |
+| one pair detail | 0.49 s | 0.49 s |
+| **one cluster detail** | **11.99 s** | **0.50 s** |
+| one entity detail | 0.18 s | 0.19 s |
+
+### One cluster detail was 200 queries
+
+`get_cluster` called `_members_of(con, run_dir, unit_id)` once per unit shown,
+up to `MAX_UNITS` — 200 — and each call was a scan of `unit_members.parquet`
+joined to `records.parquet`. Twelve seconds on the sample; at sixteen million
+records both files are thirty times bigger and the count of calls does not
+fall. It is now one query with a `row_number()` window, split per unit in
+Python: `_members_for` and `_events_for`, with `_members_of` and `_events_of`
+kept as one-unit wrappers for the other callers. A held group's detail did the
+same thing per record and now uses the same batch. **24× faster, same output.**
+
+### The pairs list carried every unit column three times
+
+`get_pairs` asks one query three things — the chip counts, the filtered total,
+and the page — and that query joined `units.parquet` twice, all sixty-eight
+columns, so the whole unit row travelled through all three. Only the page ever
+shows a unit column.
+
+The query now reads three unit columns: `unit_id`, `existing_entity_id` (the
+import agreement) and `name` (the search and the name sort). Every filter and
+every sort is satisfied by those three plus the pair row. The page then runs a
+second step that fetches the two whole unit rows for its fifty pairs —
+`units.parquet` is written in `unit_id` order, so the id filter is answered
+from the row-group statistics rather than by a scan. **2.6× to 2.8× faster.**
+
+Eight parametrised tests in `tests/test_pairs_api.py` run the list both ways —
+narrow and wide — over every sort, a filter, a search and a page offset, and
+require the same totals, the same counts and the same items; one more requires
+the page's `left`/`right` structs to carry every unit column. A test in
+`tests/test_entities.py` counts the member lookups a cluster detail makes and
+requires exactly one.
+
+### Two frames stage 3 held for no reason
+
+`exact_groups.parquet` was read into pandas at the top of stage 3 and used at
+the bottom, and the overlay projection of `units.parquet` was read before the
+blocking budget and used after both tracks were scored. Both were resident
+through training and prediction, which is where the stage's peak is. Both are
+now read where they are used.
+
+## 103. A refine column that is independent of the blocking key
+
+Section 19 built the hot-key control and then showed why turning it on with
+`forename_initial` was not worth doing: PSC's hot person blocks are placeholder
+names, everybody in them shares one initial, and almost the whole cut came from
+`drop_above` throwing the biggest block away. **The refine column has to be
+independent of the route's own key.** This section prices the candidates on the
+full snapshot's units.
+
+The candidates, per route, are the columns the route's own key does not already
+fix:
+
+| track | route | key | candidates priced |
+|---|---|---|---|
+| person | pb1 | surname sound + birth year + month | `postcode_district`, `nationality_norm`, both |
+| person | pb2 | surname3 + forename initial + birth year + month | `postcode_district`, `nationality_norm` |
+| person | pb3 | name fingerprint | `postcode_district`, birth year + month, `nationality_norm` |
+| person | pb4 | postcode district + surname sound | birth year + month, birth year, `nationality_norm` |
+| person | pb5 | forename sound + birth year + month, surname differs | `postcode_district`, `nationality_norm` |
+| person | pb6 | both name sounds, birth year missing | `postcode_district`, `nationality_norm` |
+| organisation | ob1 | core name | `postcode_district`, `country_canonical`, `type_bucket` |
+| organisation | ob2 | core-name sound + type | `postcode_district`, `country_canonical` |
+| organisation | ob3 | registration number | `postcode_district`, `type_bucket`, `country_canonical` |
+| organisation | ob4 | first token + postcode district | `type_bucket`, `country_canonical` |
+
+The task named `nationality_clean`; the column the ruleset writes is
+`nationality_norm` (home nations collapsed), and that is what was priced.
+`company_number` was **not** priced for the person routes: two PSC filings of
+one person are almost always at different companies, so refining a person block
+on the company number would leave almost nothing comparable. It is what the
+whole exercise is trying to find.
+
+Every figure is `linkage.price_rule` — DuckDB group arithmetic, no pair
+materialised — on the run's own `units.parquet`. Each route is also priced at
+`on_oversize: "drop"` as the reference, because section 19 found that dropping
+alone did most of the work.
+
+**pb6 is an upper bound.** Its `(l.dob_year_clean IS NULL OR r.dob_year_clean
+IS NULL)` is not a condition a `GROUP BY` can apply, so `price_rule` returns
+`exact: false`. On the sample its group-arithmetic price was 1,007,328 and its
+true Splink count was **2,323**, because nearly every person unit does have a
+birth year. The true figure for pb6, and the final total, come from Splink's
+own `count_comparisons_from_blocking_rule` — the same call the blocking budget
+makes — which is run before the settings are changed.
+
+**The EM training rules cannot take a control.** `em_blocking_rules` is a list
+of SQL strings; `blocking_budget_report` prices each one with no control and
+fails the run if the worst of them is over `max_pairs`. So `max_pairs` has to
+cover the worst EM rule as well as the prediction total, and if an EM rule is
+too big the only levers are its own SQL and the budget. A refine column would
+not be safe there anyway: whatever it held equal inside the training block
+would stop that comparison being estimated, which is the exact defect section 3
+exists to prevent, and `linkage_warnings()` would not see it because it reads
+the rule text.
+
+## 104. The full run, under the project interpreter
+
+Ran in `/home/tomwright/psc_scratch/full_venv/fulldata/runs/psc_full`, one
+stage at a time, `CLEAN_BATCH_ROWS=100000`, `DUCKDB_MAX_TEMP=20GB`, the disk
+checked before and after each. Every number here is
+`backend/.venv/bin/python` (pandas 3.0.6, pyarrow 25.0.1, duckdb 1.5.5).
+
+| stage | time | peak RSS | disk free after | vs the miniconda run (section 23) |
+|---|---|---|---|---|
+| 0 load | 1,033.3 s | 1,704 MB | 68.6 GB | 1,207.8 s, 1,731 MB |
+| 1 clean | 500.6 s | 4,058 MB | 66.7 GB | 543.8 s, 2,436 MB |
+| 2 exact | 303.2 s | **18,109 MB** | 66.5 GB | 343.5 s, 13,100 MB |
+
+Stage 0 read 15,952,486 input rows, dropped 545 super-secure and 922,678 with
+no name, and kept **15,029,263** records — 13,921,888 person and 1,107,375
+organisation. Every one of those figures is identical to section 23's.
+
+Stage 2's exact keys reproduce section 23's rebuilt-list figures to the
+record: **1,811,774** merged groups over **5,041,612** records, **3,842** held
+groups over **332,009** records, **11,799,425** entities after the keys, 0
+conflicts.
+
+**Both stages are heavier under pandas 3 than the miniconda run reported, and
+stage 2 is much heavier: 18.1 GB against 13.1 GB.** Stage 1 is 4.1 GB against
+2.4 GB. That is 62% of this machine's RAM for one stage, and it is the
+projection of fourteen columns over fifteen million records held in pandas —
+the B3 work that was already named as the next thing to batch after
+`build_units`. Nobody should size a server from the old numbers, and stage 2
+will not fit the server's 6 GB budget by a factor of three.
+
+### The token lists were already right
+
+Section 23's lists were counted under the wrong interpreter, so they were
+re-counted on this run's own `records.parquet`. They are data facts and they
+reproduce exactly.
+
+- **`junk_postcodes`.** deduping's proportion is more than 5,000 records per
+  7.5 million individuals, which on 13,921,888 person records is a threshold of
+  **9,281**. Twenty postcodes are over it. The stored list is those twenty:
+  nothing missing, nothing on the list that falls under the threshold. The
+  biggest is `WC2H 9JQ` at 180,477 records, then `N1 7GU` 152,796,
+  `EC1V 2NX` 150,044, `CF14 8LH` 95,789, `EC2A 4NE` 64,331.
+- **`placeholder_numbers`.** Thirty-nine registration numbers are used by ten
+  or more distinct filed names and are not already caught by `fake_nulls`.
+  Every one is on the list. The other eight entries (`00000001`, `00000002`,
+  `00000003`, `00123456`, `01234567`, `11111111`, `88888888`, `99999999`) are
+  the hand-written placeholders, which stay whether or not this snapshot
+  happens to contain them — the list is a rule, not a census. The worst are
+  `00000000` (231 distinct names), `0` (146), `00000` (128), `000000` (79) and
+  `ENGLAND` (67).
+
+**No rebuild was needed.** `defaults/psc/ruleset.json` is unchanged.
+
+### The bug the full snapshot found in `build_units`
+
+The DuckDB build was identical to the pandas one on the donations run and on
+the 500,000-record sample, and it still could not build the full snapshot. It
+died here:
+
+```
+_duckdb.OutOfMemoryException: Out of Memory Error: failed to pin block of
+size 256.0 KiB (7.4 GiB/7.4 GiB used)
+  CREATE OR REPLACE TABLE voted AS SELECT u.unit_id, v0.…, v1.…, … v60.…
+  FROM (SELECT unit_id FROM pooled_sizes) u
+  LEFT JOIN vote_0 v0 ON … LEFT JOIN vote_1 v1 ON … (61 of them)
+```
+
+Each column's modal vote is its own table, and they were all joined to the unit
+list in **one statement**. That gives DuckDB one hash table per column, all
+live at once, and **a hash join's build side is pinned** — the buffer manager
+cannot evict it, so `memory_limit` does not bound it. The query fails instead
+of spilling. At the full snapshot that is 61 hash tables over 1.8 million
+pooled units.
+
+It could not have shown up at any smaller scale: the same 61 joins over the
+sample's 31,755 pooled records fit in a few hundred megabytes.
+
+`_vote_table` now folds the votes in a batch of columns at a time
+(`UNIT_VOTE_JOIN_BATCH`, default 8), dropping each vote table once it is in. At
+most eight hash tables are live. The cost is rewriting `voted` once per batch —
+a sequential scan and write of a table with one row per pooled unit, which is a
+third of the records at PSC scale and a sixteenth on the sample. Identity on
+both profiles was re-checked afterwards and is unchanged.
+
+**The general lesson, worth carrying:** `memory_limit` does not bound a DuckDB
+query whose plan pins many build sides at once. Widening a query by one join
+per column is the shape that does it.
+
+### What the routes cost at full scale, and what refines them
+
+11,205,785 person units and 593,640 organisation units. Every figure is
+`price_rule` group arithmetic. pb6's is an upper bound (`exact: false`).
+
+**Uncontrolled, the person track is 1.3 billion pairs.**
+
+| route | uncontrolled | drop > 60 only | **refine, > 20, drop > 60** | units dropped | unrefinable |
+|---|---|---|---|---|---|
+| pb1 surname sound + dob | 198,530,709 | 49,783,443 | **20,130,171** | 79,408 | 308,457 |
+| pb2 surname3 + initial + dob | 114,611,766 | 20,499,131 | **16,755,794** | 78,845 | 59,753 |
+| pb3 name fingerprint | 351,486,369 | 30,379,752 | **13,563,011** | 81,642 | 192,790 |
+| pb4 postcode district + surname sound | 127,149,799 | 30,043,448 | **16,907,827** | 79,408 | 2,210 |
+| pb5 forename sound + dob, surname differs | 527,628,584 | 45,769,400 | **11,624,404** | 79,120 | 546,236 |
+| pb6 both name sounds, no dob | ≤582,535,879 | ≤43,054,672 | **≤15,762,398** | 82,709 | 353,152 |
+| **person total** | **≤1,901,943,106** | ≤219,529,846 | **≤94,743,605** | | |
+| ob1 core name | 47,524,349 | 303,340 | **398,683** | 69,887 | 12,250 |
+| ob2 core-name sound + type | 55,301,940 | 371,014 | **558,336** | 69,913 | 14,408 |
+| ob3 registration number | 26,960,626 | 349,935 | **398,407** | 54,742 | 7,713 |
+| ob4 first token + postcode district | 34,919,308 | 472,175 | **477,181** | 75,635 | 0 |
+| **organisation total** | **164,706,223** | 1,496,464 | **1,832,607** | | |
+
+The refine column is `postcode_district` on every person route but pb4, which
+already fixes it and takes `dob_year_clean` + `dob_month_clean` instead. The
+organisation routes take `postcode_district` except ob4, which already fixes it
+and takes `type_bucket`.
+
+**This is the opposite of section 19's finding, and the reason is the column.**
+Refining on `forename_initial` bought 4% to 27% on the sample, because the hot
+blocks are placeholder names where everyone shares an initial. Refining on the
+postcode district buys **86% to 98%** of the same routes at full scale, because
+where somebody lives has nothing to do with what their name sounds like. That
+is what "independent of the blocking key" means in practice.
+
+**Dropping alone is not the answer, even though it cuts slightly more.**
+`on_oversize: "drop"` at 60 costs pb5 **4,720,900 units** — 42% of the person
+track can no longer be compared on that route at all. Refining at 20 costs
+79,120, which is 0.7%, and leaves 546,236 more unrefinable because they have no
+postcode. Nearly the same cut for a sixtieth of the loss.
+
+### The estimate, written before stage 3 was started
+
+| | |
+|---|---|
+| units | 11,799,425 — 11,205,785 person, 593,640 organisation |
+| person pairs after the control | ≤94,743,605 blocked comparisons |
+| organisation pairs after the control | 1,832,607 |
+| predict | the sample scored 2.4M comparisons in 1.65 s of Splink `predict`; at a conservative 400,000/s, 96.6M is **about 4 minutes** |
+| `pairs.parquet` | the sample kept 44% of its blocked comparisons above the 0.05 candidate floor at 50 bytes a pair, so **about 42 million pairs and 2.1 GB** |
+| stage 3 pandas | overlay projection 1.6 GB, person budget rows 1.8 GB, person Splink projection 2.3 GB plus the frame handed to Splink 2.1 GB, and at the end records 0.95 GB + members 1.3 GB + groups 0.7 GB + units 0.9 GB. **Peak about 6 GB**, plus DuckDB's cap. |
+| stage 4 | four columns of the units and the accepted edges; **3 to 4 GB** |
+| stage 5 | the mint frame is now three proposal columns and three record columns over 15.0M rows, about 3.8 GB, plus an 11.3M-row per-entity summary. **8 to 10 GB** |
+| disk | 63.9 GB free. Spill is the term that matters: the session that spilled 53 GB did it with a 170-million-pair training rule and both `retain_*` flags on, which is 312 bytes a pair, and those flags are still on because the gamma columns depend on them. |
+
+**Measured, not estimated, because these stages have already run:** stage 0
+1,033 s / 1.7 GB, stage 1 501 s / 4.1 GB, stage 2 303 s / **18.1 GB**,
+`build_units` 448 s / 11.9 GB.
+
+### Stage 3 cannot run as the settings stand, and the blocker is EM
+
+`em_blocking_rules` takes no hot-key control — it is a list of SQL strings, and
+`blocking_budget_report` prices each one uncontrolled and fails the run if the
+worst is over `max_pairs`. At full scale:
+
+| rule | as shipped | drop > 60 | drop > 20 |
+|---|---|---|---|
+| person em1 `surname sound + forename sound` | **582,535,879** | 43,054,672 | 13,640,689 |
+| person em2 `dob + postcode district` | **105,630,616** | 58,985,721 | 30,041,203 |
+| organisation em1 `core-name sound + type` | 48,450,086 | 639,077 | 188,006 |
+| organisation em2 `registration number` | 26,960,626 | 349,935 | 34,106 |
+
+**582.5 million training pairs is three and a half times the rule that took the
+machine down.** Section 6's 170-million-pair rule spilled 53 GB and ran until a
+40-minute timeout killed it, with the same two `retain_*` flags on. At 312
+bytes a pair, 582.5 million is about **180 GB of spill** against 63.9 GB of
+free disk. It cannot run, and it would not be wise to start it to find out.
+
+**What does not work.** Adding a column to em1's SQL is the change that needs no
+code, and every candidate fails:
+
+| em1 + | pairs | why not |
+|---|---|---|
+| `residence_norm` | 520,137,998 | barely cuts it |
+| `nationality_norm` | 461,904,779 | barely cuts it |
+| `surname_clean` in place of the sound | 398,731,789 | not enough, and it narrows what the surname comparison can learn |
+| `dob_year_clean` | 111,156,550 | em2 holds the birth year equal too, so no rule lets it vary — `linkage_warnings()` fires, which is the defect of section 3 |
+| `postcode_district` | **40,630,627** | em2 holds the district equal too, so `cl.PostcodeComparison`'s area and all-other levels never vary in training and come back with no `m`. `linkage_warnings()` would **not** catch it — it matches the comparison's column name, `postcode_clean`, against the rule's, `postcode_district` — but `untrainedComparisons` would not be 0. |
+
+**The smallest change that makes it fit** is to let an `em_blocking_rule` carry
+the same hot-key control a prediction rule can, and give person em1
+`max_block_size: 60, on_oversize: "drop"`. That is 582,535,879 → 43,054,672,
+and em2 105,630,616 → 58,985,721. No refine column is needed, so nothing is
+held equal that was not held equal before and both guards stay clean. What it
+drops from *training* is the hot blocks — the placeholder-name blocks of
+section 19 — which is not a recall loss, because prediction still sees those
+units under its own control and a model should not be learning its weights from
+`FLTS` and `PRSNS` in the first place. It is exactly what the control was
+built for.
+
+### Turning the control on found two more things, and neither could be seen below 11 million units
+
+Section 19 shipped the hot-key control with "No settings file was edited" and
+"it costs nothing while unused". Turning it on for the first time is what
+found these. Both are in shared code, both are fixed, and both are the kind of
+fault that only exists at scale.
+
+**1. The control inlines every hot key, and the cap was 5,000.** A Splink
+blocking rule is a predicate over `l.` and `r.` columns and has nowhere to read
+a set from, so `controlled_sql` writes the oversized key values into the SQL as
+literals. `MAX_INLINE_KEYS` was 5,000. The PSC person routes need this many at
+`max_block_size: 20`:
+
+| route | pb1 | pb2 | pb3 | pb4 | pb5 | pb6 |
+|---|---|---|---|---|---|---|
+| oversized blocks at 20 | 68,981 | 11,725 | 41,423 | 32,309 | 91,047 | 66,807 |
+| at 60 | 11,239 | 913 | 9,550 | 3,735 | 32,863 | 17,564 |
+| at 200 | 231 | 109 | 1,404 | 422 | 5,869 | 2,861 |
+
+Only pb2 and pb4 fit under 5,000, and only by loosening the limit to 60, which
+costs most of the cut. The cap is now 100,000. That generates **4.8 MB of
+blocking SQL across the six person routes** — pb5 alone is 1.6 MB — and takes
+0.5 to 0.8 seconds a rule to build. The blocking report carries the size of the
+generated SQL rather than the text, because the report is served to a browser.
+
+**2. Splink cannot count a refined rule, at any scale.** `on_oversize:
+"refine"` generates
+
+```
+<the rule> AND (<key> NOT IN (…) OR <the refine columns agree>)
+```
+
+and that `OR` stops Splink's blocking analyser recognising the equi-join at
+all. `count_comparisons_from_blocking_rule` falls back to the cartesian bound
+and refuses to count. Measured on the full snapshot's 593,640 organisation
+units, ob1:
+
+| | Splink's counter | `price_rule` |
+|---|---|---|
+| uncontrolled | 47,524,349 | 47,524,349 |
+| `drop` over 20 | 25,558 | 25,558 |
+| `refine` over 20 | **refused** — "exceeded max_rows_limit … above 3.524e+11" | 398,683 |
+
+3.524e+11 is 593,640 squared over two. Splink was estimating the cartesian
+product. A plain `NOT IN`, a row-constructor `NOT IN`, and the rule wrapped in
+brackets all count correctly — it is specifically the `OR`.
+
+`blocking_budget_report` is the guard that decides whether a run may start, so
+until this was fixed **turning the control on would have failed every run**,
+whatever `max_pairs` said. The budget now prices a refined rule with
+`price_rule` and everything else with Splink's counter: `count_rule_pairs`
+chooses. The two agree to the pair wherever both can answer, and `price_rule`
+was already checked against materialised pairs in sixteen cases on the sample
+(section 19).
+
+**DuckDB itself has no trouble with the `OR`** — the rule still carries
+top-level equalities, so it hash-joins on those and applies the rest as a
+residual. It is only the estimator that is defeated.
+
+### The controls that shipped
+
+`app/profiles/defaults/psc/linkage_settings.json` now carries, on **every**
+route:
+
+```json
+{ "max_block_size": 20, "on_oversize": "refine",
+  "refine_with": ["postcode_district"], "drop_above": 60 }
+```
+
+with `dob_year_clean` + `dob_month_clean` on pb4 and `type_bucket` on ob4,
+because those two routes already fix the postcode district in their own key.
+`max_pairs` is **150,000,000** on the person track — about 1.5× the priced
+94,743,605 — and 5,000,000 on the organisation track, which is already
+generous against 1,832,607.
+
+Both EM training rules on both tracks carry `{"max_block_size": 60,
+"on_oversize": "drop"}`. No refine column, so nothing is held equal that was
+not held equal before, and both guards stay clean:
+`linkage_warnings()` returns zero and `validate_linkage_settings()` returns
+zero errors against the shipped ruleset.
+
+A test in `tests/test_block_control.py` now asserts that every PSC route
+carries a control, that its `refine_with` shares no column with what the
+route's own key already holds equal — the whole lesson of section 19 — and
+that donations still carries none.
+
+**3. Splink refuses more than refined rules.** The first full-scale stage 3
+died in the budget check on pb5, which blocks on the forename sound and the
+date of birth and then filters on
+`l.surname_metaphone <> r.surname_metaphone`. Splink counts the block *before*
+the filter, and at 11.2 million person units that is over its own
+`max_rows_limit`, so it returns the string `exceeded max_rows_limit` where an
+integer belongs and `count_blocking_pairs` raises. **This has nothing to do
+with the control** — an uncontrolled full-scale run would have died in the same
+place. `count_rule_pairs` now falls back to `price_rule` when Splink will not
+give a number, and `pairs_before_control` — which is shown, not acted on — is
+priced rather than counted, so it can never lose a run.
+
+All three faults are covered by tests in `tests/test_block_control.py`,
+including one that pins the budget's answer for a refined rule against
+`price_rule` and asserts it is not the cartesian bound.
+
+### The budget, as stage 3 priced it on the full snapshot
+
+Every figure is what `blocking_budget_report` wrote, and every one matches the
+estimate above to the pair.
+
+| track | rule | before the control | after |
+|---|---|---|---|
+| person | pb1 | 198,530,709 | **20,130,171** |
+| person | pb2 | 114,611,766 | **16,755,794** |
+| person | pb3 | 351,486,369 | **13,563,011** |
+| person | pb4 | 127,149,799 | **16,907,827** |
+| person | pb5 | 527,628,584 | **11,624,404** |
+| person | pb6 | ≤582,535,879 | **≤15,762,398** |
+| **person total** | **≤1,901,943,106** | **≤94,743,605** of 150,000,000 |
+| person | em1 | 582,535,879 | **43,054,672** |
+| person | em2 | 105,630,616 | **58,985,721** |
+| organisation | ob1 | 47,524,349 | **398,683** |
+| organisation | ob2 | 55,301,940 | **558,336** |
+| organisation | ob3 | 26,960,626 | **398,407** |
+| organisation | ob4 | 34,919,308 | **477,181** |
+| **organisation total** | **164,706,223** | **1,832,607** of 5,000,000 |
+
+**A twentyfold cut on the person track and a ninetyfold cut on the
+organisation track**, for about 79,000 units dropped per person route out of
+11,205,785 — 0.7%.
+
+pb6's figure is the `price_rule` upper bound, because the refined path is
+priced by group arithmetic and its `(l.dob_year_clean IS NULL OR
+r.dob_year_clean IS NULL)` is not something a `GROUP BY` can apply. The budget
+is therefore conservative for that one rule, which is the right direction for a
+budget to be wrong in.
+
+### Stage 3 on the full snapshot, as it ran
+
+| phase | time | what it did |
+|---|---|---|
+| build units | 458.2 s | 15,029,263 records → 11,799,425 units, the same as the standalone build |
+| blocking budget | 1,058.4 s | every rule priced after its control; both tracks under budget |
+| u by random sampling | 24.2 s | 5,000,000 pairs |
+| EM, person em1 | the training block took about ten minutes to build at 43,054,672 pairs, then iterated |
+
+**The budget check is 17.6 minutes and most of it is the control.** The
+oversized keys are measured once per rule to build the SQL and the rule is then
+priced, and `train_track` measures them a second time because it has to apply
+the control to the frame Splink will actually score. At 11.2 million person
+units each measurement is about 50 seconds a rule. Caching the oversized key
+sets between the budget and the training would take about seven minutes off
+every PSC run, and is the obvious next thing to do to this code.
+
+**Peak RSS through stage 3** was 19.9 GB, reached while Splink was loading the
+person frame. That is the highest of the whole pipeline — higher than stage
+2's 18.1 GB — and it is 69% of this machine. The DuckDB cap was 10 GB and
+`DUCKDB_MAX_TEMP` 35 GB; the spill reached about 11 GB building the first EM
+training block, taking the disk from 63.6 GB free to 53 GB.
+
+## 105. Where the session of 2026-09-21 stopped
+
+**The code is finished and green: 1,407 tests pass under
+`backend/.venv/bin/python` on a quiet machine.** Items 1, 2, 3 and 5 are done.
+Item 4 — the full run — is through stages 0, 1 and 2 and the unit build, and
+stage 3 reached the person `predict` before the DuckDB spill cap stopped it.
+The section above this one has the numbers and names the change that makes it
+fit: **predict route by route**. Nothing else is in the way, and the model
+trained cleanly — Splink reported every comparison estimated, so the guard of
+section 3 holds at full scale.
+
+**The run.** `/home/tomwright/psc_scratch/full_venv/fulldata/runs/psc_full`,
+driven one stage at a time by `/home/tomwright/psc_scratch/full_venv/run_stage.py`
+(`run_stage.py 3` writes its timings into `full_timings.json`). Stages 0 to 2
+and the unit build are complete and every count reproduces section 23. Stage 3
+passed the blocking budget and is in EM on the person track. When it finishes:
+
+```bash
+cd /home/tomwright/PycharmProjects/dedupe_ui/backend
+for STAGE in 4 5; do
+  nohup env PROFILE=psc SITE_PASSWORD=x PYTHONPATH=$PWD \
+    DATA_DIR=/home/tomwright/psc_scratch/full_venv/fulldata \
+    SPLINK_MEMORY_LIMIT=10GB DUCKDB_MAX_TEMP=35GB \
+    bash -c ".venv/bin/python /home/tomwright/psc_scratch/full_venv/run_stage.py $STAGE; echo EXIT=\$?" \
+    > /home/tomwright/psc_scratch/full_venv/stage$STAGE.log 2>&1
+done
+```
+
+Then, for the report item 4 asks for:
+
+- `/home/tomwright/psc_scratch/full_venv/evidence.py <run_dir>` — the learned
+  m, u and match weight per level for both tracks, buckets before and after
+  the vetoes, per-veto hits, and thirty person and fifteen organisation pairs
+  sampled **across** each bucket's score range with both names, the birth
+  month and year or the registration number, the postcode, the score and the
+  gamma levels that decided it. It uses `ntile` so the sample is spread, not
+  the top of the list.
+- `/home/tomwright/psc_scratch/full_venv/time_readers.py <run_dir>` — the
+  reader timings of section 102, against the full run folder this time.
+- `backend/scripts/adopt_run.py <run_dir> --label …` to register it.
+
+**Two things to fix before anyone runs this again.**
+
+1. **Cache the oversized key sets.** The budget measures them to build each
+   rule's SQL, and `train_track` measures them again because it applies the
+   control to the frame Splink scores. That is about 50 seconds a rule twice
+   over on 11.2 million units — seven minutes of a PSC run, for an answer that
+   cannot have changed.
+2. **Stage 2 needs batching.** 18.1 GB at fifteen million records, which is the
+   highest of any stage but the Splink load and three times the server's
+   budget. It is the projection of fourteen columns held in pandas, and it is
+   the B3 work that was already named as next after `build_units`.
+
+**And one thing to decide, not to fix.** Section 5 recorded that postcode
+learned more weight than an exact surname match on the PSC person track, and
+that deduping's own D7 warned about exactly this. Nothing in this session
+changed that, and the hot-key control has now made the postcode district
+load-bearing in the blocking as well. Read the person pairs before trusting
+the accepted merges.
+
+### Stage 3 got as far as the person predict, and then the spill cap stopped it
+
+The person track ran for **6,484.5 s** — the control SQL regenerated per rule,
+the prior, u by random sampling in 24.2 s, EM on em1 converging in 10
+iterations (1,987.4 s) and on em2 in 5 (2,664.7 s), then 375.1 s of prediction
+blocking — and died inside `predict`:
+
+```
+_duckdb.OutOfMemoryException: Out of Memory Error: failed to offload data
+block of size 256.0 KiB (32.5 GiB/32.5 GiB used)
+```
+
+32.5 GiB is `DUCKDB_MAX_TEMP=35GB`. **This is the bounded failure the cap
+exists to produce** — the run stopped in seconds with an error that names the
+problem, instead of filling the disk and taking the machine down, which is what
+happened to the session of section 7. The spill was released on exit and the
+disk went straight back to 64 GB free.
+
+**What it measures.** 94,743,605 blocked comparisons need **more than 35 GB**
+of DuckDB spill at this comparison width. That is about 370 bytes a pair,
+against the 312 bytes a pair section 6 measured, and my own estimate of 30 GB
+was the one number in section 104 that was wrong — and wrong in the dangerous
+direction.
+
+**Two things the model did get to, and both are good news.** Splink reported
+*"Your model is fully trained. All comparisons have at least one estimate for
+their m and u values"* — so `untrainedComparisons` would have been 0, which is
+the guard of section 3 holding at full scale. And `blocking_report.json` was
+written before the failure and is the evidence for the whole of section 104:
+person 94,743,605 of 150,000,000, organisation 1,832,607 of 5,000,000, neither
+over budget, neither EM rule over budget.
+
+**The obvious lever is closed.** The width comes from
+`retain_matching_columns` and `retain_intermediate_calculation_columns`, and
+the comment in `train_track` says the gamma columns need both. That was an
+assumption; it is now measured. With `retain_matching_columns=False` Splink
+emits no `gamma_*` columns at all:
+
+```
+True  -> …, gamma_forename_canon, gamma_surname_clean, surname_clean_l, surname_clean_r, …
+False -> bf_forename_canon, bf_surname_clean, match_key, match_probability, match_weight, unit_id_l, unit_id_r
+```
+
+Turning the flags off would halve the spill and lose the per-pair explanation
+the review screen is built on. It is not a trade to make quietly.
+
+**So the smallest change that makes the person track fit is to predict route by
+route.** Splink is asked for all six rules in one `predict`, and the comparison
+table it builds is the sum of them. Six passes of about 16 million comparisons
+each need about 6 GB of spill apiece, appended to the predictions file the way
+`PairWriter` already appends to `pairs.parquet`. Nothing about the model or the
+blocking changes; only how many pairs are alive at once. The other levers, for
+completeness: raise `DUCKDB_MAX_TEMP` to 45–50 GB (64 GB free against a 15 GB
+floor leaves 49 GB, so this is a coin flip, not a fix); tighten
+`max_block_size` below 20, which starts costing real units; or score the two
+tracks in separate processes, which does not help because the person track
+alone is the problem.
+
+**What did not run:** the organisation track, stages 4 and 5, and therefore the
+sampled pairs item 4 asks for. `evidence.py`, `time_readers.py` and
+`adopt_run.py` are written and tested and are waiting for a finished run.

@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from app import duckdb_conn
 from app.auth import current_user
 from app.db import query_db, write_db
 from app.profiles import get_profile
@@ -54,26 +55,17 @@ def _decisions() -> dict:
 
 
 def _id_statuses(run_dir: str) -> dict:
-    """``{entity_id: id_status}`` straight off the proposal."""
-    path = entities_reader.entities_path(run_dir)
-    if not path.is_file():
-        return {}
-    import duckdb
+    """The fallback ``{entity_id: id_status}`` map, which is now always empty.
 
-    con = duckdb.connect()
-    try:
-        columns = [d[0] for d in con.execute(
-            "SELECT * FROM read_parquet(?) LIMIT 0", [str(path)]
-        ).description]
-        if "id_status" not in columns:
-            return {}
-        rows = con.execute(
-            "SELECT DISTINCT CAST(entity_id AS VARCHAR), id_status FROM read_parquet(?)",
-            [str(path)],
-        ).fetchall()
-        return {row[0]: row[1] for row in rows}
-    finally:
-        con.close()
+    It used to read every row of ``entities.parquet`` on every entities request
+    — eleven million of them at the full PSC snapshot — and then hand the map
+    to a reader that ignores it, because ``id_status`` is a column of the file
+    and ``_base_sql`` already selects it as ``stored_id_status``. A file
+    written before that column existed has nothing to build the map from, so
+    the old code returned ``{}`` for it too. Kept as a function because the
+    reader still takes a map from callers who have one.
+    """
+    return {}
 
 
 def _cluster_floor(run_id: str) -> float:
@@ -338,12 +330,10 @@ def _withdraw_attribute_decision(db_path: str, run_dir: str, cluster_id: str):
 
 def _member_names(run_dir: str, record_ids: list[str]) -> tuple[dict, str | None]:
     """``({record_id: name}, track)`` so a label carries what a human will read."""
-    import duckdb
-
     path = Path(run_dir) / "records.parquet"
     if not path.is_file() or not record_ids:
         return {}, None
-    con = duckdb.connect()
+    con = duckdb_conn.connect(Path(run_dir) / "duckdb_tmp")
     try:
         columns = [d[0] for d in con.execute(
             "SELECT * FROM read_parquet(?) LIMIT 0", [str(path)]
@@ -476,9 +466,7 @@ def _plan_for(run_id: str) -> dict:
     names = {}
     records_path = Path(run_dir) / "records.parquet"
     if records_path.is_file():
-        import duckdb
-
-        con = duckdb.connect()
+        con = duckdb_conn.connect(Path(run_dir) / "duckdb_tmp")
         try:
             columns = [d[0] for d in con.execute(
                 "SELECT * FROM read_parquet(?) LIMIT 0", [str(records_path)]

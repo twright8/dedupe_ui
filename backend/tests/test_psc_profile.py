@@ -710,3 +710,118 @@ def test_the_psc_unit_aggregate_counts_distinct_companies():
     out = profile.aggregate_unit_columns(members)
     assert out.loc["u1", "n_companies"] == 2
     assert out.loc["u2", "n_companies"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Minting without a loop over entities
+# ---------------------------------------------------------------------------
+
+
+def _loop_mint(members: pd.DataFrame, profile) -> pd.Series:
+    """The per-entity loop ``mint_entity_ids`` replaced, kept as the authority.
+
+    Eleven million iterations at the full snapshot. The vectorised build has to
+    give exactly this, key for key, and move the counter by exactly as much.
+    """
+    from app.profiles.psc import GB_NUMBER_RE, MINT_PREFIX, MINT_WIDTH, _single
+
+    keys = members["entity_key"].drop_duplicates().sort_values()
+    if not len(keys):
+        return pd.Series(dtype="object")
+    by_key = members.groupby("entity_key", sort=False)
+    assigned: dict = {}
+    if "company_number_padded" in members.columns:
+        for key, number in by_key["company_number_padded"].agg(_single).items():
+            if isinstance(number, str) and GB_NUMBER_RE.match(number):
+                assigned[key] = number
+    tracks = by_key["track"].first() if "track" in members.columns else None
+    counter = int(getattr(profile, "_entity_counter", 0))
+    for key in keys:
+        if key in assigned:
+            continue
+        track = str(tracks.get(key, "person")) if tracks is not None else "person"
+        counter += 1
+        assigned[key] = f"{MINT_PREFIX.get(track, 'PSCP')}-{counter:0{MINT_WIDTH}d}"
+    profile._entity_counter = counter
+    return pd.Series([assigned[k] for k in keys], index=keys.to_numpy())
+
+
+class _Counter:
+    def __init__(self, start=0):
+        self._entity_counter = start
+
+
+def _mint_members(n_keys: int, seed: int = 7) -> pd.DataFrame:
+    """A mint frame with every case the rule distinguishes."""
+    import random
+
+    rng = random.Random(seed)
+    rows = []
+    for n in range(n_keys):
+        key = f"K{n:06d}"
+        kind = n % 5
+        if kind == 0:                       # records agree on a GB number
+            number = f"{rng.randrange(10**7, 10**8):08d}"
+            values = [number, number]
+        elif kind == 1:                     # records disagree, so nothing is taken
+            values = [f"{rng.randrange(10**7, 10**8):08d}" for _ in range(2)]
+        elif kind == 2:                     # a number the pattern rejects
+            values = ["ABC123", "ABC123"]
+        elif kind == 3:                     # nothing filed
+            values = [None, None]
+        else:                               # a blank is not a value
+            values = ["", None]
+        for index, value in enumerate(values):
+            rows.append({"entity_key": key, "record_id": f"{key}-{index}",
+                         "company_number_padded": value})
+    frame = pd.DataFrame(rows)
+    return frame.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+
+@pytest.mark.parametrize("start", [0, 4242])
+def test_minting_gives_what_the_per_entity_loop_gave(start):
+    members = _mint_members(400)
+    loop_profile, fast_profile = _Counter(start), _Counter(start)
+    expected = _loop_mint(members.copy(), loop_profile)
+    actual = mint_entity_ids(members.copy(), fast_profile)
+
+    assert list(actual.index) == list(expected.index)
+    assert list(actual) == list(expected)
+    assert fast_profile._entity_counter == loop_profile._entity_counter
+
+
+def test_minting_never_reuses_a_number_across_calls():
+    """The counter is a high-water mark, so a second call starts after the first."""
+    members = _mint_members(50)
+    profile = _Counter(0)
+    first = mint_entity_ids(members, profile)
+    after_first = profile._entity_counter
+    second = mint_entity_ids(_mint_members(50, seed=9), profile)
+
+    minted = [v for v in first if str(v).startswith("PSCP-")]
+    assert len(minted) == after_first
+    assert not (set(minted) & {v for v in second if str(v).startswith("PSCP-")})
+
+
+def test_minting_keeps_the_track_prefix_when_the_frame_carries_a_track():
+    members = pd.DataFrame({
+        "entity_key": ["A", "B"],
+        "record_id": ["r1", "r2"],
+        "track": ["organisation", "person"],
+    })
+    minted = mint_entity_ids(members, _Counter(0))
+    assert list(minted) == ["PSCO-0000000001", "PSCP-0000000002"]
+
+
+def test_minting_over_a_frame_with_no_track_column_is_all_person():
+    """What the mint frame really looks like: ``track`` arrives as ``track_x``."""
+    members = pd.DataFrame({"entity_key": ["A"], "record_id": ["r1"],
+                            "track_x": ["organisation"], "track_y": ["organisation"]})
+    assert list(mint_entity_ids(members, _Counter(0))) == ["PSCP-0000000001"]
+
+
+def test_minting_an_empty_frame_mints_nothing():
+    profile = _Counter(11)
+    assert not len(mint_entity_ids(
+        pd.DataFrame({"entity_key": [], "record_id": []}), profile))
+    assert profile._entity_counter == 11
