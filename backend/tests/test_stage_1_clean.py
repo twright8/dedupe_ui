@@ -269,13 +269,19 @@ def test_an_unmapped_lookup_fails_the_run_with_a_structured_error(client, db_pat
 
 
 def test_the_pipeline_stages_endpoint_lists_the_stages_that_exist(client):
+    """Every stage a reader is shown, including the two the How it works page
+    names that are not separate steps in the runner (B15)."""
     stages = client.get("/api/pipeline/stages").json()
     assert [s["key"] for s in stages] == [
-        "load", "clean", "exact", "score", "cluster", "entities",
+        "load", "clean", "derive", "exact", "score", "model", "cluster", "entities",
     ]
     for stage in stages:
         assert set(stage) == {"key", "label", "description"}
         assert stage["label"] and stage["description"]
+        # Stages are named, never numbered (docs/DESIGN.md D21).
+        assert not any(char.isdigit() for char in stage["label"])
+    labels = {s["key"]: s["label"] for s in stages}
+    assert labels["exact"] == "Match keys", "'exact key' is retired"
 
 
 # ---------------------------------------------------------------------------

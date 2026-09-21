@@ -278,7 +278,11 @@ def test_one_pair_carries_its_members_and_a_plain_explanation(client, db_path, d
 
     explanation = {e["column"]: e for e in body["explanation"]}
     # gamma 2 is the second non-null level counting down from the top.
-    assert explanation["surname"]["label"] == "Exact match on surname"
+    # The plain label is what a reviewer reads; the engine's own wording stays
+    # beside it for a diagnostic screen (docs/BACKEND_STRINGS.md §4).
+    assert explanation["surname"]["label"] == "Same surname"
+    assert explanation["surname"]["engine_label"] == "Exact match on surname"
+    assert explanation["surname"]["column_label"] == "surname"
     assert explanation["surname"]["match_weight"] == round(math.log2(0.8 / 0.05), 4)
     # The organisation comparison says nothing about a person pair, so it is out.
     assert "name_core" not in explanation

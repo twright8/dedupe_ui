@@ -576,7 +576,10 @@ def test_an_import_row_naming_an_unknown_record_is_rejected_and_reported(
     assert set(reasons) == {3, 4, 5}
     assert "999" in reasons[3]
     assert "two different records" in reasons[4]
-    assert "TRUE or FALSE" in reasons[5]
+    # The answer is named in the reviewer's words, with the API values
+    # beside them so an importer can fix the file.
+    assert "Match or Not a match" in reasons[5]
+    assert "TRUE and FALSE" in reasons[5]
 
 
 def test_an_import_with_no_run_to_check_against_is_a_400(client, db_path):

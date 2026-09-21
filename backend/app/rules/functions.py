@@ -18,11 +18,23 @@ postcode is null, not passed through) RULESET.md wins.
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import jellyfish
 import pandas as pd
+
+
+def accent_fold(text: str) -> str:
+    """Strip accents, so LÖWE and LOWE are one spelling.
+
+    This lived in the two-dataset tool's ``standardise`` module, which is gone.
+    It is a cleaning function like every other one here.
+    """
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
 
 # ---------------------------------------------------------------------------
 # Distinct-value execution — the performance rule from RULESET.md

@@ -1,7 +1,31 @@
 # Backend strings that reach the screen with a retired term
 
-Collected while applying `docs/GLOSSARY.md` to the frontend. Nothing in
-`backend/` was edited. Canonical terms are in `frontend/src/glossary.js`.
+Collected while applying `docs/GLOSSARY.md` to the frontend. Canonical terms
+are in `frontend/src/glossary.js` and, for the backend, in
+`backend/app/vocabulary.py`; the two are checked against each other by
+`backend/tests/test_vocabulary.py`.
+
+## Status, 2026-09-21
+
+Everything below is applied, except where this note says otherwise.
+`backend/tests/test_backend_strings.py` is the check that keeps it applied: it
+fails if a retired word comes back in the stage list, in a default rule
+description, in a veto reason, in a guard reason, in a pair explanation or in a
+validation message.
+
+Three things were deliberately left as they are:
+
+- **`rules/linkage.py`'s two validation messages** (`on_oversize must be one
+  of …`, `splink_function must be one of …`). Another agent is working in that
+  file, so it was not touched. They should become
+  `vocabulary.choice_error("on_oversize", value, ON_OVERSIZE)` and
+  `vocabulary.choice_error("splink_function", value, …)`, which is a two-line
+  change once that work lands.
+- **`/api/labels/export`'s CSV column names** (`is_match`, `held_out`,
+  `provenance`). That file is re-imported by the same tool, so its headers are
+  a machine contract, not prose.
+- **`exact-eval keys[].name` falling back to the key id.** A key the user did
+  not name has no other name, and the id is what they typed.
 
 ## 1. Pipeline stage labels — `GET /api/pipeline/stages`
 

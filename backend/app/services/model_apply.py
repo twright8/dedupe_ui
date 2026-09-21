@@ -33,6 +33,7 @@ from app.pipeline.dedupe.stage_3_score import (
 )
 from app.profiles import get_profile
 from app.rules import linkage
+from app.services import bucketing_history
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,8 @@ def _finish(run_dir: Path, data: dict, pairs: pd.DataFrame, labels,
 
 
 def apply_model(run_dir, labels: pd.DataFrame | None = None,
-                force: bool = False, db_path: str | None = None) -> dict:
+                force: bool = False, db_path: str | None = None,
+                who: str = "") -> dict:
     """Score a finished run with each track's active model and re-bucket.
 
     When the buckets move, stages 4 and 5 run again so the clusters and the
@@ -186,7 +188,7 @@ def apply_model(run_dir, labels: pd.DataFrame | None = None,
 
     if reason and not force:
         # Put it back before refusing, so a refused apply changes nothing.
-        revert_model(run_dir, labels, db_path=db_path)
+        revert_model(run_dir, labels, db_path=db_path, who=who)
         raise ModelApplyError(
             f"Applying this model was refused: {reason}. Reverted to Splink; "
             "nothing changed. Add human labels and a frozen test set, retrain, "
@@ -198,6 +200,14 @@ def apply_model(run_dir, labels: pd.DataFrame | None = None,
     state = stage_3b_model.write_state(run_dir, used, warning=reason, applied=True)
     counts, reclustered = _finish(run_dir, data, pairs, labels, lines, review, high,
                                   candidate, db_path)
+    bucketing_history.append(
+        run_dir, "model applied",
+        accept_line=high, review_line=review, lowest_score_kept=candidate,
+        scorer="model",
+        model_version={track: model.version for track, model in used.items()},
+        counts=counts, who=who or "",
+        note=reason or "",
+    )
     return {
         "ok": True,
         "tracks": [
@@ -217,7 +227,7 @@ def apply_model(run_dir, labels: pd.DataFrame | None = None,
 
 
 def revert_model(run_dir, labels: pd.DataFrame | None = None,
-                 db_path: str | None = None) -> dict:
+                 db_path: str | None = None, who: str = "") -> dict:
     """Take the model off a run: drop `gbt_score` and bucket on Splink again.
 
     Dropping the score rather than leaving it behind is deliberate. A number on
@@ -232,8 +242,11 @@ def revert_model(run_dir, labels: pd.DataFrame | None = None,
     candidate, review, high = _thresholds(run_dir)
 
     pairs = data["pairs"]
-    if stage_3b_model.MODEL_SCORE_COLUMN in pairs.columns:
-        pairs = pairs.drop(columns=[stage_3b_model.MODEL_SCORE_COLUMN])
+    dropped = [column for column in (stage_3b_model.MODEL_SCORE_COLUMN,
+                                     stage_3b_model.MODEL_VERSION_COLUMN)
+               if column in pairs.columns]
+    if dropped:
+        pairs = pairs.drop(columns=dropped)
     pairs = finalise_pairs(
         apply_overlays(_strip_overlays(pairs), data["units"], review, high,
                        ruleset=run_ruleset(run_dir)),
@@ -242,4 +255,9 @@ def revert_model(run_dir, labels: pd.DataFrame | None = None,
     stage_3b_model.clear_state(run_dir)
     counts, reclustered = _finish(run_dir, data, pairs, labels, {}, review, high,
                                   candidate, db_path)
+    bucketing_history.append(
+        run_dir, "model reverted",
+        accept_line=high, review_line=review, lowest_score_kept=candidate,
+        scorer="splink", counts=counts, who=who or "",
+    )
     return {"ok": True, "counts": counts, "reclustered": reclustered}

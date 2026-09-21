@@ -22,7 +22,10 @@ CREATE TABLE IF NOT EXISTS runs (
     triggered_by    TEXT,
     config_version  INTEGER,
     input_filename  TEXT,
-    -- Unused since the run takes one input file. Kept so old rows still read.
+    -- Dead. They belonged to the two-dataset tool this app was copied from,
+    -- which was deleted on 2026-09-21 (docs/DESIGN.md D21). Nothing reads or
+    -- writes them. They stay because dropping a column is destructive and the
+    -- rows cost nothing.
     ocod_filename   TEXT,
     ch_filename     TEXT,
     error_message   TEXT,
@@ -30,7 +33,15 @@ CREATE TABLE IF NOT EXISTS runs (
     counts_json     TEXT,
     threshold_high  REAL,
     threshold_review REAL,
-    current_stage   TEXT
+    current_stage   TEXT,
+    -- What produced this run. The full record is run_manifest.json in the run
+    -- folder; these five are here so a list view and an export can read them
+    -- without opening a file (docs/PROVENANCE.md).
+    code_version    TEXT,
+    input_sha256    TEXT,
+    input_bytes     INTEGER,
+    input_rows      INTEGER,
+    input_uploaded_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS config_versions (
@@ -48,6 +59,9 @@ CREATE TABLE IF NOT EXISTS config_versions (
     legal_tokens    TEXT
 );
 
+-- Dead, like the two columns above: the two-dataset tool's own label table,
+-- replaced by `pair_labels`. Nothing reads or writes it. Kept, not dropped, so
+-- the rows a researcher may still want to read are still there.
 CREATE TABLE IF NOT EXISTS labels (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     ocod_name_clean       TEXT,
@@ -61,7 +75,7 @@ CREATE TABLE IF NOT EXISTS labels (
     created_at            TEXT NOT NULL DEFAULT (datetime('now')),
     run_id                TEXT,
     active                INTEGER NOT NULL DEFAULT 1,
-    provenance            TEXT,                      -- manual | bulk_range | llm | proxy | implied_negative | import
+    provenance            TEXT,
     held_out              INTEGER NOT NULL DEFAULT 0,-- 1 = frozen eval set, excluded from training
     superseded_by         INTEGER                    -- id of the label row that replaced this one
 );
@@ -115,16 +129,86 @@ CREATE TABLE IF NOT EXISTS entity_members (
     record_id       TEXT NOT NULL,
     entity_id       TEXT NOT NULL,
     since_run       TEXT,
-    until_run       TEXT                              -- null while current
+    until_run       TEXT,                             -- null while current
+    -- Why this record is in this entity, and where the entity's ID came from.
+    -- Both are copied from the run's proposal at publish, so "how was this
+    -- decided" survives the deletion of the run folder (docs/PROVENANCE.md).
+    entity_basis    TEXT,                             -- app/vocabulary.ENTITY_BASES
+    id_status       TEXT                              -- app/vocabulary.ID_STATUSES
 );
 
+-- One settled value per entity per column, versioned like entity_members.
+-- Publishing closes the live row and opens a new one, so an earlier answer and
+-- the run that gave it stay on the record (gap 8).
 CREATE TABLE IF NOT EXISTS entity_attributes (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id       TEXT NOT NULL,
     column_name     TEXT NOT NULL,
     value           TEXT,
-    basis           TEXT,                             -- rule | majority | raw | tie
-    run_id          TEXT
+    basis           TEXT,                             -- app/vocabulary.ATTRIBUTE_BASES
+    run_id          TEXT,
+    since_run       TEXT,
+    until_run       TEXT,                             -- null while current
+    -- Which derived-column rule won, when the basis is `rule`.
+    rule_id         TEXT,
+    -- How the members voted, when the basis is `majority` or `tie`:
+    -- {"value": count, ...} as JSON, so a tie can be shown, not just named.
+    tally_json      TEXT
+);
+
+-- The join log (gap 2). One row per accepted link inside a published entity,
+-- written at publish and never rebuilt. An exact-group merge is logged as star
+-- edges from the group's smallest record id, not as every pair: a group of
+-- 1,000 records is 999 rows here and 499,500 the other way.
+--
+-- Sized for PSC: tens of millions of rows, loaded in one transaction with the
+-- indexes dropped first and rebuilt after (app/registry/provenance.py).
+CREATE TABLE IF NOT EXISTS entity_edges (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id       TEXT NOT NULL,
+    run_id          TEXT NOT NULL,
+    -- One of app/vocabulary.EDGE_SOURCES, so the chain reads in the same
+    -- words as every screen.
+    source          TEXT NOT NULL,
+    record_id_a     TEXT NOT NULL,
+    record_id_b     TEXT NOT NULL,
+    unit_id_a       TEXT,
+    unit_id_b       TEXT,
+    -- Match-key merges
+    match_key       TEXT,                             -- the key's name
+    match_key_id    TEXT,
+    group_id        TEXT,
+    -- Score links
+    score           REAL,
+    scorer          TEXT,                             -- splink | model
+    model_version   TEXT,
+    -- A veto a reviewer overrode when they joined these two anyway
+    veto_overridden TEXT,
+    veto_reason     TEXT,
+    -- Reviewer links
+    label_id        INTEGER,
+    reviewer        TEXT,
+    decided_at      TEXT,
+    note            TEXT,
+    evidence_url    TEXT,
+    -- Earlier-grouping links
+    earlier_entity_id TEXT,
+    config_version  INTEGER
+);
+
+-- Two proposed entities that claimed one ID, copied out of the run's
+-- entity_report.json so it survives the run folder (gap 8).
+CREATE TABLE IF NOT EXISTS entity_id_collisions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id            TEXT NOT NULL,
+    entity_id         TEXT,
+    kept_by_key       TEXT,
+    n_records_kept    INTEGER,
+    minted            TEXT,
+    minted_for_key    TEXT,
+    n_records_minted  INTEGER,
+    from_registry     INTEGER,
+    recorded_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Which runs have been published. Publishing the same run twice is then a
@@ -177,7 +261,10 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
     status          TEXT NOT NULL DEFAULT 'uploading',
     error_message   TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    completed_at    TEXT
+    completed_at    TEXT,
+    -- The sha256 of the reassembled file, taken once at upload. A run copies
+    -- it onto its own row, so a file swapped under the same name shows up.
+    sha256          TEXT
 );
 
 -- Shared, app-wide key/value settings (e.g. the methodology notes shown on the
@@ -228,8 +315,6 @@ CREATE INDEX IF NOT EXISTS idx_attribute_overrides_decision
 CREATE INDEX IF NOT EXISTS idx_entity_members_entity
     ON entity_members (entity_id, until_run);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_attributes_key
-    ON entity_attributes (entity_id, column_name);
 
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp
     ON audit_log (timestamp DESC);
@@ -254,6 +339,21 @@ _MIGRATIONS = [
     ("config_versions", "ruleset", "TEXT"),
     ("pair_labels", "decision_id", "TEXT"),
     ("pair_labels", "decision_scope", "TEXT"),
+    ("entity_members", "entity_basis", "TEXT"),
+    ("entity_members", "id_status", "TEXT"),
+    ("entity_attributes", "since_run", "TEXT"),
+    ("entity_attributes", "until_run", "TEXT"),
+    ("entity_attributes", "rule_id", "TEXT"),
+    ("entity_attributes", "tally_json", "TEXT"),
+    # What produced a run (docs/PROVENANCE.md). The whole record is
+    # run_manifest.json in the run folder; these four are on the row so a list
+    # view and an export can read them without opening a file.
+    ("runs", "code_version", "TEXT"),
+    ("runs", "input_sha256", "TEXT"),
+    ("runs", "input_bytes", "INTEGER"),
+    ("runs", "input_rows", "INTEGER"),
+    ("runs", "input_uploaded_at", "TEXT"),
+    ("upload_sessions", "sha256", "TEXT"),
 ]
 
 
@@ -326,6 +426,22 @@ def init_db(db_path: str) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_pair_labels_scope "
         "ON pair_labels (decision_scope, active)"
+    )
+    # entity_attributes used to hold one row per entity and column, replaced in
+    # place. It now keeps history, so the unique index moves onto the live row —
+    # the same shape entity_members has used since it was written.
+    conn.execute("DROP INDEX IF EXISTS idx_entity_attributes_key")
+    conn.execute(
+        "UPDATE entity_attributes SET since_run = run_id "
+        "WHERE since_run IS NULL AND run_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_attributes_current "
+        "ON entity_attributes (entity_id, column_name) WHERE until_run IS NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_entity_id_collisions_run "
+        "ON entity_id_collisions (run_id)"
     )
     conn.commit()
     conn.close()

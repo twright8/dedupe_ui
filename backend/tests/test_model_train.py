@@ -190,7 +190,7 @@ def test_the_known_limit_is_in_every_report(run_env):
     summary = train.train(run_env["run_dir"], run_env["db"], "person",
                           profile=DonationsProfile())
     report = store.load_report("person", summary["version"])
-    assert "imported labels were made mostly on the name" in report["known_limit"]
+    assert "earlier grouping was made mostly on the name" in report["known_limit"]
 
 
 def test_calibration_is_fitted_on_human_rows_only_once_there_are_enough(run_env):

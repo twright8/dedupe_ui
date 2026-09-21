@@ -47,19 +47,32 @@ def _unsign(token: str, max_age: int = SESSION_MAX_AGE) -> dict | None:
         return None
 
 
+#: What is stored when nobody said who they are. The literal word "user" used to
+#: go into `reviewer`, `published_by` and `triggered_by`, where it reads as a
+#: name and is not one (`docs/TERMINOLOGY_AUDIT.md`, gap 9). "unknown" says the
+#: true thing: nobody signed this.
+UNKNOWN_USER = "unknown"
+
+
 def current_user(user: str = Cookie(default=None)) -> str:
     """Best-effort display name for audit attribution.
 
     The session middleware proves the request is authenticated. The separate
-    user cookie is honor-system attribution; tests and early API clients may
-    not set it, so fall back to "user" instead of failing mutations.
+    user cookie is honour-system attribution; tests and early API clients may
+    not set it, so it falls back to ``unknown`` instead of failing a change.
+
+    It never returns the word "user". A reviewer's name is shown beside their
+    answer, and "user" there looks like a person and is not one.
     """
     if not user:
-        return "user"
+        return UNKNOWN_USER
     data = _unsign(user)
     if not data:
-        return "user"
-    return data.get("name") or "user"
+        return UNKNOWN_USER
+    name = str(data.get("name") or "").strip()
+    if not name or name.lower() == "user":
+        return UNKNOWN_USER
+    return name
 
 
 # ---------------------------------------------------------------------------
@@ -155,9 +168,11 @@ def list_users(session: str = Cookie(None)):
 # Middleware — protect /api/* (except /api/auth/login and /api/health)
 # ---------------------------------------------------------------------------
 
-# /api/profile is public like /api/health: the frontend reads the title, base
-# path and column set before the login screen is drawn.
-_PUBLIC_PATHS = {"/api/auth/login", "/api/auth/logout", "/api/health", "/api/profile"}
+# /api/profile and /api/vocabulary are public like /api/health. The frontend
+# reads the title, the base path, the column set and every display label before
+# the login screen is drawn. None of the three says anything about the data.
+_PUBLIC_PATHS = {"/api/auth/login", "/api/auth/logout", "/api/health",
+                 "/api/profile", "/api/vocabulary"}
 
 
 class SessionMiddleware(BaseHTTPMiddleware):

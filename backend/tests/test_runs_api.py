@@ -400,77 +400,7 @@ class TestRunsAPI:
         assert len(data) == 2
         assert data[0]["event"] == "stage_start"
 
-    def test_apply_labels(self, client, db_path, data_dir):
-        """apply-labels endpoint applies labels and returns counts."""
-        import pandas as pd
 
-        run_id = "run_labels_test"
-        write_db(
-            db_path,
-            "INSERT INTO runs (id, status) VALUES (?, ?)",
-            (run_id, "complete"),
-        )
-        run_dir = data_dir / "runs" / run_id
-        run_dir.mkdir(parents=True)
-
-        # Create a minimal merged_dataset.csv
-        df = pd.DataFrame([
-            {"title_number": "T001", "ocod_name_raw": "Acme Ltd", "ocod_name_clean": "ACME LTD",
-             "jurisdiction_clean": "JERSEY", "roe_company_number": "OE001234",
-             "roe_name_raw": "ACME LIMITED", "match_method": "probabilistic", "match_probability": 0.65},
-        ])
-        df.to_csv(run_dir / "merged_dataset.csv", index=False, encoding="utf-8-sig")
-
-        r = client.post(f"/api/runs/{run_id}/apply-labels")
-        assert r.status_code == 200
-        body = r.json()
-        assert "applied" in body
-        assert "unmatched" in body
-
-    def test_mark_unlabelled_review_rows_false(self, client, db_path, data_dir):
-        """mark-unlabelled creates FALSE labels only for rows without a label."""
-        run_id = "run_mark_unlabelled"
-        write_db(
-            db_path,
-            "INSERT INTO runs (id, status) VALUES (?, ?)",
-            (run_id, "complete"),
-        )
-        run_dir = data_dir / "runs" / run_id
-        run_dir.mkdir(parents=True)
-        (run_dir / "matches_for_review.csv").write_text(
-            "ocod_name_raw,ocod_name_clean,jurisdiction_clean,roe_name_raw,roe_name_clean,roe_company_number,match_probability\n"
-            "Alpha Ltd,ALPHA LTD,JERSEY,Alpha Limited,ALPHA LIMITED,OE000001,0.72\n"
-            "Beta Ltd,BETA LTD,JERSEY,Beta Limited,BETA LIMITED,OE000002,0.64\n",
-            encoding="utf-8-sig",
-        )
-        write_db(
-            db_path,
-            """INSERT INTO labels
-               (ocod_name_clean, jurisdiction_clean, roe_company_number,
-                is_true_match, reviewer, active)
-               VALUES (?, ?, ?, ?, ?, 1)""",
-            ("ALPHA LTD", "JERSEY", "OE000001", "TRUE", "reviewer"),
-        )
-
-        r = client.post(f"/api/runs/{run_id}/mark-unlabelled")
-        assert r.status_code == 200
-        body = r.json()
-        assert body["marked"] == 1
-        assert body["skipped"] == 1
-        assert body["is_true_match"] == "FALSE"
-
-        rows = query_db(
-            db_path,
-            """SELECT ocod_name_clean, is_true_match, run_id
-               FROM labels
-               WHERE active = 1
-               ORDER BY ocod_name_clean""",
-        )
-        assert [(r["ocod_name_clean"], r["is_true_match"]) for r in rows] == [
-            ("ALPHA LTD", "TRUE"),
-            ("BETA LTD", "FALSE"),
-        ]
-        assert rows[1]["run_id"] == run_id
 
     def test_run_id_format(self, client, db_path, data_dir, monkeypatch):
         """Run ID should follow run_YYYY_MM_DDx format."""

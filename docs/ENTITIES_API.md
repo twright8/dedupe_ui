@@ -526,12 +526,177 @@ answers C for A).
   "created_at": "2026-09-18T15:02:44.119820+00:00",
   "n_records": 7,
   "records": ["3", "4", "12"],
-  "attributes": { "donor_status_std": { "value": "Company", "basis": "rule" } }
+  "members": [
+    { "record_id": "3", "entity_basis": "import", "id_status": "new",
+      "since_run": "run_2026_09_18a",
+      "entity_basis_label": "Earlier grouping", "id_status_label": "New" }
+  ],
+  "attributes": {
+    "donor_status_std": {
+      "value": "Company", "basis": "rule", "basis_label": "Derived column rule",
+      "rule_id": "d1r4", "tally": null, "since_run": "run_2026_09_18a"
+    }
+  }
 }
 ```
 
 **404** when the ID has never existed. A chain that loops is cut and reported as
 `{"detail": "Alias chain for '9312' does not end"}` (500) rather than hanging.
+
+## How this was decided
+
+Two endpoints answer the same question — *why are these records one entity?* —
+from two different places. Use the run one while the run exists. Use the
+registry one for anything published, because it keeps working after the run
+folder is deleted.
+
+Both return the answer twice. `steps` is an ordered list a person can read,
+**weakest evidence first**, so it reads as the story of the merge. `edges` is
+the join log the steps were written from, one row per link, with only the
+fields that kind of link fills in. `question` and `precedence` are the words to
+print above the list; they come from `GET /api/vocabulary`.
+
+### `GET /api/runs/{id}/entities/{entity_id}/provenance`
+
+Built from the run's own files. `limit` (default 2000, max 20000) caps `edges`;
+`steps` always counts every link.
+
+A real response, from the donations run `run_2026_09_18a`, entity `833`
+(86 records, shortened to two edges and two members):
+
+```json
+{
+  "entity_id": "833",
+  "source": "run",
+  "run_id": "run_2026_09_18a",
+  "config_version": 1,
+  "n_records": 86,
+  "id_status": "new",
+  "id_status_label": "New",
+  "question": "How it was decided",
+  "precedence": "Read the list from the top down. Anything lower beats anything above it, so a reviewer's answer beats the earlier grouping, the earlier grouping beats a veto rule, and a veto rule beats the score.",
+  "steps": [
+    { "order": 0, "source": null, "label": "This entity",
+      "text": "This entity holds 86 records.", "n_links": 0 },
+    { "order": 1, "source": "exact_key", "label": "Match key",
+      "definition": "A match key found the same values in every one of its columns.",
+      "text": "A match key put these records together: Company number, Name and postcode. That is 80 links.",
+      "n_links": 80,
+      "examples": [
+        { "record_id_a": "10016", "record_id_b": "10305", "source": "exact_key",
+          "match_key": "Name and postcode", "match_key_id": "k2",
+          "group_id": "X-10016" }
+      ] },
+    { "order": 2, "source": "score", "label": "Score",
+      "definition": "The score reached the accept line.",
+      "text": "5 links were accepted on the Splink score. The scores ran from 1.00 to 1.00.",
+      "n_links": 5,
+      "examples": [
+        { "record_id_a": "10016", "record_id_b": "101777", "source": "score",
+          "score": 0.9999995088663194, "scorer": "splink" }
+      ] },
+    { "order": 3, "source": "import", "label": "Earlier grouping",
+      "definition": "Both sides already carried the same earlier ID.",
+      "text": "10 links were accepted because both sides already carried the same earlier ID: 833.",
+      "n_links": 10,
+      "examples": [
+        { "record_id_a": "10016", "record_id_b": "11212", "source": "import",
+          "score": 0.9999995088663194, "earlier_entity_id": "833" }
+      ] },
+    { "order": 4, "source": null, "label": "Where this ID came from",
+      "text": "New. Nothing in the registry claimed these records, so the tool made a new ID.",
+      "n_links": 0 }
+  ],
+  "edges": [
+    { "entity_id": "833", "run_id": "run_2026_09_18a", "source": "exact_key",
+      "record_id_a": "10016", "record_id_b": "10305",
+      "unit_id_a": null, "unit_id_b": null,
+      "match_key": "Name and postcode", "match_key_id": "k2",
+      "group_id": "X-10016",
+      "score": null, "scorer": null, "model_version": null,
+      "veto_overridden": null, "veto_reason": null,
+      "label_id": null, "reviewer": null, "decided_at": null,
+      "note": null, "evidence_url": null,
+      "earlier_entity_id": null, "config_version": 1 }
+  ],
+  "members": [
+    { "record_id": "10016", "entity_basis": "import",
+      "entity_basis_label": "Earlier grouping" }
+  ]
+}
+```
+
+**404** when the run has no entities yet, or proposes no entity with that ID.
+
+### `GET /api/registry/entities/{entity_id}/provenance`
+
+The same answer from the registry alone. It follows the alias chain, so a
+retired ID works. It adds the settled values, their history, and any time this
+entity's ID was claimed twice.
+
+```json
+{
+  "entity_id": "833",
+  "requested": "833",
+  "redirected": false,
+  "chain": ["833"],
+  "source": "registry",
+  "created_run": "run_2026_09_18a",
+  "runs": ["run_2026_09_18a"],
+  "n_records": 86,
+  "id_status": "new",
+  "id_status_label": "New",
+  "question": "How it was decided",
+  "precedence": "Read the list from the top down. Anything lower beats anything above it, so a reviewer's answer beats the earlier grouping, the earlier grouping beats a veto rule, and a veto rule beats the score.",
+  "steps": [ "… the same five steps as above …" ],
+  "edges": [
+    { "id": 27526, "entity_id": "833", "run_id": "run_2026_09_18a",
+      "source": "exact_key", "record_id_a": "10016", "record_id_b": "10305",
+      "match_key": "Name and postcode", "match_key_id": "k2",
+      "group_id": "X-10016", "config_version": 1 }
+  ],
+  "members": [
+    { "record_id": "10016", "entity_basis": "import", "id_status": "new",
+      "since_run": "run_2026_09_18a",
+      "entity_basis_label": "Earlier grouping", "id_status_label": "New" }
+  ],
+  "attributes": {
+    "donor_status_std": {
+      "value": "Company", "basis": "rule", "basis_label": "Derived column rule",
+      "rule_id": "d1r4", "tally": null, "since_run": "run_2026_09_18a"
+    }
+  },
+  "attribute_history": [
+    { "column_name": "donor_status_std", "value": "Company", "basis": "rule",
+      "rule_id": "d1r4", "tally_json": null, "tally": null,
+      "since_run": "run_2026_09_18a", "until_run": null,
+      "run_id": "run_2026_09_18a" }
+  ],
+  "id_collisions": []
+}
+```
+
+**404** when the ID has never existed.
+
+### An edge, field by field
+
+| Field | Filled in when | Holds |
+|---|---|---|
+| `source` | always | one of `exact_key`, `score`, `model`, `veto`, `import`, `human` — the value `GET /api/vocabulary` maps to a label |
+| `record_id_a`, `record_id_b` | always | the two records. For a match-key merge, `record_id_a` is the group's smallest record id |
+| `unit_id_a`, `unit_id_b` | a scored pair | the two units the scorer compared |
+| `match_key`, `match_key_id`, `group_id` | `exact_key` | the key's name, its id, and the exact group |
+| `score`, `scorer` | `score`, `model` | the score, and `splink` or `model` |
+| `model_version` | `model` | which model produced the score |
+| `veto_overridden`, `veto_reason` | a veto was on the pair | the veto the accepted link overrode |
+| `label_id`, `reviewer`, `decided_at`, `note`, `evidence_url` | `human` | the saved answer and who saved it |
+| `earlier_entity_id` | `import` | the earlier ID both sides carried |
+| `config_version` | always | the config the run used |
+
+**Why an exact group is a star.** A match key that puts 1,000 records together
+makes 499,500 pairs and 999 links. The log keeps the 999: the group's smallest
+record id joined to each of the others. That says all 1,000 are one group, and
+it is what a reader wants to see.
 
 `GET /api/registry/aliases.csv` is `text/csv` with
 `retired_entity_id,survivor_entity_id,track,retired_run,retired_at`, one row per

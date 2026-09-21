@@ -122,7 +122,7 @@
       ]
     },
     "placeholder_numbers": {
-      "description": "Registration numbers that are not one company's identity, so a key must not merge on them. Three kinds: the obvious typed-in placeholders ('00000000', '12345678'), which stay on the list whether or not this snapshot happens to contain them; words in the number box ('ENGLAND', 'BEING INCORPORATED', 'TBA'); and real numbers belonging to formation agents, which appear under dozens of unrelated filed names. The last two kinds were measured on the FULL 2026-09-18 snapshot — every value used by ten or more distinct filed names that `fake_nulls` does not already catch. The biggest are 09361466 and 9361466 (45 filed names between them, 4,260 records), 07168188 (23 names, 2,738), SO303142 (12 names, 2,195) and CHE-108.562.489 (12 names, 2,164).",
+      "description": "Registration numbers that are not one company's identity, so a match key must not merge on them. Three kinds: typed-in placeholders such as '00000000'; words in the number box such as 'ENGLAND' or 'TBA'; and real numbers belonging to formation agents, which appear under dozens of unrelated filed names.",
       "tokens": [
         "00000000",
         "00000001",
@@ -171,10 +171,11 @@
         "25791",
         "06890768",
         "0000000000"
-      ]
+      ],
+      "_measured": "The last two kinds were measured on the full 2026-09-18 snapshot — every value used by ten or more distinct filed names that `fake_nulls` does not already catch. The biggest are 09361466 and 9361466 (45 filed names between them, 4,260 records), 07168188 (23 names, 2,738), SO303142 (12 names, 2,195) and CHE-108.562.489 (12 names, 2,164)."
     },
     "junk_postcodes": {
-      "description": "Postcodes used by more than 5,000 records per 7.5 million individuals — deduping's proportion, which is 9,281 of the full snapshot's 13,921,888 person records. These are formation agents' and filing agents' offices, not where anybody lives, so an address key must not merge on them. Rebuilt from the FULL 2026-09-18 snapshot (the earlier 18 came from a 1/32 sample): 6 added, 4 dropped, 20 in all.",
+      "description": "Postcodes that belong to formation agents' and filing agents' offices rather than to anywhere a person lives, so an address key must not merge on them.",
       "tokens": [
         "WC2H 9JQ",
         "N1 7GU",
@@ -196,12 +197,13 @@
         "HR5 3DJ",
         "M40 8WN",
         "BS9 3BY"
-      ]
+      ],
+      "_measured": "Every postcode used by more than 5,000 records per 7.5 million individuals, which is 9,281 of the full snapshot's 13,921,888 person records. Rebuilt from the full 2026-09-18 snapshot, where an earlier 1/32 sample had found 18: 6 added, 4 dropped, 20 in all."
     }
   },
   "lookups": {
     "nicknames": {
-      "description": "Diminutives that point at one canonical forename. Ported from deduping; CHRIS and ALEX are deliberately absent because they are gender-ambiguous.",
+      "description": "Diminutives that point at one canonical forename. CHRIS and ALEX are deliberately absent because they do not tell you the gender.",
       "fallback": "passthrough",
       "rows": [
         {
@@ -667,7 +669,7 @@
       ]
     },
     "countries": {
-      "description": "Country of registration as a short code. deduping's corporate map, which is deliberately not the same as its person-side country map.",
+      "description": "Country of registration as a short code. This map is for organisations only; people have their own country map, on purpose.",
       "fallback": "passthrough",
       "rows": [
         {
@@ -1677,7 +1679,7 @@
       "name": "Person: name and date of birth",
       "track": "person",
       "tier": 1,
-      "description": "deduping's stage 1 key plus its stage 1.5 split. Surname, canonical forename and both parts of the date of birth, none of them missing. The corroborators are the split: a group this size that shares no address and no company is several people with one name, not one person.",
+      "description": "Surname, canonical forename and both parts of the date of birth, with none of them missing. The corroborating columns are the split: a group this size that shares no address and no company is several people with one name, not one person.",
       "columns": [
         "surname_clean",
         "forename_canon",

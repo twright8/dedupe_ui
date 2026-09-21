@@ -126,6 +126,11 @@ def status(profile=None, loaded: dict | None = None) -> list[dict]:
             "rows": int(len(frame)) if frame is not None else None,
             "path": f"{REFERENCES_DIRNAME}/{ref.filename}",
             "built_at": meta.get("built_at"),
+            # What it was built from, and what it hashed to. A training report
+            # that names a table and not its build cannot be reproduced.
+            "source": meta.get("source"),
+            "source_sha256": meta.get("source_sha256"),
+            "source_rows": meta.get("source_rows"),
         })
     return out
 

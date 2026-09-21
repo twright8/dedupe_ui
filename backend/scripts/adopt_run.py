@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.db import init_db, query_db, write_db  # noqa: E402
+from app.services.audit_logger import log_event  # noqa: E402
 
 #: Without these a run folder is not a finished run and there is nothing to show.
 REQUIRED = ("records.parquet", "units.parquet", "pairs.parquet",
@@ -213,7 +215,8 @@ def config_version_for(db_path: str, run_dir: Path, note: str) -> int | None:
 
 
 def adopt(run_dir, db_path: str, run_id: str | None = None, label: str | None = None,
-          counts: dict | None = None, input_filename: str | None = None) -> dict:
+          counts: dict | None = None, input_filename: str | None = None,
+          who: str | None = None) -> dict:
     """Write the ``runs`` row for a finished folder. Returns what it wrote.
 
     Raises ``AdoptError`` when the folder is not a finished run, and when the
@@ -279,6 +282,16 @@ def adopt(run_dir, db_path: str, run_id: str | None = None, label: str | None = 
             "triggered_by", "config_version", "input_filename", "counts_json",
             "threshold_high", "threshold_review")),
     )
+    # A PSC run built offline and adopted used to leave no trace of who or
+    # when (docs/TERMINOLOGY_AUDIT.md, gap 9). It does now.
+    log_event(
+        db_path, user=who or "adopt_run.py", kind="run",
+        description=f"Adopted run {run_id} from {run_dir}",
+        metadata={"run_id": run_id, "run_dir": str(run_dir),
+                  "config_version": version, "label": label,
+                  "input_filename": input_filename,
+                  "threshold_high": high, "threshold_review": review},
+    )
     return {**row, "adopted": True,
             "message": f"Run '{run_id}' registered from {run_dir}."}
 
@@ -295,6 +308,16 @@ def _comparable(value):
 # ---------------------------------------------------------------------------
 
 
+def _shell_user() -> str:
+    """Who is running this, so the audit log names a person and not a script."""
+    import getpass
+
+    try:
+        return getpass.getuser()
+    except Exception:
+        return os.environ.get("USER") or "adopt_run.py"
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("run_dir", help="the finished run folder, under <data>/runs/")
@@ -305,6 +328,8 @@ def main(argv=None) -> int:
     parser.add_argument("--label", help="what the runs list should call it")
     parser.add_argument("--counts", help="a JSON file of the stages' counts")
     parser.add_argument("--input-filename", help="the file the run was made from")
+    parser.add_argument("--who", help="who is adopting it, for the audit log "
+                                      "(default: the shell user)")
     args = parser.parse_args(argv)
 
     run_dir = Path(args.run_dir).resolve()
@@ -318,7 +343,8 @@ def main(argv=None) -> int:
 
     try:
         result = adopt(run_dir, db_path, run_id=args.run_id, label=args.label,
-                       counts=counts, input_filename=args.input_filename)
+                       counts=counts, input_filename=args.input_filename,
+                       who=args.who or _shell_user())
     except AdoptError as exc:
         print(f"adopt_run: {exc}", file=sys.stderr)
         return 2

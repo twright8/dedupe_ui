@@ -21,9 +21,14 @@ Input: `units.parquet`, `unit_members.parquet`, `pairs.parquet`, the active `pai
 | `conflict` | a human FALSE label joins two of its units |
 | `weak_link` | a scored pair inside it sits below `cluster_floor` (a linkage setting, default 0.20), so the cluster may be a chain |
 | `too_large` | more units than `max_cluster_units` (a linkage setting, default 200) |
-| `mixed_ids` | its records carry more than `max_existing_ids` distinct `existing_entity_id` values (default 1), so it would merge groups the earlier manual work kept apart |
+| `mixed_ids` | its records carry more than `max_existing_ids` distinct `existing_entity_id` values (default 1), so it would merge groups the earlier grouping kept apart |
+| `cross_track_ids` | one earlier ID covers both a person and an organisation, so the tool keeps them as two entities |
+| `attribute_tie` | two values were equally common, so one value for the whole cluster could not be settled |
+| `held_key` | a guard on a match key stopped these records being put together; the group joins the same queue |
 
-A cluster may carry several statuses. The first in the order conflict, too_large, weak_link, mixed_ids is its main one.
+A cluster may carry several statuses. The first in the order conflict,
+too_large, weak_link, mixed_ids, cross_track_ids is its main one. The labels a
+user sees for all of these are in `app/vocabulary.CLUSTER_STATUS`.
 
 4. **What is proposed.** An `ok` cluster becomes one entity. A cluster with any other status is **withheld**: it is rebuilt from trusted edges only (`import` and `human`), and each of those smaller parts becomes an entity. The withheld cluster goes to the cluster review queue. A human decision always wins, so an edge from a human TRUE label is never withheld, and a human FALSE label always separates.
 5. **Held exact groups** from stage 2 also go to the cluster review queue, with status `held_key`. Their records stay separate until a human decides.
@@ -46,11 +51,13 @@ Only four columns of `units.parquet` are read — `unit_id`, `unit_size`, `track
 The registry is durable across runs. Tables:
 
 - `entities`: `entity_id`, `track`, `created_run`, `created_at`, `status` (`active` or `retired`), `alias_of` (the surviving entity when retired), `retired_run`
-- `entity_members`: `record_id`, `entity_id`, `since_run`, `until_run` (null while current)
-- `entity_attributes`: `entity_id`, `column_name`, `value`, `basis` (`rule`, `majority`, `raw`, `tie`), `run_id` — `column` is a SQL keyword, so the column is `column_name`
+- `entity_members`: `record_id`, `entity_id`, `since_run`, `until_run` (null while current), `entity_basis`, `id_status` — the last two are copied from the proposal at publish, so "how was this decided" survives deleting the run folder
+- `entity_attributes`: `entity_id`, `column_name`, `value`, `basis` (`rule`, `majority`, `raw`, `tie`, `human`), `run_id`, `since_run`, `until_run`, `rule_id`, `tally_json` — versioned like `entity_members`, so an earlier answer and the run that gave it stay on the record. `rule_id` names the derived-column rule that won; `tally_json` is `{value: count}` when the members voted. `column` is a SQL keyword, so the column is `column_name`
+- `entity_edges`: the join log. One row per accepted link inside a published entity — `entity_id`, `run_id`, `source`, `record_id_a`, `record_id_b`, `unit_id_a`, `unit_id_b`, `match_key`, `match_key_id`, `group_id`, `score`, `scorer`, `model_version`, `veto_overridden`, `veto_reason`, `label_id`, `reviewer`, `decided_at`, `note`, `evidence_url`, `earlier_entity_id`, `config_version`. An exact-group merge is logged as a star from the group's smallest record id, not as every pair
+- `entity_id_collisions`: the run's ID-collision list, copied in at publish
 - `entity_publications`: `run_id`, `published_at`, `published_by`, `summary_json`. Publishing one run twice is then a no-op, and publishing an older run over a newer one can be refused
 
-A run never writes the registry. It writes a **proposal**, `entities.parquet`: `record_id`, `entity_id`, `entity_basis`, `cluster_id`, `track`. A user **publishes** a run, and only that writes the registry.
+A run never writes the registry. It writes a **proposal**, `entities.parquet`: `record_id`, `entity_id`, `entity_basis`, `id_status`, `cluster_id`, `track`, `unit_id`, `entity_key`, plus `<column>_entity`, `<column>_entity_basis`, `<column>_entity_rule` and `<column>_entity_tally` for each consensus column. A user **publishes** a run, and only that writes the registry.
 
 How a proposed entity gets its ID, in order:
 
@@ -68,7 +75,9 @@ The frame the hook receives is still `proposed.merge(records, on="record_id")`, 
 
 **PSC mints without a loop.** `psc.mint_entity_ids` used to walk the sorted entity keys one at a time — about 11.3 million iterations at the full snapshot, each formatting a string into a dict of the same size — and to call `_single` once per group to find an agreed company number. Both are now whole-frame operations: the counter is a `cumsum` over the keys that need one, so the nth key needing an ID still takes the nth counter value and the profile's high-water mark still moves by exactly the number minted. `_single` is stated as a group-by with a distinct count. `_loop_mint` in `tests/test_psc_profile.py` keeps the old walk as the authority and the two are held together there. Note that the shipped PSC ruleset derives no `company_number_padded` column, so on a shipped run every ID takes the counter branch.
 
-`entity_basis` says how the record reached its entity: `single` (no merge), `exact_key`, `import`, `score`, `human`, in rising order of precedence. The strongest edge on the record's path applies.
+`entity_basis` says how the record reached its entity: `single` (no merge), `exact_key`, `score`, `import`, `human`, in rising order of precedence. The strongest edge on the record's path applies.
+
+The order is `app/vocabulary.BASIS_ORDER`, and it comes from the one ordered provenance list in `GLOSSARY.md` (`DESIGN.md` D22): On its own, Match key, Score, Veto rule, Earlier grouping, Reviewer, weakest first. **Earlier grouping beats Score.** It used to be the other way round here and the right way round in `RULESET.md`, so the same two words ranked in opposite orders in two places. Settling it changed nothing about which records are together: on the donations run all 51,839 records keep the same entity ID and all 17,568 entities hold exactly the same records. It changed what 1,574 records *report* — they read `import` (Earlier grouping) instead of `score`, because their path held both kinds of edge and the earlier grouping is the stronger evidence.
 
 A split never reuses a retired ID. When a published entity is split, the part that holds the smallest `record_id` keeps the ID and the other parts are minted. Record IDs compare as text here, as everywhere else in the pipeline.
 
@@ -84,7 +93,7 @@ A profile lists `consensus_columns` (donations: `donor_status_std`). For each en
 - Otherwise the most frequent value wins. Basis `majority`. A single-member entity has basis `raw`.
 - A tie keeps each record's own value and marks the entity with basis `tie`. It appears in the cluster review queue with status `attribute_tie`.
 
-The proposal stores the result as `<column>_entity` on each record, with `<column>_entity_basis`.
+The proposal stores the result as `<column>_entity` on each record, with `<column>_entity_basis`, `<column>_entity_rule` (the id of the derived-column rule that won) and `<column>_entity_tally` (how the members voted, as `{value: count}`, when more than one value was in the running). Publishing copies all four into `entity_attributes`.
 
 ## Group decisions
 

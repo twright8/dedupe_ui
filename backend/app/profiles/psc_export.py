@@ -28,6 +28,7 @@ from pathlib import Path
 import pandas as pd
 
 from app import duckdb_conn
+from app.profiles import export_provenance
 
 # The index the PSC ids are keyed on (D16). The record_id IS the document id,
 # which is why stable_psc_id may never change.
@@ -37,6 +38,9 @@ ES_FIELD = "psc_entity_id"
 COLUMNS = ["record_id", "entity_id", "entity_basis", "track", "company_number", "name"]
 
 BULK_FILENAME = "elasticsearch_bulk.jsonl"
+
+# "alias" is a retired word (docs/GLOSSARY.md). The file says what it holds.
+RETIRED_FILENAME = "retired_ids.csv"
 
 #: How many rows leave DuckDB at a time when a file has to be written a line at
 #: a time. Writing JSON and writing a byte-order mark are the two steps that
@@ -156,24 +160,31 @@ def _write_bulk(con, sql: str, path: Path) -> int:
     return written
 
 
-def _readme(context: dict, n_records: int, updates: int) -> str:
-    counts = context.get("counts") or {}
-    return "\n".join([
+def _manifest(context: dict, n_records: int, updates: int, table_name: str,
+              run_dir=None) -> str:
+    """The bundle's manifest: what is in it, and what produced it.
+
+    The same facts the donations run sheet carries, as plain text, because a zip
+    has no sheets (`docs/PROVENANCE.md`).
+    """
+    header = "\n".join([
         f"PSC reconciliation export — run {context.get('run_id')}",
         f"Written {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
-        f"Config version {context.get('config_version')}",
-        f"Scope: {context.get('scope')}",
         "",
-        f"psc_entities.csv      {n_records:,} PSC records, with the entity ID each was given",
+        "What is in this bundle",
+        "----------------------",
+        f"{table_name}      {n_records:,} PSC records, with the entity ID each was given",
         f"{BULK_FILENAME}  {updates:,} bulk updates for the {ES_INDEX} index",
-        "aliases.csv           entity IDs that retired into another",
+        f"{RETIRED_FILENAME}          entity IDs that retired, and what each now leads to",
+        "HOW_TO_READ.txt       what every column means",
         "",
         "The bulk file is NOT sent by this tool. Check the table first, then post",
         f"the file to the {ES_INDEX} _bulk endpoint yourself.",
         "",
-        f"Records loaded: {counts.get('records_total', 'n/a')}",
-        f"Entities proposed: {counts.get('entities_total', 'n/a')}",
-    ]) + "\n"
+        "",
+    ])
+    return header + export_provenance.as_text(
+        export_provenance.run_rows(context, run_dir))
 
 
 def export(run_dir: Path, scope: str, fmt: str, context: dict) -> Path:
@@ -205,10 +216,10 @@ def export(run_dir: Path, scope: str, fmt: str, context: dict) -> Path:
         con.close()
 
     aliases = context.get("aliases") or []
-    alias_path = run_dir / "aliases.csv"
-    with open(alias_path, "w", newline="", encoding="utf-8-sig") as handle:
+    retired_path = run_dir / RETIRED_FILENAME
+    with open(retired_path, "w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["retired_entity_id", "survivor_entity_id", "track",
+        writer.writerow(["Retired ID", "Now leads to", "track",
                          "retired_run", "retired_at"])
         for row in aliases:
             writer.writerow([
@@ -220,6 +231,10 @@ def export(run_dir: Path, scope: str, fmt: str, context: dict) -> Path:
     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.write(table_path, table_name)
         archive.write(bulk_path, BULK_FILENAME)
-        archive.write(alias_path, "aliases.csv")
-        archive.writestr("README.txt", _readme(context, n_records, updates))
+        archive.write(retired_path, RETIRED_FILENAME)
+        archive.writestr("README.txt",
+                         _manifest(context, n_records, updates, table_name, run_dir))
+        archive.writestr("HOW_TO_READ.txt", export_provenance.as_text(
+            export_provenance.how_to_read_rows(
+                export_provenance.PSC_ADDED_COLUMNS)))
     return bundle

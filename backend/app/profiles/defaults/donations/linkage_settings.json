@@ -4,18 +4,21 @@
       "blocking_rules": [
         {
           "id": "pb1",
-          "description": "Same surname and same first initial. The workhorse rule: 26,958 pairs over 9,678 blocks on the September 2026 sheet, biggest block 141.",
-          "sql": "l.surname = r.surname AND l.forename_initial = r.forename_initial"
+          "description": "Same surname and same first initial. This is the rule that finds most pairs.",
+          "sql": "l.surname = r.surname AND l.forename_initial = r.forename_initial",
+          "_measured": "26,958 pairs over 9,678 blocks on the September 2026 sheet. The biggest block held 141 units."
         },
         {
           "id": "pb2",
-          "description": "Surname sounds the same and the forename maps to the same canonical form. Rescues SMITH/SMYTH and BILL/WILLIAM. 23,915 pairs.",
-          "sql": "l.surname_metaphone = r.surname_metaphone AND l.forename_canon = r.forename_canon"
+          "description": "The surname sounds the same and the forename maps to the same canonical form. This rescues SMITH against SMYTH, and BILL against WILLIAM.",
+          "sql": "l.surname_metaphone = r.surname_metaphone AND l.forename_canon = r.forename_canon",
+          "_measured": "23,915 pairs on the September 2026 sheet."
         },
         {
           "id": "pb3",
-          "description": "Same forename and the surname starts with the same letter. Catches a changed or mistyped surname. 76,738 pairs, the most expensive of the three and still far inside budget.",
-          "sql": "l.forename_canon = r.forename_canon AND substr(l.surname, 1, 1) = substr(r.surname, 1, 1)"
+          "description": "Same forename, and the surname starts with the same letter. This catches a surname that changed or was mistyped.",
+          "sql": "l.forename_canon = r.forename_canon AND substr(l.surname, 1, 1) = substr(r.surname, 1, 1)",
+          "_measured": "76,738 pairs on the September 2026 sheet: the most expensive of the three rules, and still far inside the budget."
         }
       ],
       "comparisons": [
@@ -43,7 +46,7 @@
             ]
           },
           "term_frequency": true,
-          "description": "Surname, with the term-frequency adjustment on: agreeing on FOTHERGILL is far stronger evidence than agreeing on SMITH."
+          "description": "Surname. A rare surname counts for more than a common one, so agreeing on FOTHERGILL is stronger evidence than agreeing on SMITH."
         },
         {
           "id": "pc3",
@@ -51,7 +54,8 @@
           "splink_function": "cl.ExactMatch",
           "splink_args": {},
           "term_frequency": false,
-          "description": "Middle names. Only 4,788 of 13,310 person units carry one, so most pairs land on the null level and are neither helped nor punished."
+          "description": "Middle names. Most records carry none, so most pairs land on the missing-value level and are neither helped nor punished.",
+          "_measured": "4,788 of 13,310 person units carry a middle name."
         },
         {
           "id": "pc4",
@@ -73,18 +77,21 @@
       "blocking_rules": [
         {
           "id": "ob1",
-          "description": "Same cleaned postcode. 6,033 pairs. It was 90,730 until the placeholder postcodes were nullified: 412 units all carried ZZ0 0ZZ, which alone made 84,666 of those pairs.",
-          "sql": "l.postcode_clean = r.postcode_clean"
+          "description": "Same cleaned postcode.",
+          "sql": "l.postcode_clean = r.postcode_clean",
+          "_measured": "6,033 pairs. It was 90,730 until the placeholder postcodes were made missing: 412 units all carried ZZ0 0ZZ, which alone made 84,666 of them."
         },
         {
           "id": "ob2",
-          "description": "Same padded company number. 1,209 pairs \u2014 nearly everything this rule finds, the exact keys have already merged.",
-          "sql": "l.company_number_clean = r.company_number_clean"
+          "description": "Same padded company number. Nearly everything this rule finds, the match keys have already put together.",
+          "sql": "l.company_number_clean = r.company_number_clean",
+          "_measured": "1,209 pairs on the September 2026 sheet."
         },
         {
           "id": "ob3",
-          "description": "Same first word of the core name and same postcode district. Rescues a renamed or re-suffixed organisation at one address. 3,955 pairs.",
-          "sql": "l.name_first_token = r.name_first_token AND l.postcode_district = r.postcode_district"
+          "description": "Same first word of the core name and same postcode district. This rescues an organisation that was renamed or re-suffixed at one address.",
+          "sql": "l.name_first_token = r.name_first_token AND l.postcode_district = r.postcode_district",
+          "_measured": "3,955 pairs on the September 2026 sheet."
         }
       ],
       "comparisons": [
@@ -136,7 +143,7 @@
           "splink_function": "cl.ExactMatch",
           "splink_args": {},
           "term_frequency": false,
-          "description": "The suffix the cleaning split off \u2014 LTD, LLP, PLC. Weak, and mainly separates a company from a union of the same name."
+          "description": "The suffix the cleaning split off — LTD, LLP, PLC. Weak, and mainly separates a company from a union of the same name."
         }
       ],
       "em_blocking_rules": [

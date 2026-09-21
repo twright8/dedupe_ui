@@ -124,7 +124,7 @@
       ]
     },
     "placeholder_postcodes": {
-      "description": "Postcodes that stand for 'not known' rather than a place. ZZ0 0ZZ is on 729 donation rows and 730 records; the rest are typed placeholders. Left in, one of them would block 412 organisation units together and read as an address agreement.",
+      "description": "Postcodes that stand for 'not known' rather than a place. Left in, one of them would put hundreds of unrelated organisations in one block and read as an address agreement.",
       "tokens": [
         "ZZ0 0ZZ",
         "ZZ1 1ZZ",
@@ -132,12 +132,13 @@
         "XX1 1XX",
         "AA0 0AA",
         "AA1 1AA"
-      ]
+      ],
+      "_measured": "ZZ0 0ZZ is on 729 donation rows and 730 records; the rest are typed placeholders. ZZ0 0ZZ alone would block 412 organisation units together."
     }
   },
   "lookups": {
     "nicknames": {
-      "description": "Diminutives and spelling variants that point at one canonical forename. Ported from the deduping engine. Only add a nickname that is unambiguous — CHRIS and ALEX are deliberately absent because they are gender-ambiguous.",
+      "description": "Diminutives and spelling variants that point at one canonical forename. Only add a nickname that is unambiguous — CHRIS and ALEX are deliberately absent because they do not tell you the gender.",
       "fallback": "passthrough",
       "rows": [
         {
@@ -954,7 +955,7 @@
     {
       "id": "k4",
       "name": "Trade union: same name",
-      "description": "A trade union is settled by its status and its name (D13c), so unions sharing a cleaned core name are the same union. The condition keeps the key away from every other kind of organisation, where a shared name settles nothing. The size guard sits in the gap the data leaves: the largest group this key merges has 159 records, and the eight household names above it — UNISON, GMB, CWU, AMICUS, USDAW, TGWU, Unite and Community — are held for one human confirmation instead of merging unseen.",
+      "description": "A trade union is settled by its status and its name (D13c), so unions sharing a cleaned core name are the same union. The condition keeps the key away from every other kind of organisation, where a shared name settles nothing. The size guard sits in the gap the data leaves.",
       "track": "organisation",
       "tier": 3,
       "when": [
@@ -972,7 +973,8 @@
       "guards": {
         "max_group_size": 200
       },
-      "on_guard_fail": "review"
+      "on_guard_fail": "review",
+      "_measured": "The largest group this key merges has 159 records. The eight household names above it — UNISON, GMB, CWU, AMICUS, USDAW, TGWU, Unite and Community — are held for one person to confirm instead of merging unseen."
     }
   ],
   "vetoes": [

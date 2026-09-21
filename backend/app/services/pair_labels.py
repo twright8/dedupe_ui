@@ -19,11 +19,11 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from app import vocabulary
 from app.db import query_db, write_db
 
-VERDICTS = ("TRUE", "FALSE")
-PROVENANCES = ("manual", "bulk_range", "llm", "import", "cluster_merge",
-               "cluster_split")
+VERDICTS = vocabulary.ANSWERS
+PROVENANCES = vocabulary.LABEL_PROVENANCES
 # What a reviewer's own screen may send on a single pair. `llm` and `import` are
 # written by the machine; the two cluster provenances come from a whole-group
 # decision, which has an endpoint of its own.
@@ -96,7 +96,8 @@ def normalise_verdict(value) -> str:
     verdict = str(value or "").strip().upper()
     if verdict not in VERDICTS:
         raise LabelError(
-            f"is_match must be TRUE or FALSE, not {value!r}"
+            "The answer must be Match or Not a match. The API carries those as "
+            f"TRUE and FALSE; it was given {value!r}."
         )
     return verdict
 
@@ -535,7 +536,14 @@ def test_set(db_path: str, track: str | None = None) -> dict:
     return {
         "track": track,
         "total": int(row["held_out"]),
+        # The API keeps TRUE and FALSE (docs/DESIGN.md D21). `by_answer` is the
+        # same two numbers under the words a reviewer is shown, so no screen has
+        # to know that TRUE means Match.
         "by_verdict": {"TRUE": int(row["t"]), "FALSE": int(row["f"])},
+        "by_answer": {
+            vocabulary.ANSWER["TRUE"]["label"]: int(row["t"]),
+            vocabulary.ANSWER["FALSE"]["label"]: int(row["f"]),
+        },
         "training": int(row["training"]),
         "designatable": int(row["designatable"]),
     }

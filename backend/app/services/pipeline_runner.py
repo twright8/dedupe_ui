@@ -15,19 +15,12 @@ from typing import Any
 
 from app.db import query_db, write_db
 from app.profiles.base import LoadOptions
-from app.pipeline import gbt_model
 from app.services.audit_logger import log_event
 from app.services.config_manager import get_version
-from app.services.label_applier import apply_labels
-from app.services import run_lock
+from app.services import bucketing_history, run_lock, run_manifest
 
 logger = logging.getLogger(__name__)
 
-# Fallback bucketing lines for the CALIBRATED GBT score (0..1), used only when a run has
-# no held-out eval set to derive them from (gbt_train.derive_gbt_thresholds). Re-exported
-# by routers.model so the apply endpoint and the in-band auto-apply agree on one default.
-GBT_DEFAULT_HIGH = 0.80
-GBT_DEFAULT_REVIEW = 0.10
 
 
 def _build_error_detail(exc: Exception) -> str | None:
@@ -159,6 +152,15 @@ def _write_config_files(
 # ---------------------------------------------------------------------------
 # Count extraction
 # ---------------------------------------------------------------------------
+
+
+def _run_settings(config_dir: str) -> dict:
+    """The linkage settings a run froze into its own config folder."""
+    try:
+        return json.loads(
+            (Path(config_dir) / "linkage_settings.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 def _read_csv_row_count(path: Path) -> int:
@@ -299,193 +301,6 @@ def _collect_counts(run_dir: Path) -> dict:
     }
 
 
-def refresh_counts_after_labels(
-    db_path: str, run_dir: str, run_id: str, label_result: dict
-) -> dict:
-    """Recompute and persist a run's counts after labels were re-applied on their own.
-
-    ``apply_labels`` rewrites merged_dataset.csv in place, but the standalone
-    apply-labels endpoint never wrote counts_json back — so the UI kept showing
-    pre-label numbers next to post-label data. This closes that gap.
-
-    Keys ``_collect_counts`` cannot derive from the CSVs (decision provenance, the
-    pre-label baseline, library size) are carried over from the stored counts.
-    """
-    from app.services import run_counts
-
-    return run_counts.merge(db_path, run_id, {
-        **_collect_counts(Path(run_dir)),
-        "labels_applied": label_result.get("applied", 0),
-        "labels_unmatched": label_result.get("unmatched", 0),
-    })
-
-
-# ---------------------------------------------------------------------------
-# GBT decision: collapse guard + in-band application
-# ---------------------------------------------------------------------------
-
-
-def _distinct_gbt_scores(run_dir: str) -> int:
-    """Count distinct CALIBRATED GBT scores across a run's scored pairs. A near-bimodal
-    collapse (the R failure) shows up as a tiny count — e.g. 2 for 0.001/0.999. Returns 0
-    when the run has not been GBT-scored yet."""
-    import pandas as pd
-
-    p = Path(run_dir) / "linkage_scored.parquet"
-    if not p.exists():
-        return 0
-    try:
-        df = pd.read_parquet(p, columns=["gbt_score"])
-    except Exception:
-        return 0
-    if "gbt_score" not in df.columns or len(df) == 0:
-        return 0
-    return int(df["gbt_score"].round(6).nunique())
-
-
-def _collapse_reason(review_before: int, review_after: int, distinct_scores: int):
-    """If applying the GBT looks like the R collapse failure, return a human-readable
-    reason; else None. Two blind spots the old 'band emptied to 0' check missed:
-      * near-bimodal scores regardless of band counts — catches a first-ever apply where
-        the Splink baseline review band was already 0 (0 -> 0 slips past an emptied check);
-      * a band that shrinks to a tiny remnant (e.g. 197 -> 1), not just to exactly 0."""
-    if 0 < distinct_scores <= 3:
-        return (f"the GBT collapsed to a near-bimodal score "
-                f"({distinct_scores} distinct value(s) across all scored pairs)")
-    if review_before > 0:
-        floor = max(1, round(0.05 * review_before))
-        if review_after < floor:
-            return (f"the review band collapsed from {review_before} to {review_after} "
-                    f"(below the {floor}-pair safety floor)")
-    return None
-
-
-def _decision_model_from_settings(settings: dict) -> tuple[str, int | None]:
-    """('gbt:<version>' | 'gbt' | 'splink', version) from a run's linkage_settings snapshot."""
-    if settings.get("gbt_score_column"):
-        v = settings.get("gbt_model_version")
-        return (f"gbt:{v}" if v is not None else "gbt"), (int(v) if v is not None else None)
-    return "splink", None
-
-
-def _load_run_settings(config_dir: str) -> tuple[Path, dict]:
-    p = Path(config_dir) / "linkage_settings.json"
-    return p, json.loads(p.read_text(encoding="utf-8"))
-
-
-def _enable_gbt_bucketing(config_dir: str, version: int, threshold_high: float, threshold_review: float) -> None:
-    """Turn on GBT bucketing in a run's snapshot, preserving the pre-apply Splink
-    thresholds so a later revert can restore them."""
-    path, s = _load_run_settings(config_dir)
-    s.setdefault("splink_threshold_high", s.get("match_probability_threshold_high"))
-    s.setdefault("splink_threshold_review", s.get("match_probability_threshold_review"))
-    s["gbt_score_column"] = "gbt_score"
-    s["gbt_enabled"] = True
-    s["gbt_model_version"] = version
-    s["match_probability_threshold_high"] = threshold_high
-    s["match_probability_threshold_review"] = threshold_review
-    path.write_text(json.dumps(s, indent=2), encoding="utf-8")
-
-
-def _disable_gbt_bucketing(config_dir: str) -> None:
-    """Revert a run's snapshot to Splink bucketing, restoring the preserved Splink lines."""
-    path, s = _load_run_settings(config_dir)
-    if "splink_threshold_high" in s:
-        s["match_probability_threshold_high"] = s["splink_threshold_high"]
-    if "splink_threshold_review" in s:
-        s["match_probability_threshold_review"] = s["splink_threshold_review"]
-    s["gbt_score_column"] = ""
-    s["gbt_enabled"] = False
-    s["gbt_model_version"] = None
-    path.write_text(json.dumps(s, indent=2), encoding="utf-8")
-
-
-def _splink_review_band_count(run_dir: str, config_dir: str) -> int:
-    """Pairs whose raw Splink probability sits in the run's current review band — the
-    baseline the collapse guard compares the GBT-bucketed review count against. Read
-    BEFORE enabling GBT, while the snapshot thresholds are still Splink-scale."""
-    import pandas as pd
-
-    p = Path(run_dir) / "linkage_scored.parquet"
-    if not p.exists():
-        return 0
-    try:
-        _, s = _load_run_settings(config_dir)
-        high = float(s.get("match_probability_threshold_high"))
-        review = float(s.get("match_probability_threshold_review"))
-        prob = pd.to_numeric(pd.read_parquet(p, columns=["match_probability"])["match_probability"],
-                             errors="coerce")
-        return int(((prob >= review) & (prob < high)).sum())
-    except Exception:
-        return 0
-
-
-def _derive_gbt_thresholds_safe(db_path: str, run_dir: str) -> tuple[float, float]:
-    """Held-out-derived GBT bucket lines, or the fixed defaults when no eval set exists."""
-    try:
-        from app.pipeline.gbt_train import derive_gbt_thresholds
-
-        derived = derive_gbt_thresholds(db_path, run_dir)
-    except Exception:
-        derived = None
-    return derived or (GBT_DEFAULT_HIGH, GBT_DEFAULT_REVIEW)
-
-
-def apply_active_gbt_bucketing(
-    db_path: str,
-    run_dir: str,
-    config_dir: str,
-    run_id: str,
-    active_version: int,
-    progress_callback=None,
-) -> dict:
-    """Bucket a fresh run on the active GBT model, in-band, with the same collapse guard
-    as the manual /api/model/apply endpoint. Assumes Stage 2.5 already scored the pairs
-    with ``active_version``. Enables GBT bucketing, runs Stage 3 on the GBT score, and if
-    the guard trips falls back to Splink (re-runs Stage 3) rather than failing the run —
-    a collapsed model must never silently empty the review queue. Returns the decision.
-    """
-    from app.pipeline.stage_3_evaluate import run_stage_3
-
-    review_before = _splink_review_band_count(run_dir, config_dir)
-    gbt_high, gbt_review = _derive_gbt_thresholds_safe(db_path, run_dir)
-    _enable_gbt_bucketing(config_dir, active_version, gbt_high, gbt_review)
-    run_stage_3(run_dir=run_dir, config_dir=config_dir, progress_callback=progress_callback)
-
-    review_after = _read_csv_row_count(Path(run_dir) / "matches_for_review.csv")
-    distinct = _distinct_gbt_scores(run_dir)
-    reason = _collapse_reason(review_before, review_after, distinct)
-    if reason:
-        _disable_gbt_bucketing(config_dir)
-        run_stage_3(run_dir=run_dir, config_dir=config_dir, progress_callback=progress_callback)
-        warning = (f"Active GBT model v{active_version} was NOT applied to this run: {reason}. "
-                   "Fell back to Splink bucketing so the review queue is preserved.")
-        if progress_callback:
-            progress_callback("warning", {"stage": 2.5, "message": warning})
-        log_event(
-            db_path, user="system", kind="model",
-            description=f"Run {run_id}: active GBT v{active_version} collapse-guarded; reverted to Splink",
-            metadata={"run_id": run_id, "reason": reason, "review_before": review_before,
-                      "review_after": review_after, "distinct_scores": distinct},
-        )
-        return {"decision_model": "splink", "decision_version": None, "warning": warning,
-                "review_before": review_before, "review_after": review_after}
-
-    return {"decision_model": f"gbt:{active_version}", "decision_version": active_version,
-            "warning": None, "review_before": review_before, "review_after": review_after}
-
-
-def revert_run_to_splink(db_path: str, run_dir: str, config_dir: str, run_id: str) -> dict:
-    """Un-apply the GBT from a run: re-bucket on the preserved Splink thresholds and clear
-    the GBT flags. The inverse of a GBT apply/auto-apply. Returns the refreshed counts."""
-    _, s = _load_run_settings(config_dir)
-    splink_high = s.get("splink_threshold_high", s.get("match_probability_threshold_high"))
-    splink_review = s.get("splink_threshold_review", s.get("match_probability_threshold_review"))
-    return rebucket_run(
-        db_path, run_dir, config_dir, run_id=run_id,
-        threshold_high=splink_high, threshold_review=splink_review,
-        gbt_score_column="", score_with_gbt=False,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +374,12 @@ def start_run(
         ("running", now, "0", run_id),
     )
 
+    # What produced this run, written down before it runs: the input file and
+    # its hash, the code version, the config version, the lines in force and
+    # the library versions (docs/PROVENANCE.md). It never fails a run.
+    _write_start_manifest(db_path, run_id, run_dir, config_row, input_path,
+                          threshold_high, threshold_review, now)
+
     with _run_lock:
         _active_run_id = run_id
 
@@ -582,6 +403,48 @@ def start_run(
     t.start()
 
     return run_id
+
+
+def _write_start_manifest(db_path, run_id, run_dir, config_row, input_path,
+                          threshold_high, threshold_review, started_at):
+    """Build ``run_manifest.json`` and copy its headline fields onto the run row."""
+    try:
+        row = query_db(db_path, "SELECT * FROM runs WHERE id = ?", (run_id,))
+        run = dict(row[0]) if row else {}
+        settings = json.loads((config_row or {}).get("linkage_settings") or "{}")
+        uploaded = query_db(
+            db_path,
+            "SELECT completed_at FROM upload_sessions WHERE status = 'complete' "
+            "AND (filename = ? OR stored_filename = ?) "
+            "ORDER BY completed_at DESC LIMIT 1",
+            (run.get("input_filename") or "", Path(input_path).name),
+        )
+        manifest = run_manifest.build(
+            run_id=run_id,
+            run_dir=run_dir,
+            config_version=run.get("config_version"),
+            input_path=input_path,
+            thresholds={
+                "accept_line": threshold_high,
+                "review_line": threshold_review,
+                "lowest_score_kept": settings.get(
+                    "match_probability_threshold_candidate"),
+            },
+            triggered_by=run.get("triggered_by") or "",
+            uploaded_at=(uploaded[0]["completed_at"] if uploaded else None),
+            started_at=started_at,
+        )
+        run_manifest.write(run_dir, manifest)
+        write_db(
+            db_path,
+            "UPDATE runs SET code_version = ?, input_sha256 = ?, input_bytes = ?, "
+            "input_uploaded_at = ? WHERE id = ?",
+            (manifest["code_version"], manifest["input"].get("sha256"),
+             manifest["input"].get("size_bytes"), manifest["input"].get("uploaded_at"),
+             run_id),
+        )
+    except Exception:
+        logger.exception("Could not write the run manifest for %s", run_id)
 
 
 def _run_pipeline(
@@ -743,6 +606,15 @@ def _run_stages(
             labels=labels,
             progress_callback=progress_callback,
         ))
+        # Which lines put these pairs in their buckets. One entry per change,
+        # not three numbers on every one of a hundred million rows.
+        bucketing_history.append(
+            run_dir, "scored",
+            accept_line=threshold_high, review_line=threshold_review,
+            lowest_score_kept=_run_settings(config_dir).get(
+                "match_probability_threshold_candidate"),
+            scorer="splink", counts=counts, who="system",
+        )
         counts.update(run_stage_4_cluster(
             run_dir=run_dir,
             config_dir=config_dir,
@@ -781,6 +653,14 @@ def _run_stages(
              threshold_review, run_id),
         )
 
+        try:
+            run_manifest.finish(run_dir, counts=counts,
+                                row_count=counts.get("records_total"))
+            write_db(db_path, "UPDATE runs SET input_rows = ? WHERE id = ?",
+                     (counts.get("records_total"), run_id))
+        except Exception:
+            logger.exception("Could not close the run manifest for %s", run_id)
+
         progress_callback("complete", {"counts": counts})
 
         log_event(
@@ -817,77 +697,6 @@ def _needs_run_lock(fn):
     return wrapper
 
 
-@_needs_run_lock
-def rebucket_run(
-    db_path: str,
-    run_dir: str,
-    config_dir: str,
-    run_id: str,
-    threshold_high: float | None = None,
-    threshold_review: float | None = None,
-    gbt_score_column: str | None = None,
-    score_with_gbt: bool = False,
-    gbt_model_version: int | None = None,
-    preserve_splink_baseline: bool = False,
-) -> dict:
-    """Re-bucket a completed run without re-running Splink, then re-apply labels.
-
-    Optionally re-scores with the GBT first (``score_with_gbt``) and/or updates
-    thresholds, the gbt_score_column flag and the decided model version in the run's
-    linkage_settings. ``preserve_splink_baseline`` stashes the pre-apply Splink
-    thresholds (once) so a later revert can restore them. Diagnostics are regenerated so
-    the histogram tells the truth about the current decision score. Label re-application
-    always runs last so human labels stay paramount. Returns the refreshed output counts.
-    """
-    from app.pipeline.stage_2_5_gbt import run_stage_2_5_gbt
-    from app.pipeline.stage_3_evaluate import run_stage_3
-
-    settings_path = Path(config_dir) / "linkage_settings.json"
-    settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    if preserve_splink_baseline:
-        settings.setdefault("splink_threshold_high", settings.get("match_probability_threshold_high"))
-        settings.setdefault("splink_threshold_review", settings.get("match_probability_threshold_review"))
-    if threshold_high is not None:
-        settings["match_probability_threshold_high"] = threshold_high
-    if threshold_review is not None:
-        settings["match_probability_threshold_review"] = threshold_review
-    if gbt_score_column is not None:
-        settings["gbt_score_column"] = gbt_score_column
-        settings["gbt_enabled"] = bool(gbt_score_column)
-        if not gbt_score_column:
-            settings["gbt_model_version"] = None
-    if gbt_model_version is not None:
-        settings["gbt_model_version"] = gbt_model_version
-    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-
-    if score_with_gbt:
-        run_stage_2_5_gbt(run_dir=run_dir, version=gbt_model_version)
-
-    # Regenerate diagnostics (Splink unchanged, but the histogram/threshold copy must
-    # reflect the current decision score after a GBT apply or a revert to Splink).
-    run_stage_3(run_dir=run_dir, config_dir=config_dir, generate_diagnostics=True)
-
-    # Model-only baseline before labels are re-applied (see _run_pipeline).
-    pre_label_counts = _collect_counts(Path(run_dir))
-    label_result = apply_labels(db_path, run_dir)
-
-    counts = _collect_counts(Path(run_dir))
-    counts["pre_labels"] = pre_label_counts
-    counts["labels_applied"] = label_result.get("applied", 0)
-    counts["labels_unmatched"] = label_result.get("unmatched", 0)
-    decision_model, decision_version = _decision_model_from_settings(settings)
-    counts["decision_model"] = decision_model
-    counts["decision_model_version"] = decision_version
-
-    th = settings.get("match_probability_threshold_high")
-    tr = settings.get("match_probability_threshold_review")
-    write_db(
-        db_path,
-        "UPDATE runs SET threshold_high = ?, threshold_review = ?, counts_json = ? WHERE id = ?",
-        (th, tr, json.dumps(counts), run_id),
-    )
-    return counts
-
 
 def rebucket_pairs(
     db_path: str,
@@ -896,12 +705,12 @@ def rebucket_pairs(
     run_id: str,
     threshold_high: float | None = None,
     threshold_review: float | None = None,
+    who: str = "",
 ) -> dict:
     """Move a scored run's bucket lines without re-running Splink.
 
-    The dedupe answer to ``rebucket_run``: stage 3 kept every pair down to the
-    candidate floor, so a new accept or review line is a re-read of
-    ``pairs.parquet``, not a rerun. The run's stored counts and thresholds move
+    Stage 3 keeps every pair down to the lowest score kept, so a new accept or
+    review line is a re-read of ``pairs.parquet``, not a rerun. The run's stored counts and thresholds move
     with it, so the screen never shows old numbers over new data.
     """
     from app.pipeline.dedupe.stage_3_score import rebucket
@@ -935,12 +744,33 @@ def rebucket_pairs(
     # (services/run_counts). The thresholds move in the same statement.
     from app.services import run_counts
 
-    return run_counts.merge(
+    counts = run_counts.merge(
         db_path, run_id,
         rebucket(run_dir, high, review, labels_frame(db_path)),
         extra_sql="threshold_high = ?, threshold_review = ?, ",
         extra_params=(high, review),
     )
+    state = _model_state(run_dir)
+    bucketing_history.append(
+        run_dir, "re-bucketed",
+        accept_line=high, review_line=review,
+        lowest_score_kept=settings.get("match_probability_threshold_candidate"),
+        scorer="model" if state else "splink",
+        model_version=state or None, counts=counts, who=who or "",
+    )
+    return counts
+
+
+def _model_state(run_dir: str) -> dict:
+    """``{track: version}`` for the models applied to this run, or ``{}``."""
+    try:
+        state = json.loads(
+            (Path(run_dir) / "model_state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    tracks = state.get("tracks") or {}
+    return {track: detail.get("version") for track, detail in tracks.items()
+            if isinstance(detail, dict) and detail.get("version") is not None}
 
 
 def _on_run_finished(db_path: str, data_dir: str) -> None:
@@ -1083,8 +913,8 @@ def recluster_run(db_path: str, run_dir: str, run_id: str) -> dict:
 
     from app.routers.runs import _normalize_counts
 
-    note = (f"{unscored} unit(s) were created by a split and have no scored pairs. "
-            "Rerun the pipeline to score them.") if unscored else None
+    note = (f"A reviewer's split made {unscored} new unit(s), and no pair has "
+            "scored them yet. Start the run again to score them.") if unscored else None
     return {
         "ok": True,
         "exact_groups_rebuilt": groups_rebuilt,

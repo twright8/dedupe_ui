@@ -60,7 +60,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.rules import engine  # noqa: E402
+from app.rules import engine
+from app.services import run_manifest  # noqa: E402
 
 DEFAULT_SOURCE = (
     "/home/tomwright/PycharmProjects/deduping/backend/data/source/pscs_individual.parquet"
@@ -269,6 +270,9 @@ def main(argv=None) -> int:
     meta = {
         "key": REFERENCE_KEY,
         "source": str(source),
+        # The source is overwritten in place from time to time, so its path is
+        # not an identity. The hash is (docs/TERMINOLOGY_AUDIT.md, gap 10).
+        "source_sha256": run_manifest.sha256_of(source),
         "profile": args.profile,
         "cleaning_steps": [
             {"id": s.get("id"), "op": s.get("op"), "description": s.get("description")}

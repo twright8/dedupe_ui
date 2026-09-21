@@ -86,15 +86,23 @@ def describe_columns(columns: list[str], derived: set[str] = frozenset()) -> lis
     """Label and type every column of a run's records, in frame order.
 
     A column the profile declares is described by the profile. Everything else
-    was written by a rule, whose target name is the only label there is — the
-    user chose it, so it is the honest one to show.
+    was written by a cleaning step, and its target name is the only name there
+    is — the user chose it. The raw name still goes out as ``key``, because a
+    rule names it, but the label is that name as a phrase: ``dob_year_clean``
+    reads "birth year" rather than itself (`docs/BACKEND_STRINGS.md` §4).
 
     A derived column is flagged with ``derived`` and still reports ``source:
     "cleaning"``: it is one of the columns the rules added, which is what the
     records table's toggle groups together.
     """
+    from app.services.pairs_reader import plain_column
+
     profile_columns = {c.key: c for c in get_profile().display_columns}
     described = []
+    # Two columns must never come out with one label, or the table would say
+    # the same thing about different evidence. A cleaning column whose phrase
+    # is already taken says "(cleaned)" instead.
+    used = {c.label for c in profile_columns.values() if c.key in set(columns)}
     for key in columns:
         declared = profile_columns.get(key)
         if declared is not None:
@@ -102,11 +110,18 @@ def describe_columns(columns: list[str], derived: set[str] = frozenset()) -> lis
                 "key": key, "label": declared.label,
                 "type": declared.type, "source": "profile", "derived": False,
             })
-        else:
-            described.append({
-                "key": key, "label": key, "type": "text", "source": "cleaning",
-                "derived": key in derived,
-            })
+            continue
+        phrase = plain_column(key)
+        label = phrase[:1].upper() + phrase[1:] if phrase else key
+        if label in used:
+            label = f"{label} (cleaned)"
+        if label in used:
+            label = key
+        used.add(label)
+        described.append({
+            "key": key, "label": label, "type": "text", "source": "cleaning",
+            "derived": key in derived,
+        })
     return described
 
 

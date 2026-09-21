@@ -10,6 +10,7 @@ import csv
 import io
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -17,13 +18,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app import duckdb_conn
+from app import duckdb_conn, vocabulary
 from app.auth import current_user
 from app.db import query_db, write_db
 from app.profiles import get_profile
 from app.registry import plan as registry_plan
+from app.registry import provenance as registry_provenance
 from app.registry import store as registry_store
-from app.services import clusters_reader, entities_reader, pair_labels
+from app.services import bucketing_history, clusters_reader, entities_reader
+from app.services import pair_labels, run_manifest
 from app.services.audit_logger import log_event
 
 router = APIRouter(tags=["entities"])
@@ -161,7 +164,9 @@ def save_decision(run_id: str, cluster_id: str, body: DecisionBody,
     if kind not in pair_labels.DECISION_KINDS:
         raise HTTPException(
             status_code=400,
-            detail=f"kind must be one of {', '.join(pair_labels.DECISION_KINDS)}",
+            detail=vocabulary.choice_error("kind", body.kind,
+                                           pair_labels.DECISION_KINDS,
+                                           "whether to merge or to split"),
         )
     if kind == "merge":
         # One representative per unit: the records inside a unit are already
@@ -233,7 +238,9 @@ def save_attribute(run_id: str, cluster_id: str, body: AttributeBody,
     if body.column not in columns:
         raise HTTPException(
             status_code=400,
-            detail=f"column must be one of {', '.join(columns) or '(none)'}",
+            detail=vocabulary.choice_error(
+                "column", body.column, columns,
+                "which value this tool settles for a whole entity"),
         )
     try:
         members = clusters_reader.cluster_members(run_dir, cluster_id)
@@ -488,19 +495,24 @@ def _plan_for(run_id: str) -> dict:
     return plan
 
 
+def _collisions(run_dir: str) -> dict:
+    """The run's ID-collision list, or an empty answer when it has none."""
+    report_path = entities_reader.report_path(run_dir)
+    if not report_path.is_file():
+        return {}
+    try:
+        return json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 @router.get("/api/runs/{run_id}/publish-preview")
 def publish_preview(run_id: str):
     """What publishing this run would change in the registry."""
     run = _run_or_404(run_id)
     plan = _plan_for(run_id)
     newer = registry_plan.newer_publication(_db_path(), run_id, run.get("started_at"))
-    report_path = entities_reader.report_path(_run_dir(run_id))
-    collisions = {}
-    if report_path.is_file():
-        try:
-            collisions = json.loads(report_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            collisions = {}
+    collisions = _collisions(_run_dir(run_id))
     latest = registry_store.latest_publication(_db_path())
     return {
         "run_id": run_id,
@@ -547,19 +559,31 @@ def publish(run_id: str, body: PublishBody | None = None,
         })
 
     plan = _plan_for(run_id)
-    result = registry_store.publish(_db_path(), run_id, plan,
-                                    published_by=user_name or "")
+    run_dir = _run_dir(run_id)
+    entities = pd.read_parquet(
+        entities_reader.entities_path(run_dir), columns=["record_id", "entity_id"]
+    )
+    # The join log and the collision list are written inside the same
+    # transaction as the entities, so the registry is never half-explained.
+    edges = registry_provenance.build_edges(
+        run_dir, Path(run_dir) / "config", _db_path(), run_id, entities,
+        config_version=run.get("config_version"),
+    )
+    result = registry_store.publish(
+        _db_path(), run_id, plan, published_by=user_name or "",
+        edges=edges, collisions=_collisions(run_dir).get("id_collision_examples") or [],
+    )
     write_db(_db_path(), "UPDATE runs SET label = COALESCE(label, ?) WHERE id = ?",
              ("published", run_id))
     log_event(
         _db_path(), user=user_name or "unknown", kind="publish",
         description=(f"Published run {run_id}: {plan['summary']['new']} new, "
                      f"{plan['summary']['kept']} kept, {plan['summary']['merged']} merged"),
-        metadata={"run_id": run_id, **plan["summary"]},
+        metadata={"run_id": run_id, **result["summary"]},
     )
     return {"ok": True, "run_id": run_id, "already": False,
             "published_at": result["published_at"],
-            "published_by": user_name or "", "summary": plan["summary"]}
+            "published_by": user_name or "", "summary": result["summary"]}
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +604,130 @@ def aliases_csv():
         writer.writerow({k: ("" if v is None else v) for k, v in row.items()})
     return Response(content=buffer.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": "attachment; filename=aliases.csv"})
+
+
+@router.get("/api/runs/{run_id}/entities/{entity_id}/provenance")
+def run_entity_provenance(run_id: str, entity_id: str,
+                          limit: int = Query(2000, ge=1, le=20000)):
+    """Why these records are one entity, read from this run's own files.
+
+    Two shapes of the same answer: ``steps`` is an ordered list a person can
+    read, weakest evidence first; ``edges`` is the structured join log the
+    steps were written from. `docs/ENTITIES_API.md` has an example.
+    """
+    run = _run_or_404(run_id)
+    run_dir = _run_dir(run_id)
+    path = entities_reader.entities_path(run_dir)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Run has no entities yet")
+
+    con = duckdb_conn.connect(Path(run_dir) / "duckdb_tmp")
+    try:
+        columns = {d[0] for d in con.execute(
+            "SELECT * FROM read_parquet(?) LIMIT 0", [str(path)]
+        ).description}
+        extra = ", ".join(
+            f'CAST("{name}" AS VARCHAR) AS "{name}"'
+            for name in ("entity_basis", "id_status") if name in columns
+        )
+        mine = con.execute(
+            f"SELECT CAST(record_id AS VARCHAR) AS record_id, "
+            f"CAST(entity_id AS VARCHAR) AS entity_id"
+            f"{', ' + extra if extra else ''} "
+            f"FROM read_parquet(?) WHERE CAST(entity_id AS VARCHAR) = ? "
+            f"ORDER BY record_id",
+            [str(path), str(entity_id)],
+        ).df()
+    finally:
+        con.close()
+
+    if not len(mine):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run {run_id} proposes no entity '{entity_id}'",
+        )
+
+    edges = [
+        dict(zip(registry_provenance.EDGE_COLUMNS, row))
+        for row in registry_provenance.build_edges(
+            run_dir, Path(run_dir) / "config", _db_path(), run_id, mine,
+            config_version=run.get("config_version"),
+        )
+    ][:limit]
+    members = [
+        {"record_id": row["record_id"],
+         "entity_basis": row.get("entity_basis"),
+         "entity_basis_label": _basis_label(row.get("entity_basis"))}
+        for row in mine.to_dict("records")
+    ]
+    id_status = next(
+        (row.get("id_status") for row in mine.to_dict("records") if row.get("id_status")),
+        None,
+    )
+    return {
+        "entity_id": str(entity_id),
+        "source": "run",
+        "run_id": run_id,
+        "config_version": run.get("config_version"),
+        "n_records": len(members),
+        "id_status": id_status,
+        "id_status_label": (vocabulary.ID_ORIGIN.get(str(id_status or "")) or {}).get("label"),
+        "question": vocabulary.PROVENANCE_QUESTION,
+        "precedence": vocabulary.PROVENANCE_PRECEDENCE,
+        "steps": registry_provenance.chain(edges, members, id_status, str(entity_id)),
+        "edges": edges,
+        "members": members,
+    }
+
+
+@router.get("/api/registry/entities/{entity_id}/provenance")
+def registry_entity_provenance(entity_id: str,
+                               limit: int = Query(2000, ge=1, le=20000)):
+    """Why these records are one entity, read from the registry alone.
+
+    This answer survives the deletion of the run folder, because publishing
+    wrote it down (`docs/PROVENANCE.md`). The shape is the same as the
+    run-scoped answer, with the publication that wrote it named.
+    """
+    try:
+        found = registry_store.entity_detail(_db_path(), entity_id)
+    except registry_store.RegistryError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    if found is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No entity '{entity_id}' in the registry")
+
+    resolved = found["entity_id"]
+    edges = registry_provenance.edges_of(_db_path(), resolved, limit=limit)
+    members = found["members"]
+    id_status = next((row.get("id_status") for row in members if row.get("id_status")),
+                     None)
+    runs = sorted({str(edge["run_id"]) for edge in edges if edge.get("run_id")})
+    return {
+        "entity_id": resolved,
+        "requested": found["requested"],
+        "redirected": found["redirected"],
+        "chain": found["chain"],
+        "source": "registry",
+        "created_run": found["created_run"],
+        "runs": runs,
+        "n_records": found["n_records"],
+        "id_status": id_status,
+        "id_status_label": (vocabulary.ID_ORIGIN.get(str(id_status or "")) or {}).get("label"),
+        "question": vocabulary.PROVENANCE_QUESTION,
+        "precedence": vocabulary.PROVENANCE_PRECEDENCE,
+        "steps": registry_provenance.chain(edges, members, id_status, resolved),
+        "edges": edges,
+        "members": members,
+        "attributes": found["attributes"],
+        "attribute_history": registry_store.attribute_history(_db_path(), resolved),
+        "id_collisions": registry_store.collisions_of(_db_path(), resolved),
+    }
+
+
+def _basis_label(value) -> str | None:
+    mapped = vocabulary.provenance_for("entity_basis", value)
+    return mapped["label"] if mapped else None
 
 
 @router.get("/api/registry/entities/{entity_id}")
@@ -634,6 +782,7 @@ def export(run_id: str, format: str = Query("xlsx"), scope: str = Query("proposa
 
     profile = get_profile()
     started = time.time()
+    publication = registry_store.publication(_db_path(), run_id)
     try:
         path = profile.export(run_dir, scope, format, {
             "raw": lambda: _raw_input(run),
@@ -644,13 +793,26 @@ def export(run_id: str, format: str = Query("xlsx"), scope: str = Query("proposa
             "counts": counts,
             "scope": scope,
             "input_name": run.get("input_filename"),
+            # What produced the run, and who is taking it away. Read once here
+            # so both profiles' exports say the same thing (docs/PROVENANCE.md).
+            "manifest": run_manifest.read(run_dir),
+            "bucketing": bucketing_history.current(run_dir),
+            "triggered_by": run.get("triggered_by"),
+            "exported_by": user_name or "unknown",
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "published_at": (publication or {}).get("published_at"),
         })
     except NotImplementedError:
         path = _default_export(run_dir, entities, format)
     log_event(
         _db_path(), user=user_name or "unknown", kind="export",
-        description=f"Exported run {run_id} ({scope}, {format})",
+        description=(f"Downloaded the export of run {run_id} — "
+                     f"{'the published entity IDs' if scope == 'published' else 'this run\'s proposal'}"
+                     f", as {format}"),
         metadata={"run_id": run_id, "scope": scope, "format": format,
+                  "filename": path.name,
+                  "size_bytes": path.stat().st_size if path.is_file() else None,
+                  "published": bool(publication),
                   "seconds": round(time.time() - started, 1)},
     )
     return FileResponse(path=str(path), filename=path.name)

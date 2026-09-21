@@ -15,13 +15,13 @@ from app.routers.audit import router as audit_router
 from app.routers.config import router as config_router
 from app.routers.entities import router as entities_router
 from app.routers.pair_labels import router as labels_router
-from app.routers.model import router as model_router
 from app.routers.model_track import router as model_track_router
 from app.routers.notes import router as notes_router
 from app.routers.pipeline import router as pipeline_router
 from app.routers.profile import router as profile_router
 from app.routers.runs import router as runs_router
 from app.routers.uploads import router as uploads_router
+from app.routers.vocabulary import router as vocabulary_router
 from app.services.config_manager import get_current, save_version
 
 logger = logging.getLogger(__name__)
@@ -123,15 +123,13 @@ app.include_router(audit_router)
 app.include_router(config_router)
 app.include_router(entities_router)
 app.include_router(labels_router)
-app.include_router(model_router)
-# After the legacy router, so its fixed paths (/api/model/eval-set, /train) keep
-# matching first; everything of the shape /api/model/{track}/... lands here.
 app.include_router(model_track_router)
 app.include_router(notes_router)
 app.include_router(pipeline_router)
 app.include_router(profile_router)
 app.include_router(runs_router)
 app.include_router(uploads_router)
+app.include_router(vocabulary_router)
 
 @app.get("/api/health")
 def health():

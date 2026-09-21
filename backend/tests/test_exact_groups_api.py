@@ -244,7 +244,8 @@ class TestGroupsAPI:
 
         assert item == {
             "group_id": "X-1", "track": "organisation", "status": "merged",
-            "guard": None, "key_ids": ["k1", "k2"], "size": 2, "n_labelled": 2,
+            "guard": None,
+            "guard_text": None, "key_ids": ["k1", "k2"], "size": 2, "n_labelled": 2,
             "existing_ids": ["600"], "agreement": "consistent",
             "names": ["Acme Limited", "Acme Ltd"],
             "priority": {"total_value": 150.0},

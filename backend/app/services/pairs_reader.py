@@ -12,13 +12,14 @@ written out in ``docs/PAIRS_API.md``.
 
 import json
 import math
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import duckdb
 
-from app import duckdb_conn
+from app import duckdb_conn, vocabulary
 
 from app.profiles import get_profile
 from app.services.records_reader import describe_columns
@@ -41,10 +42,10 @@ DEFAULT_BINS = 50
 MAX_BINS = 200
 
 TRACKS = ("person", "organisation")
-BUCKETS = ("accept", "review", "reject")
+BUCKETS = vocabulary.BUCKETS
 # `model` joins the three when a graded model is what put the pair in its bucket
 # (docs/MODEL.md, stage 3b), and `veto` when a pair rule did (RULESET.md).
-DECIDED_BY = ("score", "import", "human", "model", "veto")
+DECIDED_BY = vocabulary.DECIDED_BY
 IMPORT_STATES = ("agrees", "disagrees", "unknown")
 HELD_STATES = ("hide", "only")
 LABELLED_STATES = ("yes", "no")
@@ -649,8 +650,112 @@ def comparison_levels(run_dir: str, track: str) -> dict:
     return result
 
 
-def _explain(item: dict, levels: dict) -> list[dict]:
-    """Per comparison, which agreement level this pair reached and what it was worth."""
+#: Suffixes a cleaning step adds that say nothing a reader needs: the value is
+#: the same thing, tidied. Anything else — ``_metaphone``, ``_district``,
+#: ``_sorted`` — tells two columns apart and has to stay in the phrase.
+_NEUTRAL_SUFFIXES = (" clean", " std", " padded")
+
+#: Phrases that read badly as words, with what to say instead.
+_COLUMN_PHRASES = (
+    ("forename canon", "standard forename"),
+    ("dob year", "birth year"),
+    ("dob month", "birth month"),
+    ("dob day", "birth day"),
+    ("dob", "date of birth"),
+    ("name tokens sorted", "name words"),
+    ("name tokens", "name words"),
+    ("name core", "core name"),
+    ("name first token", "first word of the name"),
+    ("surname metaphone", "surname sound"),
+    ("forename metaphone", "forename sound"),
+    ("metaphone", "sound"),
+    ("forename initial", "forename initial"),
+)
+
+
+def plain_column(column: str) -> str:
+    """A cleaned column name as a phrase: ``dob_year_clean`` -> ``birth year``.
+
+    The Review screen printed the raw name — "Equal dob_year_clean", "Exact
+    match on forename_canon" — which is the engine's vocabulary, not a
+    reviewer's (docs/BACKEND_STRINGS.md §4).
+
+    Two columns must not come out with one phrase, or the screen would say the
+    same thing about different evidence. ``surname`` and ``surname_metaphone``
+    are "surname" and "surname sound", never both "surname".
+    """
+    text = str(column or "").replace("_", " ").strip().lower()
+    for suffix in _NEUTRAL_SUFFIXES:
+        if text.endswith(suffix):
+            text = text[: -len(suffix)]
+            break
+    for phrase, plain in _COLUMN_PHRASES:
+        if text == phrase:
+            return plain
+        if text.startswith(phrase + " ") or text.endswith(" " + phrase):
+            text = text.replace(phrase, plain)
+            break
+    return text.strip() or str(column)
+
+
+def column_labels(run_dir: str, track: str) -> dict[str, str]:
+    """``{column: label}`` from the run's own comparisons, where one is named."""
+    path = Path(run_dir) / "config" / "linkage_settings.json"
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    block = ((settings.get("tracks") or {}).get(track) or {})
+    labels = {}
+    for comparison in block.get("comparisons") or []:
+        column = comparison.get("column")
+        if not column:
+            continue
+        labels[column] = comparison.get("label") or plain_column(column)
+    return labels
+
+
+def plain_level_label(column: str, raw_label, label: str | None = None) -> str:
+    """One agreement level in plain words, with no cleaned column name in it."""
+    name = label or plain_column(column)
+    text = str(raw_label or "").strip()
+    lowered = text.lower()
+    if not text:
+        return name[:1].upper() + name[1:]
+    if lowered.startswith("all other"):
+        return f"{name[:1].upper()}{name[1:]}: neither side is close enough to count"
+    if lowered.startswith("null") or " is null" in lowered:
+        return f"{name[:1].upper()}{name[1:]} is missing on at least one side"
+
+    # Any raw column name inside the engine's own label is replaced by the
+    # plain one, however the engine phrased it.
+    text = re.sub(re.escape(column), name, text, flags=re.IGNORECASE)
+    text = re.sub(r"^exact match on\s+", "Same ", text, flags=re.IGNORECASE)
+    text = re.sub(r"^exact match\b", f"Same {name}", text, flags=re.IGNORECASE)
+    text = re.sub(r"^equal\s+", "Same ", text, flags=re.IGNORECASE)
+    # A string-distance level names its measure and its cut-off. Neither means
+    # anything to a reviewer; "a close spelling" does.
+    text = re.sub(
+        r"^[\w-]+ (?:distance|similarity) (?:of )?(.+?) *(?:>=|>|≥) *([\d.]+)$",
+        lambda m: f"{m.group(1)} is a close spelling", text, flags=re.IGNORECASE)
+    # "within 1" on a year or a month is within one of those.
+    for unit in ("year", "month", "day"):
+        if name.endswith(unit):
+            text = re.sub(rf"within (\d+)$",
+                          lambda m: f"within {m.group(1)} "
+                                    f"{unit}{'' if m.group(1) == '1' else 's'}",
+                          text)
+            break
+    return text[:1].upper() + text[1:]
+
+
+def _explain(item: dict, levels: dict, labels: dict | None = None) -> list[dict]:
+    """Per comparison, which agreement level this pair reached and what it was worth.
+
+    ``label`` is the level in plain words. ``engine_label`` keeps what Splink
+    called it, because a diagnostic screen and a bug report both want it.
+    """
+    labels = labels or {}
     explanation = []
     for column, gamma in item["gammas"].items():
         # The two tracks share one pairs file, so a person pair carries null
@@ -659,10 +764,13 @@ def _explain(item: dict, levels: dict) -> list[dict]:
             continue
         by_gamma = levels.get(column) or {}
         level = by_gamma.get(int(gamma))
+        engine_label = (level or {}).get("label")
         explanation.append({
             "column": column,
+            "column_label": labels.get(column) or plain_column(column),
             "gamma": _json_safe(gamma),
-            "label": (level or {}).get("label"),
+            "label": plain_level_label(column, engine_label, labels.get(column)),
+            "engine_label": engine_label,
             "match_weight": (level or {}).get("match_weight"),
             "m_probability": (level or {}).get("m_probability"),
             "u_probability": (level or {}).get("u_probability"),
@@ -787,7 +895,10 @@ def get_pair(run_dir: str, pair_id: str, labels=None) -> dict | None:
         "left_truncated": left_events_cut, "right_truncated": right_events_cut,
     }
     item["event_columns"] = event_columns()
-    item["explanation"] = _explain(item, comparison_levels(run_dir, item["track"]))
+    item["explanation"] = _explain(
+        item, comparison_levels(run_dir, item["track"]),
+        column_labels(run_dir, item["track"]),
+    )
     item["model_explanation"] = model_explanation(run_dir, left_id, right_id,
                                                   item["track"])
     item["columns"] = describe_columns(unit_columns)
@@ -937,6 +1048,9 @@ def get_histogram(run_dir: str, track: str | None = None, bins: int = DEFAULT_BI
     return {
         "track": track, "bins": bins, "edges": edges,
         "score_column": MODEL_SCORE_COLUMN if has_model else "match_probability",
+        # The field name is a column; the label is what a reader is shown
+        # (docs/GLOSSARY.md: "model score" and "Splink score").
+        "score_column_label": "Model score" if has_model else "Splink score",
         "by_score_column": _series(model_rows) if has_model else None,
         # The same four model keys the run's counts carry, so the threshold
         # panel can draw the lines the pairs were actually bucketed on without a

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from app.auth import current_user
 from app.db import query_db, write_db
+from app.services.audit_logger import log_event
 from app.services.html_sanitizer import sanitize_html
 
 router = APIRouter(prefix="/api/notes", tags=["notes"])
@@ -51,6 +52,7 @@ def get_methodology():
 @router.put("/methodology")
 def put_methodology(body: NotesBody, who: str = Depends(current_user)):
     clean = sanitize_html(body.content)
+    before = _read(_METHODOLOGY_KEY)
     write_db(
         _db_path(),
         """INSERT INTO app_settings (key, value, updated_at, updated_by)
@@ -60,5 +62,14 @@ def put_methodology(body: NotesBody, who: str = Depends(current_user)):
                updated_at = excluded.updated_at,
                updated_by = excluded.updated_by""",
         (_METHODOLOGY_KEY, clean, who),
+    )
+    # The notes explain the method to everyone who reads a review screen, so a
+    # change to them is a change to the method (docs/TERMINOLOGY_AUDIT.md,
+    # gap 9). `app_settings` keeps no history; the audit log does.
+    log_event(
+        _db_path(), user=who or "unknown", kind="config",
+        description="Saved the methodology notes",
+        metadata={"key": _METHODOLOGY_KEY, "characters": len(clean),
+                  "was_characters": len(before.get("content") or "")},
     )
     return _read(_METHODOLOGY_KEY)

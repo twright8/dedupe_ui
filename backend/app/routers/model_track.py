@@ -194,6 +194,7 @@ def train_model(track: str, body: TrainRequest, user: str = Depends(current_user
         raise HTTPException(status_code=400, detail="Run has no scored pairs yet")
     try:
         job = jobs.start(track, run_dir, _db_path(), seed=body.seed, note=body.note,
+                         who=user or "unknown",
                          run_id=body.run_id, profile=get_profile())
     except jobs.JobConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

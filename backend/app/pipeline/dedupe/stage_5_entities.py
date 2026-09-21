@@ -35,7 +35,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from app import duckdb_conn
+from app import duckdb_conn, vocabulary
 from app.pipeline.dedupe import units as units_module
 from app.pipeline.dedupe.stage_1_clean import RECORDS_FILENAME
 from app.pipeline.dedupe.stage_4_cluster import BASIS_ORDER, CLUSTERS_FILENAME
@@ -47,11 +47,11 @@ ENTITY_REPORT_FILENAME = "entity_report.json"
 STAGE = 5
 STAGE_NAME = "entities"
 
-BASES = ("single", "exact_key", "import", "score", "human")
-ATTRIBUTE_BASES = ("human", "rule", "majority", "raw", "tie")
+BASES = vocabulary.ENTITY_BASES
+ATTRIBUTE_BASES = vocabulary.ATTRIBUTE_BASES
 
 # How a proposed entity came by its ID.
-ID_STATUSES = ("new", "kept", "survivor", "minted_after_collision")
+ID_STATUSES = vocabulary.ID_STATUSES
 
 MAX_EXAMPLES = 20
 
@@ -292,16 +292,21 @@ def _unique_id(fallback: str, taken: set) -> str:
 
 def consensus(proposed: pd.DataFrame, records: pd.DataFrame, column: str,
               overrides: pd.DataFrame | None = None) -> pd.DataFrame:
-    """``entity_key``, ``value``, ``basis`` for one consensus column.
+    """``entity_key``, ``value``, ``basis``, ``rule_id``, ``tally`` for one column.
 
     In order: a value a **human** settled beats everything; then one a rule set;
     then the most frequent. A tie is left alone and flagged, because guessing
     between two equally supported statuses is exactly the decision a human
     should make — and once they have, this is where their answer comes back in.
+
+    ``rule_id`` names the derived-column rule that won, and ``tally`` shows how
+    the members voted when more than one value was in the running. Without
+    those two the entity says "a rule decided" or "most members agreed" and
+    cannot say which rule, or by how much (gap 6).
     """
     rule_column = f"{column}_rule"
     if column not in records.columns:
-        return pd.DataFrame(columns=["entity_key", "value", "basis"])
+        return pd.DataFrame(columns=CONSENSUS_COLUMNS)
 
     wanted = ["record_id", column] + ([rule_column] if rule_column in records.columns else [])
     joined = proposed[["record_id", "entity_key"]].merge(
@@ -335,6 +340,8 @@ def consensus(proposed: pd.DataFrame, records: pd.DataFrame, column: str,
 
     ruled = _winner(joined[joined["by_rule"]])
     plain = _winner(joined)
+    tally = _tally(joined, column)
+    rule_ids = _winning_rule_ids(joined, ruled, column, rule_column)
 
     result = plain.set_index("entity_key")
     ruled = ruled.set_index("entity_key")
@@ -359,8 +366,68 @@ def consensus(proposed: pd.DataFrame, records: pd.DataFrame, column: str,
 
     settled = pd.DataFrame({
         "entity_key": entities, "value": value.to_numpy(), "basis": basis.to_numpy(),
+        "rule_id": rule_ids.reindex(entities).to_numpy(),
+        "tally": tally.reindex(entities).to_numpy(),
     })
+    # A rule id belongs only to a value a rule set. A tally belongs only to a
+    # value the members voted on. Anything else would read as evidence it is not.
+    settled.loc[settled["basis"] != "rule", "rule_id"] = None
+    settled.loc[~settled["basis"].isin(("majority", "tie")), "tally"] = None
     return _apply_overrides(settled, proposed, column, overrides)
+
+
+#: What ``consensus`` returns, in order.
+CONSENSUS_COLUMNS = ("entity_key", "value", "basis", "rule_id", "tally")
+
+#: How many values a tally names. A column with more than a handful of values
+#: in one entity is a data problem, and the top few say so just as well.
+MAX_TALLY = 5
+
+
+def _tally(joined: pd.DataFrame, column: str) -> pd.Series:
+    """``{value: count}`` as JSON, for the entities where more than one value ran.
+
+    Entities where every member agrees are left out: the tally would say
+    nothing the value does not already say, and at PSC scale most entities are
+    one record.
+    """
+    counted = (
+        joined.dropna(subset=[column])
+        .groupby(["entity_key", column], sort=False).size().rename("n").reset_index()
+    )
+    if not len(counted):
+        return pd.Series(dtype="object")
+    contested = counted[
+        counted.groupby("entity_key", sort=False)["n"].transform("size") > 1
+    ]
+    if not len(contested):
+        return pd.Series(dtype="object")
+    top = (
+        contested.sort_values(["entity_key", "n", column],
+                              ascending=[True, False, True], kind="mergesort")
+        .groupby("entity_key", sort=False).head(MAX_TALLY)
+    )
+    escaped = (
+        top[column].astype(str)
+        .str.replace("\\", "\\\\", regex=False)
+        .str.replace('"', '\\"', regex=False)
+    )
+    pieces = '"' + escaped + '": ' + top["n"].astype(str)
+    joined_pieces = pieces.groupby(top["entity_key"].to_numpy()).agg(", ".join)
+    return "{" + joined_pieces + "}"
+
+
+def _winning_rule_ids(joined: pd.DataFrame, ruled: pd.DataFrame, column: str,
+                      rule_column: str) -> pd.Series:
+    """The id of the derived-column rule behind each rule-set value."""
+    if not len(ruled) or rule_column not in joined.columns:
+        return pd.Series(dtype="object")
+    rows = joined[joined["by_rule"]][["entity_key", column, rule_column]]
+    winners = ruled[["entity_key", "value"]].rename(columns={"value": column})
+    hit = rows.merge(winners, on=["entity_key", column], how="inner")
+    if not len(hit):
+        return pd.Series(dtype="object")
+    return hit.drop_duplicates(subset=["entity_key"]).set_index("entity_key")[rule_column]
 
 
 def _apply_overrides(settled: pd.DataFrame, proposed: pd.DataFrame, column: str,
@@ -380,8 +447,14 @@ def _apply_overrides(settled: pd.DataFrame, proposed: pd.DataFrame, column: str,
     # the first is the answer; a later rerun that splits them keeps each part's.
     chosen = joined.drop_duplicates(subset=["entity_key"]).set_index("entity_key")["value"]
     settled = settled.set_index("entity_key")
-    settled.loc[settled.index.isin(chosen.index), "value"] = chosen
-    settled.loc[settled.index.isin(chosen.index), "basis"] = "human"
+    mine_rows = settled.index.isin(chosen.index)
+    settled.loc[mine_rows, "value"] = chosen
+    settled.loc[mine_rows, "basis"] = "human"
+    # A person's answer is the evidence. The rule and the vote it overrode are
+    # not why this value stands, so they are not reported beside it.
+    for extra in ("rule_id", "tally"):
+        if extra in settled.columns:
+            settled.loc[mine_rows, extra] = None
     return settled.reset_index()
 
 
@@ -420,6 +493,8 @@ def build_entities(
         settled_index = settled.set_index("entity_key")
         frame[f"{column}_entity"] = frame["entity_key"].map(settled_index["value"])
         frame[f"{column}_entity_basis"] = frame["entity_key"].map(settled_index["basis"])
+        frame[f"{column}_entity_rule"] = frame["entity_key"].map(settled_index["rule_id"])
+        frame[f"{column}_entity_tally"] = frame["entity_key"].map(settled_index["tally"])
 
     check_invariants(frame)
 
@@ -809,7 +884,7 @@ def _consensus_out_of_core(con, column: str, record_columns: list[str],
                            overrides: pd.DataFrame | None) -> pd.DataFrame:
     """One consensus column, settled from two narrow projections."""
     if column not in record_columns:
-        return pd.DataFrame(columns=["entity_key", "value", "basis"])
+        return pd.DataFrame(columns=CONSENSUS_COLUMNS)
     rule_column = f"{column}_rule"
     wanted = [column] + ([rule_column] if rule_column in record_columns else [])
     proposed = con.execute(
@@ -829,7 +904,9 @@ def _write_entities(con, out_path: Path, attributes: dict[str, pd.DataFrame]) ->
         con.register(f"s5_attr_{index}", settled)
         selects.append(
             f'a{index}.value AS "{column}_entity", '
-            f'a{index}.basis AS "{column}_entity_basis"'
+            f'a{index}.basis AS "{column}_entity_basis", '
+            f'a{index}.rule_id AS "{column}_entity_rule", '
+            f'a{index}.tally AS "{column}_entity_tally"'
         )
         joins.append(
             f"LEFT JOIN s5_attr_{index} a{index} ON a{index}.entity_key = p.entity_key"

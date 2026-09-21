@@ -266,6 +266,7 @@ def _label(env, a, b, verdict, provenance="manual"):
 
 def test_an_empty_test_set_reads_as_empty(env):
     body = env["client"].get("/api/model/person/test-set").json()
+    assert body.pop("by_answer") == {"Match": 0, "Not a match": 0}
     assert body == {"track": "person", "total": 0,
                     "by_verdict": {"TRUE": 0, "FALSE": 0},
                     "training": 0, "designatable": 0}
@@ -328,8 +329,10 @@ def test_the_test_set_is_per_track(env):
         == 10
 
 
-def test_the_legacy_model_endpoints_still_answer(env):
-    """`routers/model.py` owns the fixed paths under /api/model; this router owns
-    /api/model/{track}. The two must not shadow one another."""
-    assert env["client"].get("/api/model").status_code == 200
-    assert env["client"].get("/api/model/eval-set").status_code == 200
+def test_the_legacy_model_endpoints_are_gone(env):
+    """`routers/model.py` served the two-dataset tool. It is deleted (D21), and
+    this router now owns everything under /api/model."""
+    assert env["client"].get("/api/model").status_code == 404
+    # /api/model/eval-set now reads "eval-set" as a track name, and there is
+    # no such track.
+    assert env["client"].get("/api/model/eval-set").status_code == 400

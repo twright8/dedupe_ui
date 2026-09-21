@@ -83,7 +83,14 @@ Pairs whose two units sit in the same held group are flagged with that `held_gro
 
 Table `pair_labels`. One row per decision, append-only:
 
-`id, record_id_a, record_id_b, track, is_match ("TRUE" | "FALSE"), provenance ("manual" | "bulk_range" | "llm" | "import"), held_out (0 | 1), reviewer, notes, evidence_url, name_a, name_b, run_id, config_version, created_at, active, superseded_by`
+`id, record_id_a, record_id_b, track, is_match ("TRUE" | "FALSE"), provenance ("manual" | "bulk_range" | "llm" | "import" | "cluster_merge" | "cluster_split"), held_out (0 | 1), reviewer, notes, evidence_url, name_a, name_b, run_id, config_version, created_at, active, superseded_by, decision_id, decision_scope`
+
+`cluster_merge` and `cluster_split` are what a whole-cluster decision writes:
+one label per pair inside the cluster, all sharing one `decision_id`, so the
+decision can be shown, superseded or undone as a whole. On screen the two
+answers are **Match** and **Not a match**; the API keeps TRUE and FALSE. Every
+provenance maps onto the one ordered list in `GLOSSARY.md` through
+`app/vocabulary.PROVENANCE_MAP`.
 
 `evidence_url` holds a source link for a decision made on outside evidence, such as press reporting that confirms two donors are one person (D13a).
 

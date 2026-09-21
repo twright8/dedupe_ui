@@ -824,15 +824,49 @@ def test_the_export_gives_back_every_row_and_column_in_order(tmp_path):
     assert list(out["DonorName"]) == ["Ann Smith", "No id here", "Acme Ltd"]
     assert out.loc[0, "CompanyRegistrationNumber"] == "04250076 ?"
     assert out.loc[0, "EntityID"] == "500"
-    assert out.loc[0, "DonorStatusBasis"] == "raw"
+    # The basis columns keep their names and carry the canonical labels, so the
+    # file reads the way the screen does (docs/GLOSSARY.md).
+    assert out.loc[0, "EntityBasis"] == "On its own"
+    assert out.loc[0, "DonorStatusBasis"] == "Only member"
     # The dropped row keeps its place with the new cells blank.
     assert out.loc[1, "RecordID"] == ""
     assert out.loc[1, "EntityID"] == ""
     assert out.loc[2, "EntityID"] == "2"
+    assert out.loc[2, "EntityBasis"] == "Match key"
     assert out.loc[2, "DonorStatusStandardNew"] == "Company"
+    assert out.loc[2, "DonorStatusBasis"] == "Derived column rule"
 
 
-def test_the_xlsx_export_carries_three_sheets(tmp_path):
+def test_the_csv_export_carries_its_other_sheets_beside_it(tmp_path):
+    """A CSV has one sheet, so the run sheet and the guide go next to it."""
+    from app.profiles import donations_export
+
+    path = donations_export.write(tmp_path, "proposal", "csv", {
+        "raw": pd.DataFrame(ODD_ROWS), "entities": pd.DataFrame(),
+        "aliases": [{"retired_entity_id": "9", "survivor_entity_id": "500",
+                     "track": "person", "retired_run": "run_x",
+                     "retired_at": "2026-09-18"}],
+        "run_id": "run_x", "config_version": 2, "counts": {"entities_proposed": 2},
+        "scope": "proposal", "input_name": "donations.csv",
+        "exported_by": "Tom", "exported_at": "2026-09-21T10:00:00+00:00",
+    })
+    beside = {p.name for p in path.parent.iterdir()}
+    assert "export_proposal_run_sheet.txt" in beside
+    assert "export_proposal_how_to_read.txt" in beside
+    assert "export_proposal_retired_ids.csv" in beside
+
+    sheet = (path.parent / "export_proposal_run_sheet.txt").read_text(encoding="utf-8")
+    assert "Exported by: Tom" in sheet
+    assert "Entities proposed: 2" in sheet
+    assert "entitiesProposed" not in sheet
+    guide = (path.parent / "export_proposal_how_to_read.txt").read_text(encoding="utf-8")
+    assert "Earlier grouping" in guide
+    retired = (path.parent / "export_proposal_retired_ids.csv").read_text(
+        encoding="utf-8-sig")
+    assert retired.splitlines()[0].startswith("Retired ID,Now leads to")
+
+
+def test_the_xlsx_export_carries_four_sheets(tmp_path):
     from openpyxl import load_workbook
 
     from app.profiles import donations_export
@@ -848,11 +882,25 @@ def test_the_xlsx_export_carries_three_sheets(tmp_path):
         "scope": "proposal", "input_name": "donations.xlsx",
     })
     book = load_workbook(path, read_only=True)
-    assert book.sheetnames == ["donations", "aliases", "run"]
+    assert book.sheetnames == ["donations", "Retired IDs", "run",
+                               "How to read this file"]
     rows = list(book["donations"].values)
     assert rows[0][-5:] == tuple(donations_export.NEW_COLUMNS)
     assert len(rows) == len(ODD_ROWS) + 1
-    assert list(book["aliases"].values)[1][0] == "9"
+    retired = list(book["Retired IDs"].values)
+    assert retired[0][:2] == ("Retired ID", "Now leads to")
+    assert retired[1][0] == "9"
+    # The run sheet says what produced the file, in plain words.
+    run_sheet = {row[0]: (row[1] if len(row) > 1 else None)
+                 for row in book["run"].values if row and row[0]}
+    assert "Code version" in run_sheet
+    assert "Accept line" in run_sheet
+    assert "Exported by" in run_sheet
+    assert not any(str(key)[0].islower() and any(c.isupper() for c in str(key))
+                   for key in run_sheet), "no camelCase keys on the run sheet"
+    guide = [row[0] for row in book["How to read this file"].values
+             if row and row[0]]
+    assert "EntityID" in guide and "Earlier grouping" in guide
     book.close()
 
 

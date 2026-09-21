@@ -15,8 +15,9 @@ from datetime import date
 
 import pandas as pd
 
-from app.pipeline.standardise import accent_fold
+from app import vocabulary
 from app.rules import conditions, functions, vetoes
+from app.rules.functions import accent_fold
 
 TRACK_KEYS = ("person", "organisation")
 POSITIONS = ("leading", "trailing", "anywhere")
@@ -890,7 +891,7 @@ def _check_lookups(ruleset: dict, errors: list[dict]) -> None:
         fallback = entry.get("fallback", "passthrough")
         if fallback not in FALLBACKS:
             _error(errors, f"{path}.fallback",
-                   f"fallback must be one of {', '.join(FALLBACKS)}")
+                   vocabulary.choice_error("fallback", fallback, FALLBACKS))
         rows = entry.get("rows")
         if not isinstance(rows, list):
             _error(errors, f"{path}.rows", "rows must be a list")
@@ -961,7 +962,7 @@ def _check_track_rules(ruleset: dict, raw_columns, errors: list[dict]) -> None:
             seen.add(rule_id)
         if rule.get("track") not in TRACK_KEYS:
             _error(errors, f"{path}.track",
-                   f"track must be one of {', '.join(TRACK_KEYS)}")
+                   vocabulary.choice_error("track", rule.get("track"), TRACK_KEYS))
         when = rule.get("when")
         if not isinstance(when, list) or not when:
             _error(errors, f"{path}.when", "A track rule needs at least one condition")
@@ -1029,7 +1030,7 @@ def _check_step(step, path: str, ruleset: dict, raw_columns, known, errors) -> l
         position = step.get("position", "leading")
         if position not in POSITIONS:
             _error(errors, f"{path}.position",
-                   f"position must be one of {', '.join(POSITIONS)}")
+                   vocabulary.choice_error("position", step.get("position"), POSITIONS))
         _check_lists(step, path, ruleset, errors)
     elif op == "nullify":
         _check_lists(step, path, ruleset, errors)
@@ -1046,7 +1047,8 @@ def _check_step(step, path: str, ruleset: dict, raw_columns, known, errors) -> l
             _error(errors, f"{path}.table", f"Unknown lookup '{name}'")
         scope = step.get("scope", "value")
         if scope not in SCOPES:
-            _error(errors, f"{path}.scope", f"scope must be one of {', '.join(SCOPES)}")
+            _error(errors, f"{path}.scope",
+                   vocabulary.choice_error("scope", step.get("scope"), SCOPES))
 
     return written
 
@@ -1283,11 +1285,11 @@ def _check_match_keys(ruleset: dict, per_track: dict, errors: list[dict]) -> Non
         applies_when = key.get("applies_when", "always")
         if applies_when not in APPLIES_WHEN:
             _error(errors, f"{path}.applies_when",
-                   f"applies_when must be one of {', '.join(APPLIES_WHEN)}")
+                   vocabulary.choice_error("applies_when", key.get("applies_when"), APPLIES_WHEN))
         on_fail = key.get("on_guard_fail", "review")
         if on_fail not in ON_GUARD_FAIL:
             _error(errors, f"{path}.on_guard_fail",
-                   f"on_guard_fail must be one of {', '.join(ON_GUARD_FAIL)}")
+                   vocabulary.choice_error("on_guard_fail", key.get("on_guard_fail"), ON_GUARD_FAIL))
 
         _check_key_conditions(key, path, track, known, ruleset, errors)
 
@@ -1386,7 +1388,7 @@ def validate_ruleset(ruleset, raw_columns) -> list[dict]:
 
     if ruleset.get("default_track") not in TRACK_KEYS:
         _error(errors, "default_track",
-               f"default_track must be one of {', '.join(TRACK_KEYS)}")
+               vocabulary.choice_error("default_track", ruleset.get("default_track"), TRACK_KEYS))
 
     per_track = _check_cleaning(ruleset, raw, errors)
     # A match key runs on the frame stage 1 wrote, so it may name a derived

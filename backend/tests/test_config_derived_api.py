@@ -347,7 +347,7 @@ def test_the_records_endpoint_flags_the_derived_columns(client, data_dir):
 
     # Still `cleaning`, so the records table keeps them under its one toggle.
     assert columns["donor_status_std"] == {
-        "key": "donor_status_std", "label": "donor_status_std",
+        "key": "donor_status_std", "label": "Donor status",
         "type": "text", "source": "cleaning", "derived": True,
     }
     assert columns["donor_status_std_rule"]["derived"] is True

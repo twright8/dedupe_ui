@@ -2,61 +2,19 @@
 """Within-dataset dedupe stages.
 
 These replace the two-dataset linkage stages in ``app/pipeline`` one slice at a
-time. Six stages exist so far: load the records, assign tracks and clean, group
-them on the ruleset's match keys, score the pairs the keys left undecided,
-cluster what was accepted, and give every record a durable entity ID.
+time. Six stages run today: load the records, give each one a track and clean
+it, put together the records a match key agrees on, score the pairs the keys
+left undecided, cluster what was accepted, and give every record a durable
+entity ID.
+
+The names a user sees are in ``app/vocabulary.py``, with every other label the
+tool shows. Stages are named and never numbered (`docs/DESIGN.md` D21): three
+numberings are in use and renumbering one breaks the other two.
 """
 
-# What GET /api/pipeline/stages serves. One entry per stage that exists today —
-# never a stage that is only planned.
-STAGES = [
-    {
-        "key": "load",
-        "label": "Load",
-        "description": "Read the input file into one row per record (records_raw.parquet).",
-    },
-    {
-        "key": "clean",
-        "label": "Clean",
-        "description": (
-            "Assign each record a track and run that track's cleaning rules "
-            "(records.parquet)."
-        ),
-    },
-    {
-        "key": "exact",
-        "label": "Exact keys",
-        "description": (
-            "Group records that agree on a match key, hold the groups a guard "
-            "stops, and score the result against the existing labels "
-            "(exact_groups.parquet)."
-        ),
-    },
-    {
-        "key": "score",
-        "label": "Score pairs",
-        "description": (
-            "Compare the units the exact keys left — one per merged group, one "
-            "per other record — with Splink, and bucket every pair into accept, "
-            "review or reject (pairs.parquet)."
-        ),
-    },
-    {
-        "key": "cluster",
-        "label": "Cluster",
-        "description": (
-            "Join the accepted pairs into clusters, and hold back the ones that "
-            "look like a chain, are too large, or would merge groups the earlier "
-            "manual work kept apart (clusters.parquet)."
-        ),
-    },
-    {
-        "key": "entities",
-        "label": "Entity IDs",
-        "description": (
-            "Give every record an entity ID, keeping the ones the registry "
-            "already holds, and settle the entity-level attributes "
-            "(entities.parquet)."
-        ),
-    },
-]
+from app import vocabulary
+
+# What GET /api/pipeline/stages serves. The list includes the derived-column
+# step and the model step, which run inside and beside the others, because the
+# How it works page names all eight and this list is what it reads.
+STAGES = [dict(stage) for stage in vocabulary.STAGES]

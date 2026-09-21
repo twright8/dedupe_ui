@@ -22,12 +22,24 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from app import vocabulary
+from app.profiles import export_provenance
+
 # The five columns the export appends, in order.
 NEW_COLUMNS = ["RecordID", "EntityID", "EntityBasis", "DonorStatusStandardNew",
                "DonorStatusBasis"]
 
+# The retired-ID sheet. "alias" and "survivor" are retired words
+# (docs/GLOSSARY.md); the sheet and its two headline columns say what they mean.
+# The three columns after them keep their field names, because nothing on screen
+# shows them and a script may already read them.
+RETIRED_SHEET = "Retired IDs"
 ALIAS_HEADER = ["retired_entity_id", "survivor_entity_id", "track", "retired_run",
                 "retired_at"]
+ALIAS_LABELS = ["Retired ID", "Now leads to", "track", "retired_run", "retired_at"]
+
+# The sheet that explains every column this export adds.
+HOW_TO_READ_SHEET = "How to read this file"
 
 STATUS_COLUMN = "donor_status_std"
 
@@ -99,8 +111,26 @@ def _cell(value):
         return str(value)
 
 
+def _basis_label(value) -> str | None:
+    """The raw ``entity_basis`` as the one label the screens use."""
+    mapped = vocabulary.provenance_for("entity_basis", value)
+    return mapped["label"] if mapped else (None if value is None else _cell(value))
+
+
+def _value_basis_label(value) -> str | None:
+    """The raw attribute basis as the one label the screens use."""
+    meta = vocabulary.VALUE_BASIS.get(str(value or ""))
+    return meta["label"] if meta else (None if value is None else _cell(value))
+
+
 def _rows(raw: pd.DataFrame, entities: pd.DataFrame):
-    """Yield each original row, in order, with the five new cells on the end."""
+    """Yield each original row, in order, with the five new cells on the end.
+
+    ``EntityBasis`` and ``DonorStatusBasis`` keep their column names — the
+    owner's spreadsheets read them — and carry the canonical labels as their
+    values, so the file says "Earlier grouping" where the screen does, not
+    ``import`` (docs/BACKEND_STRINGS.md §6).
+    """
     lookup = _lookup(entities)
     record_ids = record_ids_for(raw).to_numpy()
     columns = [raw[column].to_numpy() for column in raw.columns]
@@ -113,29 +143,15 @@ def _rows(raw: pd.DataFrame, entities: pd.DataFrame):
         yield [_cell(column[index]) for column in columns] + [
             record_id or None,
             _cell(entity_id),
-            _cell(basis),
+            _basis_label(basis),
             _cell(status),
-            _cell(status_basis),
+            _value_basis_label(status_basis),
         ]
 
 
-def _run_info(context: dict) -> list[list]:
-    counts = context.get("counts") or {}
-    info = [
-        ["Run", context.get("run_id")],
-        ["Config version", context.get("config_version")],
-        ["Scope", context.get("scope")],
-        ["Exported at", context.get("exported_at")],
-        ["Input file", context.get("input_name")],
-        ["", ""],
-        ["Count", "Value"],
-    ]
-    for key in sorted(counts):
-        value = counts[key]
-        if isinstance(value, (dict, list)):
-            value = json.dumps(value)
-        info.append([key, value])
-    return info
+def _run_info(context: dict, run_dir=None) -> list[list]:
+    """What produced this run, in the words the screens use."""
+    return export_provenance.run_rows(context, run_dir)
 
 
 def write(run_dir, scope: str, fmt: str, context: dict) -> Path:
@@ -151,13 +167,17 @@ def write(run_dir, scope: str, fmt: str, context: dict) -> Path:
 
     out = run_dir / f"export_{scope}.{'xlsx' if fmt == 'xlsx' else 'csv'}"
     if fmt == "xlsx":
-        _write_xlsx(out, raw, entities, context)
+        _write_xlsx(out, raw, entities, context, run_dir)
     else:
         _write_csv(out, raw, entities)
+        # A CSV has one sheet, so the other three go beside it. The content is
+        # the same; only the container differs.
+        _write_sidecars(out, context, run_dir)
     return out
 
 
-def _write_xlsx(path: Path, raw: pd.DataFrame, entities, context: dict) -> None:
+def _write_xlsx(path: Path, raw: pd.DataFrame, entities, context: dict,
+                run_dir=None) -> None:
     from openpyxl import Workbook
 
     # Write-only mode streams each row to the file instead of holding a cell
@@ -169,14 +189,19 @@ def _write_xlsx(path: Path, raw: pd.DataFrame, entities, context: dict) -> None:
     for row in _rows(raw, entities):
         sheet.append(row)
 
-    aliases = book.create_sheet(title="aliases")
-    aliases.append(ALIAS_HEADER)
+    retired = book.create_sheet(title=RETIRED_SHEET)
+    retired.append(ALIAS_LABELS)
     for alias in context.get("aliases") or []:
-        aliases.append([alias.get(key) for key in ALIAS_HEADER])
+        retired.append([alias.get(key) for key in ALIAS_HEADER])
 
     info = book.create_sheet(title="run")
-    for row in _run_info(context):
+    for row in _run_info(context, run_dir):
         info.append(row)
+
+    guide = book.create_sheet(title=HOW_TO_READ_SHEET)
+    for row in export_provenance.how_to_read_rows(
+            export_provenance.DONATIONS_ADDED_COLUMNS):
+        guide.append(row)
 
     book.save(path)
 
@@ -186,3 +211,31 @@ def _write_csv(path: Path, raw: pd.DataFrame, entities) -> None:
         writer = csv.writer(handle)
         writer.writerow(list(raw.columns) + NEW_COLUMNS)
         writer.writerows(_rows(raw, entities))
+
+
+def _write_sidecars(out: Path, context: dict, run_dir=None) -> list[Path]:
+    """The three sheets a CSV cannot hold, written beside it as their own files."""
+    written = []
+    run_sheet = export_provenance.sidecar_path(out, "_run_sheet.txt")
+    run_sheet.write_text(
+        export_provenance.as_text(_run_info(context, run_dir),
+                                  "What produced this file"),
+        encoding="utf-8")
+    written.append(run_sheet)
+
+    guide = export_provenance.sidecar_path(out, "_how_to_read.txt")
+    guide.write_text(
+        export_provenance.as_text(
+            export_provenance.how_to_read_rows(
+                export_provenance.DONATIONS_ADDED_COLUMNS)),
+        encoding="utf-8")
+    written.append(guide)
+
+    retired = export_provenance.sidecar_path(out, "_retired_ids.csv")
+    with open(retired, "w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(ALIAS_LABELS)
+        for alias in context.get("aliases") or []:
+            writer.writerow([alias.get(key) for key in ALIAS_HEADER])
+    written.append(retired)
+    return written

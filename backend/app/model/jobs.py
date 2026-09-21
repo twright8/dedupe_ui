@@ -127,9 +127,22 @@ class JobConflict(RuntimeError):
     """A job for this track is already running."""
 
 
+def _log(db_path, who, kind, description, metadata) -> None:
+    """Write an audit row, and never let a failed write lose a finished model."""
+    if not db_path:
+        return
+    try:
+        from app.services.audit_logger import log_event
+
+        log_event(db_path, user=who or "unknown", kind=kind,
+                  description=description, metadata=metadata)
+    except Exception:
+        logger.exception("Could not write the audit row: %s", description)
+
+
 def start(track: str, run_dir, db_path: str | None, seed: int | None = None,
           note: str | None = None, run_id: str | None = None,
-          background: bool = True, profile=None) -> dict:
+          background: bool = True, profile=None, who: str = "") -> dict:
     """Start a training job and return its record.
 
     *background* off runs it here and now, which is what tests want and what a
@@ -174,11 +187,24 @@ def start(track: str, run_dir, db_path: str | None, seed: int | None = None,
             logger.exception("Training the %s model failed", track)
             _update(job_id, state="failed", error=str(exc), finished_at=_now())
             _emit(job_id, {"event": "error", "message": str(exc)})
+            _log(db_path, who, "model",
+                 f"Training the {track} model failed: {exc}",
+                 {"track": track, "job_id": job_id, "run_id": job["run_id"],
+                  "error": str(exc)})
             return
         _update(job_id, state="done", version=summary["version"], percent=100,
                 step="save", step_label="Saved", message=None, finished_at=_now())
         _emit(job_id, {"event": "complete", "version": summary["version"],
                        "percent": 100})
+        # The start of training is logged by the router. The end is logged here,
+        # because the router has already answered by the time it happens.
+        _log(db_path, who, "model",
+             f"Trained the {track} model as v{summary['version']}",
+             {"track": track, "job_id": job_id, "run_id": job["run_id"],
+              "version": summary["version"],
+              "graded": summary.get("graded"),
+              "n_human_labels": summary.get("n_human_labels"),
+              "n_train_rows": summary.get("n_train_rows")})
 
     if background:
         threading.Thread(target=work, daemon=True, name=f"train-{track}").start()

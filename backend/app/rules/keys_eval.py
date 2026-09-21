@@ -21,9 +21,10 @@ figure, not an accuracy figure.
 import numpy as np
 import pandas as pd
 
+from app import vocabulary
 from app.rules import keys
 
-AGREEMENTS = ("consistent", "conflict", "extends", "new")
+AGREEMENTS = vocabulary.AGREEMENTS
 
 LABEL_COLUMN = "existing_entity_id"
 

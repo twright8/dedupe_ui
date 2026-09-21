@@ -336,23 +336,47 @@ repeated unit columns cut:
   "gammas": { "forename_canon": 3.0, "middle_names": 0.0, "surname": 3.0,
               "title": -1.0 },
   "explanation": [
-    { "column": "forename_canon", "gamma": 3.0,
-      "label": "Exact match on forename_canon", "match_weight": 6.6538,
+    { "column": "forename_canon", "column_label": "forename", "gamma": 3.0,
+      "label": "Same forename", "engine_label": "Exact match on forename_canon",
+      "match_weight": 6.6538,
       "m_probability": 0.9682797961831835, "u_probability": 0.009616545209316187 },
-    { "column": "middle_names", "gamma": 0.0, "label": "All other comparisons",
+    { "column": "middle_names", "column_label": "middle names", "gamma": 0.0,
+      "label": "Middle names: neither side is close enough to count",
+      "engine_label": "All other comparisons",
       "match_weight": -0.1976, "m_probability": 0.8393631446644406,
       "u_probability": 0.9625928318216416 },
-    { "column": "surname", "gamma": 3.0, "label": "Exact match on surname",
+    { "column": "surname", "column_label": "surname", "gamma": 3.0,
+      "label": "Same surname", "engine_label": "Exact match on surname",
       "match_weight": 9.3857, "m_probability": 0.5029747655413064,
       "u_probability": 0.000751939844812415 },
-    { "column": "title", "gamma": -1.0, "label": "title is NULL",
+    { "column": "title", "column_label": "title", "gamma": -1.0,
+      "label": "Title is missing on at least one side",
+      "engine_label": "title is NULL",
       "match_weight": null, "m_probability": null, "u_probability": null }
   ],
   "columns": [
-    { "key": "unit_id", "label": "unit_id", "type": "text", "source": "cleaning" }
-  ]
+    { "key": "unit_id", "label": "Unit id", "type": "text", "source": "cleaning" }
+  ],
+  "bucketing": {
+    "at": "2026-09-18T22:39:04+00:00", "who": "system", "action": "scored",
+    "accept_line": 0.92, "review_line": 0.5, "lowest_score_kept": 0.05,
+    "scorer": "splink", "model_version": null,
+    "counts": { "accept": 4100, "review": 900, "reject": 25476 }, "note": ""
+  }
 }
 ```
+
+**`label` is what a reviewer reads.** It never contains a cleaned column name:
+"Same forename", not "Exact match on forename_canon" (`docs/GLOSSARY.md`).
+`engine_label` keeps Splink's own wording for a diagnostic screen and a bug
+report, and `column_label` is the column as a phrase. `columns[].label` is a
+phrase too, where it used to repeat the key.
+
+**`bucketing` is the entry in force** from the run's `bucketing_history.json`:
+which lines put these pairs in their buckets, when, who moved them, and which
+scorer and model version was in charge. It is on the pairs list and on the pair
+detail. The whole history is at `GET /api/runs/{id}/manifest` under
+`bucketing`. See `docs/PROVENANCE.md`.
 
 A pair id with no bar in it is **400**. A well-formed id that is not in this run
 is **404** with `{"detail": "No pair '9|99' in this run"}`.
@@ -363,13 +387,19 @@ track, where `dob_year_clean` has thresholds `[0, 1]`:
 
 ```json
 [
-  { "column": "dob_year_clean", "gamma": 2.0, "label": "Equal dob_year_clean",
+  { "column": "dob_year_clean", "column_label": "birth year", "gamma": 2.0,
+    "label": "Same birth year", "engine_label": "Equal dob_year_clean",
     "match_weight": 3.02, "m_probability": 0.16463, "u_probability": 0.02026 },
-  { "column": "dob_year_clean", "gamma": 1.0, "label": "dob_year_clean within 1",
+  { "column": "dob_year_clean", "column_label": "birth year", "gamma": 1.0,
+    "label": "Birth year within 1 year", "engine_label": "dob_year_clean within 1",
     "match_weight": 0.22, "m_probability": 0.04716, "u_probability": 0.04051 },
-  { "column": "dob_year_clean", "gamma": 0.0, "label": "All other",
+  { "column": "dob_year_clean", "column_label": "birth year", "gamma": 0.0,
+    "label": "Birth year: neither side is close enough to count",
+    "engine_label": "All other",
     "match_weight": -0.25, "m_probability": 0.78821, "u_probability": 0.93923 },
-  { "column": "dob_year_clean", "gamma": -1.0, "label": "dob_year_clean is NULL",
+  { "column": "dob_year_clean", "column_label": "birth year", "gamma": -1.0,
+    "label": "Birth year is missing on at least one side",
+    "engine_label": "dob_year_clean is NULL",
     "match_weight": null, "m_probability": null, "u_probability": null }
 ]
 ```

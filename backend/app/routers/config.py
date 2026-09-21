@@ -17,7 +17,8 @@ from pydantic import BaseModel
 from app.auth import current_user
 from app.profiles import get_profile
 from app.rules import engine, functions, linkage, vetoes
-from app.services import config_manager
+from app import vocabulary
+from app.services import config_manager, exact_groups_reader
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -96,6 +97,28 @@ def _validated(ruleset: dict, settings: dict | None = None) -> dict:
     return ruleset
 
 
+def _run_ruleset(run_id: str) -> dict:
+    """The ruleset that run was actually given, from its own config folder.
+
+    A run freezes its rules into ``config/ruleset.json`` before it starts. That
+    file, not the current or the draft one, is what explains a value in that
+    run's records.
+    """
+    path = _data_dir() / "runs" / run_id / "config" / "ruleset.json"
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run '{run_id}' did not keep a copy of the rules it used",
+        )
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Run '{run_id}' has an unreadable copy of the rules it used",
+        ) from exc
+
+
 def _raw_records(run_id: str) -> pd.DataFrame:
     """A run's records as stage 0 loaded them — before any track or cleaning."""
     from app.pipeline.dedupe.stage_0_load import RECORDS_RAW_FILENAME
@@ -134,9 +157,15 @@ class ColumnsBody(BaseModel):
 
 class PreviewCleaningBody(BaseModel):
     ruleset: Optional[dict[str, Any]] = None
-    track: str
+    # Optional when `record_id` is given: the run's own snapshot says which
+    # track that record was on, so the caller does not have to.
+    track: Optional[str] = None
     values: Optional[list[dict[str, Any]]] = None
     run_id: Optional[str] = None
+    # One record of that run, replayed against the run's own frozen ruleset.
+    # This is the "why does this record read like that?" case, and it must not
+    # answer with today's draft rules (docs/TERMINOLOGY_AUDIT.md, gap 7).
+    record_id: Optional[str] = None
     q: Optional[str] = None
     n: int = PREVIEW_DEFAULT_N
 
@@ -250,7 +279,7 @@ def _columns_response(ruleset: dict, track: str) -> dict:
     if track not in engine.TRACK_KEYS:
         raise HTTPException(
             status_code=400,
-            detail=f"track must be one of {', '.join(engine.TRACK_KEYS)}",
+            detail=vocabulary.choice_error("track", track, engine.TRACK_KEYS),
         )
     labels = {c.key: c.label for c in get_profile().display_columns}
     columns = engine.available_columns(ruleset, track, _raw_columns())
@@ -280,8 +309,18 @@ def post_columns(body: ColumnsBody):
 
 
 def _preview_frame(body: PreviewCleaningBody, ruleset: dict) -> pd.DataFrame:
-    """The rows a cleaning preview runs on: typed values, or a sample of a run."""
+    """The rows a cleaning preview runs on: typed values, one record, or a sample."""
     limit = max(1, min(int(body.n or PREVIEW_DEFAULT_N), PREVIEW_MAX_N))
+
+    if body.record_id:
+        records = _raw_records(body.run_id)
+        wanted = records["record_id"].astype(str) == str(body.record_id)
+        if not wanted.any():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Run '{body.run_id}' has no record '{body.record_id}'",
+            )
+        return records[wanted.to_numpy()].head(1)
 
     if body.values:
         frame = pd.DataFrame(body.values[:limit])
@@ -310,15 +349,41 @@ def _preview_frame(body: PreviewCleaningBody, ruleset: dict) -> pd.DataFrame:
 def preview_cleaning(body: PreviewCleaningBody):
     """Run one track's cleaning over a handful of rows, step by step.
 
+    Three ways to ask:
+
+    * ``values`` — rows the user typed, against the draft rules. The editor's case.
+    * ``run_id`` and ``track`` — a sample of that run's records, against the
+      draft rules, so an edit can be seen before it is saved.
+    * ``run_id`` and ``record_id`` — **one real record, against the rules that
+      run actually used**. This is the case that explains a value already on
+      screen, so it replays the run's own frozen ``config/ruleset.json`` and
+      never the draft (`docs/PROVENANCE.md`). ``track`` is worked out from that
+      ruleset when the caller leaves it out.
+
     A broken draft rule is reported on its own step; it never fails the request,
     because the user is mid-edit and needs to see where it went wrong.
     """
-    ruleset = _ruleset_or_current(body.ruleset)
-    if body.track not in engine.TRACK_KEYS:
+    replayed = bool(body.record_id)
+    if replayed:
+        if not body.run_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Give a run_id with a record_id, so the run's own rules can be replayed",
+            )
+        ruleset = _run_ruleset(body.run_id)
+    else:
+        ruleset = _ruleset_or_current(body.ruleset)
+
+    track = body.track
+    if replayed and not track:
+        one = _preview_frame(body, ruleset)
+        track = str(engine.assign_tracks(one, ruleset).iloc[0])
+    if track not in engine.TRACK_KEYS:
         raise HTTPException(
             status_code=400,
-            detail=f"track must be one of {', '.join(engine.TRACK_KEYS)}",
+            detail=vocabulary.choice_error("track", track, engine.TRACK_KEYS),
         )
+    body = body.model_copy(update={"track": track})
     frame = _preview_frame(body, ruleset)
     try:
         samples = engine.trace_rows(frame, ruleset, body.track)
@@ -327,7 +392,15 @@ def preview_cleaning(body: PreviewCleaningBody):
             status_code=422,
             detail={"kind": "unmapped_lookup_values", "table": exc.table, "values": exc.values},
         )
-    return {"track": body.track, "samples": samples}
+    return {
+        "track": track,
+        "samples": samples,
+        # Which rules were replayed, so a reader knows whether they are looking
+        # at what happened or at what would happen.
+        "source": "run" if replayed else "draft",
+        "run_id": body.run_id if replayed else None,
+        "record_id": body.record_id if replayed else None,
+    }
 
 
 @router.post("/preview-tracks")
@@ -457,6 +530,8 @@ def _key_examples(groups: pd.DataFrame, records: pd.DataFrame, key_id: str) -> l
             "status": first["status"],
             # A merged group has no guard. pandas holds that as NaN, which is not JSON.
             "guard": None if pd.isna(first["guard"]) else first["guard"],
+            "guard_text": None if pd.isna(first["guard"])
+            else exact_groups_reader.guard_text(first["guard"]),
             "names": shown,
         })
     return examples

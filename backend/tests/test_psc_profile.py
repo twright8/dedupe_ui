@@ -628,7 +628,8 @@ def test_the_export_writes_a_table_and_an_elasticsearch_bulk_file(tmp_path, clea
     with zipfile.ZipFile(bundle) as archive:
         names = set(archive.namelist())
         assert names == {"psc_entities.csv", "elasticsearch_bulk.jsonl",
-                         "aliases.csv", "README.txt"}
+                         "retired_ids.csv", "README.txt",
+                         "HOW_TO_READ.txt"}
         bulk = archive.read("elasticsearch_bulk.jsonl").decode().strip().splitlines()
 
     # Two lines per updated record, and the record with no entity is left out.

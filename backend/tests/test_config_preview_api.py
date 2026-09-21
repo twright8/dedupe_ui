@@ -339,7 +339,9 @@ def test_records_describe_their_columns(client, db_path, data_dir):
     }
     assert columns["total_value"]["type"] == "money"
     assert columns["surname_metaphone"] == {
-        "key": "surname_metaphone", "label": "surname_metaphone",
+        # A cleaning column's label is its name as a phrase, and no two
+        # columns may share one (docs/BACKEND_STRINGS.md §4).
+        "key": "surname_metaphone", "label": "Surname sound",
         "type": "text", "source": "cleaning", "derived": False,
     }
     assert [c["key"] for c in body["columns"]] == list(body["items"][0])
@@ -357,3 +359,84 @@ def test_track_is_still_filterable_and_sortable(client, db_path, data_dir):
     assert filtered["total"] == 3
     sorted_body = client.get(f"/api/runs/{RUN_ID}/records?sort=track&order=desc").json()
     assert sorted_body["items"][0]["track"] == "person"
+
+
+# ---------------------------------------------------------------------------
+# Replaying one record against the rules that run actually used (B11)
+# ---------------------------------------------------------------------------
+
+
+def _freeze_run_rules(data_dir, ruleset):
+    """Write the run's own frozen copy of the rules, as a real run does."""
+    import json
+
+    config_dir = data_dir / "runs" / RUN_ID / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "ruleset.json").write_text(json.dumps(ruleset), encoding="utf-8")
+
+
+def test_a_record_is_replayed_against_the_rules_that_run_used(client, data_dir):
+    """The question is "why does this record read like that?", so the answer
+    must come from the run's own snapshot and not from today's rules."""
+    frozen = default_ruleset()
+    _freeze_run_rules(data_dir, frozen)
+
+    # Today's saved rules are different: the person track has no steps at all.
+    changed = default_ruleset()
+    changed["cleaning"]["person"] = []
+    _save(client, changed)
+
+    body = client.post("/api/config/preview-cleaning", json={
+        "run_id": RUN_ID, "record_id": "1",
+    }).json()
+
+    assert body["source"] == "run"
+    assert body["run_id"] == RUN_ID
+    assert body["record_id"] == "1"
+    assert len(body["samples"]) == 1
+    assert body["samples"][0]["input"]["record_id"] == "1"
+    # The frozen rules still ran, although the saved ones have no steps left.
+    assert body["samples"][0]["steps"], "the run's own steps must be traced"
+    assert body["samples"][0]["output"]["name_clean"] == "JOHN SMITH"
+
+
+def test_the_track_is_worked_out_from_the_runs_own_rules(client, data_dir):
+    _freeze_run_rules(data_dir, default_ruleset())
+    _save(client)
+    body = client.post("/api/config/preview-cleaning", json={
+        "run_id": RUN_ID, "record_id": "2",
+    }).json()
+    assert body["track"] == "organisation"
+
+
+def test_a_record_id_without_a_run_id_is_refused(client):
+    _save(client)
+    response = client.post("/api/config/preview-cleaning",
+                           json={"record_id": "1"})
+    assert response.status_code == 400
+    assert "run_id" in response.json()["detail"]
+
+
+def test_an_unknown_record_is_a_404(client, data_dir):
+    _freeze_run_rules(data_dir, default_ruleset())
+    _save(client)
+    response = client.post("/api/config/preview-cleaning",
+                           json={"run_id": RUN_ID, "record_id": "999999"})
+    assert response.status_code == 404
+    assert "999999" in response.json()["detail"]
+
+
+def test_a_run_that_kept_no_rules_says_so(client):
+    _save(client)
+    response = client.post("/api/config/preview-cleaning",
+                           json={"run_id": RUN_ID, "record_id": "1"})
+    assert response.status_code == 404
+    assert "rules it used" in response.json()["detail"]
+
+
+def test_the_draft_preview_still_says_it_is_a_draft(client):
+    _save(client)
+    body = client.post("/api/config/preview-cleaning",
+                       json={"track": "person", "run_id": RUN_ID}).json()
+    assert body["source"] == "draft"
+    assert body["record_id"] is None

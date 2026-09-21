@@ -50,27 +50,55 @@ def build_plan(
     ordered = frame.sort_values(["entity_id", "record_id"], kind="mergesort")
     records_by_entity = ordered.groupby("entity_id", sort=True)["record_id"].apply(list)
     tracks = ordered.groupby("entity_id", sort=True)["track"].first()
+    # Why each record is here, and where the entity's ID came from. Both are
+    # carried into the registry so "how was this decided" outlives the run
+    # folder (docs/PROVENANCE.md, gap 1). `bases` lines up with `records`.
+    bases_by_entity = (
+        ordered.groupby("entity_id", sort=True)["entity_basis"].apply(list)
+        if "entity_basis" in ordered.columns else None
+    )
+    id_status_by_entity = (
+        ordered.groupby("entity_id", sort=True)["id_status"].first()
+        if "id_status" in ordered.columns else None
+    )
     attribute_columns = {}
     for column in attributes_columns:
         value_column, basis_column = f"{column}_entity", f"{column}_entity_basis"
+        rule_column, tally_column = f"{column}_entity_rule", f"{column}_entity_tally"
         if value_column in ordered.columns:
             attribute_columns[column] = (
                 ordered.groupby("entity_id", sort=True)[value_column].first(),
                 ordered.groupby("entity_id", sort=True)[basis_column].first()
                 if basis_column in ordered.columns else None,
+                ordered.groupby("entity_id", sort=True)[rule_column].first()
+                if rule_column in ordered.columns else None,
+                ordered.groupby("entity_id", sort=True)[tally_column].first()
+                if tally_column in ordered.columns else None,
             )
+
+    def _at(series, entity_id):
+        if series is None:
+            return None
+        value = series[entity_id]
+        return None if pd.isna(value) else value
+
     plan_entities = [
         {
             "entity_id": entity_id,
             "track": None if pd.isna(tracks[entity_id]) else tracks[entity_id],
             "records": records,
+            "bases": (list(bases_by_entity[entity_id])
+                      if bases_by_entity is not None else [None] * len(records)),
+            "id_status": _at(id_status_by_entity, entity_id),
             "attributes": {
                 column: {
                     "value": None if pd.isna(values[entity_id]) else values[entity_id],
-                    "basis": None if bases is None or pd.isna(bases[entity_id])
-                    else bases[entity_id],
+                    "basis": _at(bases, entity_id),
+                    "rule_id": _at(rules, entity_id),
+                    "tally": _at(tallies, entity_id),
                 }
-                for column, (values, bases) in attribute_columns.items()
+                for column, (values, bases, rules, tallies)
+                in attribute_columns.items()
             },
         }
         for entity_id, records in records_by_entity.items()

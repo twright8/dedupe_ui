@@ -16,9 +16,10 @@ from pathlib import Path
 
 import duckdb
 
-from app import duckdb_conn
+from app import duckdb_conn, vocabulary
 
 from app.profiles import get_profile
+from app.services import exact_groups_reader
 from app.services.records_reader import describe_columns
 
 CLUSTERS_FILENAME = "clusters.parquet"
@@ -42,8 +43,7 @@ MAX_NAMES = 5
 MAX_IDS = 5
 
 TRACKS = ("person", "organisation")
-STATUSES = ("ok", "conflict", "too_large", "weak_link", "mixed_ids",
-            "cross_track_ids", "held_key", "attribute_tie")
+STATUSES = vocabulary.CLUSTER_STATUSES
 YES_NO = ("yes", "no")
 SORTS = ("size", "records", "priority", "name")
 
@@ -212,6 +212,7 @@ def _item(row: dict, priority: list[str], decisions: dict, ties: set) -> dict:
         "decision": decisions.get(cluster_id),
         # Why the match key held this group back, for a held_key item.
         "guard": _json_safe(row.get("guard")),
+        "guard_text": exact_groups_reader.guard_text(row.get("guard")),
     }
 
 
@@ -539,6 +540,7 @@ def _held_detail(con, run_dir: str, cluster_id: str, decisions: dict,
         "statuses": ["held_key"],
         "withheld": True,
         "guard": rows[0].get("guard"),
+        "guard_text": exact_groups_reader.guard_text(rows[0].get("guard")),
         "key_ids": [k for k in str(rows[0].get("key_ids") or "").split("|") if k],
         # The true size, not the page size: a decision covers the whole group.
         "n_units": int(total),
@@ -654,6 +656,7 @@ def get_cluster(run_dir: str, cluster_id: str, decisions: dict | None = None,
         "decision": decisions.get(str(cluster_id)),
         # Only a held group has one; a real cluster is null, so the shape matches.
         "guard": None,
+        "guard_text": None,
         "columns": describe_columns(unit_columns),
         "event_columns": [c.as_dict() for c in getattr(get_profile(), "event_columns", [])],
     }

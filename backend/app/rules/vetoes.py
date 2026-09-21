@@ -21,6 +21,8 @@ import re
 import numpy as np
 import pandas as pd
 
+from app import vocabulary
+
 TRACK_KEYS = ("person", "organisation")
 ACTIONS = ("review", "reject")
 
@@ -601,7 +603,7 @@ def validate(ruleset: dict, per_track: dict, errors: list[dict]) -> None:
         action = veto.get("action")
         if action not in ACTIONS:
             _error(errors, f"{path}.action",
-                   f"action must be one of {', '.join(ACTIONS)}")
+                   vocabulary.choice_error("action", veto.get("action"), ACTIONS))
 
         reason = veto.get("reason")
         if reason is not None and not isinstance(reason, str):
@@ -632,7 +634,7 @@ def _check_condition(condition, path: str, track, known, token_lists,
     op = condition.get("op")
     if op not in OPERATORS:
         _error(errors, f"{path}.op",
-               f"op must be one of {', '.join(sorted(OPERATORS))}")
+               vocabulary.choice_error("op", condition.get("op"), sorted(OPERATORS)))
         return
 
     argument = OPERATORS[op]

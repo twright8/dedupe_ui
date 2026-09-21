@@ -16,6 +16,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
+from app import vocabulary
 from app.db import get_db, query_db
 
 # An alias chain longer than this is a bug, not data. Cutting it is better than
@@ -68,14 +69,77 @@ def members_of(db_path: str, entity_id: str) -> list[str]:
 
 
 def attributes_of(db_path: str, entity_id: str) -> dict:
+    """The values in force now. Superseded rows stay in the table, unread."""
     return {
-        row["column_name"]: {"value": row["value"], "basis": row["basis"]}
+        row["column_name"]: {
+            "value": row["value"],
+            "basis": row["basis"],
+            "basis_label": vocabulary.VALUE_BASIS.get(
+                str(row["basis"] or ""), {}).get("label"),
+            "rule_id": row["rule_id"],
+            "tally": _loads(row["tally_json"]),
+            "since_run": row["since_run"] or row["run_id"],
+        }
         for row in query_db(
             db_path,
-            "SELECT column_name, value, basis FROM entity_attributes WHERE entity_id = ?",
+            "SELECT column_name, value, basis, rule_id, tally_json, since_run, run_id "
+            "FROM entity_attributes WHERE entity_id = ? AND until_run IS NULL",
             (entity_id,),
         )
     }
+
+
+def attribute_history(db_path: str, entity_id: str) -> list[dict]:
+    """Every value this entity has held, oldest first."""
+    return [
+        {**dict(row), "tally": _loads(row["tally_json"])}
+        for row in query_db(
+            db_path,
+            "SELECT column_name, value, basis, rule_id, tally_json, since_run, "
+            "until_run, run_id FROM entity_attributes WHERE entity_id = ? "
+            "ORDER BY id",
+            (entity_id,),
+        )
+    ]
+
+
+def member_rows(db_path: str, entity_id: str) -> list[dict]:
+    """Each current member with why it is here and where the ID came from."""
+    rows = query_db(
+        db_path,
+        "SELECT record_id, entity_basis, id_status, since_run FROM entity_members "
+        "WHERE entity_id = ? AND until_run IS NULL ORDER BY record_id",
+        (entity_id,),
+    )
+    out = []
+    for row in rows:
+        mapped = vocabulary.provenance_for("entity_basis", row["entity_basis"])
+        origin = vocabulary.ID_ORIGIN.get(str(row["id_status"] or ""))
+        out.append({
+            **dict(row),
+            "entity_basis_label": mapped["label"] if mapped else None,
+            "id_status_label": origin["label"] if origin else None,
+        })
+    return out
+
+
+def collisions_of(db_path: str, entity_id: str) -> list[dict]:
+    """Times this entity's ID was claimed twice and one side gave way."""
+    return [dict(row) for row in query_db(
+        db_path,
+        "SELECT * FROM entity_id_collisions WHERE entity_id = ? OR minted = ? "
+        "ORDER BY id",
+        (str(entity_id), str(entity_id)),
+    )]
+
+
+def _loads(text):
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return None
 
 
 def resolve(db_path: str, entity_id: str) -> dict | None:
@@ -134,6 +198,7 @@ def entity_detail(db_path: str, entity_id: str) -> dict | None:
         "created_at": row["created_at"],
         "n_records": len(records),
         "records": records,
+        "members": member_rows(db_path, row["entity_id"]),
         "attributes": attributes_of(db_path, row["entity_id"]),
     }
 
@@ -201,20 +266,29 @@ def publish(
     plan: dict,
     published_by: str = "",
     published_at: str | None = None,
+    edges=None,
+    collisions: list[dict] | None = None,
 ) -> dict:
     """Write *plan* into the registry in one transaction.
 
     *plan* is what ``registry.plan.build_plan`` worked out:
 
-      ``entities``   [{entity_id, track, records: [...], attributes: {...}}]
+      ``entities``   [{entity_id, track, records, bases, id_status, attributes}]
       ``retire``     [{entity_id, alias_of}]
       ``summary``    the numbers the preview showed
+
+    *edges* is the run's join log — every accepted link inside a published
+    entity, from ``registry.provenance.build_edges``. *collisions* is the run's
+    ID-collision list. Both are written here so that deleting the run folder
+    does not take the answer to "why are these two records one entity?" with it
+    (`docs/PROVENANCE.md`).
 
     Every statement runs inside one ``BEGIN``/``COMMIT``. A failure half way
     leaves the registry exactly as it was, which matters more here than
     anywhere else in the app: a half-published registry would hand out entity
     IDs that no later run could reproduce.
     """
+    from app.registry import provenance
     connection = get_db(db_path)
     now = published_at or _now()
 
@@ -251,20 +325,35 @@ def publish(
                     (entity_id, entity.get("track"), run_id, now),
                 )
                 known.add(entity_id)
+            bases = entity.get("bases") or []
+            id_status = entity.get("id_status")
             connection.executemany(
-                "INSERT INTO entity_members (record_id, entity_id, since_run) "
-                "VALUES (?, ?, ?)",
-                [(str(record), entity_id, run_id) for record in entity["records"]],
+                "INSERT INTO entity_members (record_id, entity_id, since_run, "
+                "entity_basis, id_status) VALUES (?, ?, ?, ?, ?)",
+                [(str(record), entity_id, run_id,
+                  _clean(bases[index]) if index < len(bases) else None,
+                  _clean(id_status))
+                 for index, record in enumerate(entity["records"])],
             )
-            connection.execute(
-                "DELETE FROM entity_attributes WHERE entity_id = ?", (entity_id,)
-            )
+            # Attributes keep history now, like members: close the live row and
+            # open a new one, rather than deleting what the last run said.
+            attributes = entity.get("attributes") or {}
+            if attributes:
+                marks = ",".join("?" * len(attributes))
+                connection.execute(
+                    f"UPDATE entity_attributes SET until_run = ? WHERE entity_id = ? "
+                    f"AND until_run IS NULL AND column_name IN ({marks})",
+                    (run_id, entity_id, *attributes),
+                )
             connection.executemany(
                 "INSERT INTO entity_attributes (entity_id, column_name, value, basis, "
-                "run_id) VALUES (?, ?, ?, ?, ?)",
-                [(entity_id, column, str(a.get("value")) if a.get("value") is not None
-                  else None, a.get("basis"), run_id)
-                 for column, a in (entity.get("attributes") or {}).items()],
+                "run_id, since_run, rule_id, tally_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(entity_id, column,
+                  str(a.get("value")) if a.get("value") is not None else None,
+                  _clean(a.get("basis")), run_id, run_id, _clean(a.get("rule_id")),
+                  _tally(a.get("tally")))
+                 for column, a in attributes.items()],
             )
 
         for retirement in plan["retire"]:
@@ -274,17 +363,43 @@ def publish(
                 (str(retirement["alias_of"]), run_id, str(retirement["entity_id"])),
             )
 
+        n_edges = provenance.write_edges(connection, run_id, edges or ())
+        n_collisions = provenance.write_collisions(connection, run_id, collisions or [])
+
+        summary = {**plan["summary"], "edges": n_edges, "id_collisions": n_collisions}
         connection.execute(
             "INSERT OR REPLACE INTO entity_publications "
             "(run_id, published_at, published_by, summary_json) VALUES (?, ?, ?, ?)",
-            (run_id, now, published_by, json.dumps(plan["summary"])),
+            (run_id, now, published_by, json.dumps(summary)),
         )
         connection.commit()
     except sqlite3.Error:
         connection.rollback()
         raise
 
-    return {"run_id": run_id, "published_at": now, "summary": plan["summary"]}
+    return {"run_id": run_id, "published_at": now, "summary": summary}
+
+
+def _clean(value):
+    """A plain string, or None. Keeps NaN and empty text out of the registry."""
+    if value is None:
+        return None
+    text = str(value)
+    if text in ("", "nan", "None", "<NA>"):
+        return None
+    return text
+
+
+def _tally(value) -> str | None:
+    """The majority vote as JSON, whether it arrives as a dict or as text."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value or None
+    try:
+        return json.dumps(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _chunks(values, size):

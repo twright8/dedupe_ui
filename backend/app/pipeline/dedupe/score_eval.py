@@ -18,12 +18,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from app import vocabulary
 from app.pipeline.dedupe import label_overlay
 from app.rules import keys, keys_eval, vetoes
 
 HISTOGRAM_BINS = 50
 
-AGREEMENTS = ("agrees", "disagrees", "unknown")
+# Named apart from `keys_eval.AGREEMENTS`, which answers a different
+# question with the same word (docs/TERMINOLOGY_AUDIT.md B19). This one is
+# about one accepted pair against the earlier grouping.
+IMPORT_AGREEMENTS = vocabulary.IMPORT_AGREEMENTS
 
 #: The only record columns this module reads. `keys_eval` wants the track and
 #: the old entity id, and `_as_groups` wants the id. The other sixty columns of
@@ -262,9 +266,9 @@ class _Tally:
         self._by_veto: dict = {}
         self._review_pairs = 0
         self._review_score = 0
-        self._review_agreement = {name: 0 for name in AGREEMENTS}
+        self._review_agreement = {name: 0 for name in IMPORT_AGREEMENTS}
         self._histogram = {name: np.zeros(HISTOGRAM_BINS, dtype="int64")
-                           for name in AGREEMENTS}
+                           for name in IMPORT_AGREEMENTS}
 
     @staticmethod
     def _count_into(store: dict, values: pd.Series) -> None:
@@ -310,13 +314,13 @@ class _Tally:
         if "score_bucket" in batch.columns:
             in_review = (batch["score_bucket"] == "review").to_numpy()
             self._review_score += int(in_review.sum())
-            for name in AGREEMENTS:
+            for name in IMPORT_AGREEMENTS:
                 self._review_agreement[name] += int(
                     (in_review & (agreement == name).to_numpy()).sum())
 
         edges = np.linspace(0.0, 1.0, HISTOGRAM_BINS + 1)
         values = pd.to_numeric(batch["match_probability"], errors="coerce")
-        for name in AGREEMENTS:
+        for name in IMPORT_AGREEMENTS:
             selected = values[(agreement == name).to_numpy()].dropna()
             counts, _ = np.histogram(selected.to_numpy(dtype="float64"), bins=edges)
             self._histogram[name] += counts.astype("int64")
@@ -341,7 +345,7 @@ class _Tally:
     def review_block(self) -> dict:
         block = {"pairs": self._review_pairs,
                  "score_bucket_pairs": self._review_score}
-        for name in AGREEMENTS:
+        for name in IMPORT_AGREEMENTS:
             block[f"import_{name}"] = self._review_agreement[name]
         return block
 
@@ -349,7 +353,7 @@ class _Tally:
         edges = np.linspace(0.0, 1.0, HISTOGRAM_BINS + 1)
         result = {"bins": HISTOGRAM_BINS,
                   "edges": [round(float(e), 4) for e in edges]}
-        for name in AGREEMENTS:
+        for name in IMPORT_AGREEMENTS:
             result[name] = [int(c) for c in self._histogram[name]]
         return result
 

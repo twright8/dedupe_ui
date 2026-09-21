@@ -41,6 +41,11 @@ from app.model import store
 logger = logging.getLogger(__name__)
 
 MODEL_SCORE_COLUMN = "gbt_score"
+# Which model produced the score beside it. Written on the same rows, so a
+# later rescore with a different version cannot erase what this one did
+# (docs/TERMINOLOGY_AUDIT.md, B5). `model_state.json` says what is applied
+# *now*; this column says what produced each number.
+MODEL_VERSION_COLUMN = "gbt_model_version"
 MODEL_STATE_FILENAME = "model_state.json"
 
 # What `decided_by` says when the model's own score put the pair in its bucket.
@@ -140,17 +145,24 @@ def score_pairs(pairs: pd.DataFrame, units: pd.DataFrame,
                 models: dict[str, TrackModel], events: pd.DataFrame | None = None,
                 profile=None,
                 corpus: dict | None = None) -> tuple[pd.DataFrame, dict[str, TrackModel]]:
-    """Add `gbt_score` for every track that has an active model.
+    """Add `gbt_score` and `gbt_model_version` for every track with an active model.
 
     Returns the pairs and the models that actually scored something — a track
     whose model cannot be loaded is dropped with a log line rather than failing
     the run, because a broken model file must not cost a night's scoring.
+
+    The version goes on the row beside the score. Without it, a rescore with a
+    second model leaves a number and no way to say which model wrote it.
     """
     pairs = pairs.copy()
     if MODEL_SCORE_COLUMN not in pairs.columns:
         pairs[MODEL_SCORE_COLUMN] = np.nan
     pairs[MODEL_SCORE_COLUMN] = pd.to_numeric(pairs[MODEL_SCORE_COLUMN],
                                               errors="coerce").astype("float64")
+    if MODEL_VERSION_COLUMN not in pairs.columns:
+        pairs[MODEL_VERSION_COLUMN] = np.nan
+    pairs[MODEL_VERSION_COLUMN] = pd.to_numeric(pairs[MODEL_VERSION_COLUMN],
+                                                errors="coerce").astype("Int64")
     used: dict[str, TrackModel] = {}
     for track, model in models.items():
         mask = (pairs["track"] == track).to_numpy() if "track" in pairs.columns \
@@ -167,6 +179,7 @@ def score_pairs(pairs: pd.DataFrame, units: pd.DataFrame,
                              track, model.version)
             continue
         pairs.loc[mask, MODEL_SCORE_COLUMN] = scores
+        pairs.loc[mask, MODEL_VERSION_COLUMN] = int(model.version)
         used[track] = model
     return pairs, used
 
@@ -198,13 +211,15 @@ def collapse_reason(review_before: int, review_after: int, n_distinct: int) -> s
     * a review band that had pairs in it has fallen to nothing or nearly nothing.
     """
     if 0 < n_distinct < MIN_DISTINCT_SCORES:
-        return (f"the model collapsed to a near two-valued score "
-                f"({n_distinct} distinct value(s) across every scored pair)")
+        return (f"the model gives almost every pair the same two scores "
+                f"({n_distinct} different value(s) across every pair it scored), "
+                "so it is not telling them apart")
     if review_before > 0:
         floor = max(1, round(REVIEW_BAND_FLOOR * review_before))
         if review_after < floor:
-            return (f"the review band fell from {review_before:,} pairs to "
-                    f"{review_after:,} (below the {floor:,}-pair safety floor)")
+            return (f"the number of pairs left for review fell from "
+                    f"{review_before:,} to {review_after:,}, below the safety "
+                    f"floor of {floor:,}")
     return None
 
 

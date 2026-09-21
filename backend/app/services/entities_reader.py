@@ -16,7 +16,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from app import duckdb_conn
+from app import duckdb_conn, vocabulary
 
 from app.profiles import get_profile
 from app.services.clusters_reader import (  # the same helpers, one definition
@@ -39,8 +39,10 @@ MAX_MEMBERS = 500
 MAX_NAMES = 5
 
 TRACKS = ("person", "organisation")
-BASES = ("single", "exact_key", "import", "score", "human")
-ID_STATUSES = ("new", "kept", "survivor", "minted_after_collision")
+# One definition, in app/vocabulary.py. `BASES` follows D22: Earlier
+# grouping beats Score, so `import` outranks `score`.
+BASES = vocabulary.ENTITY_BASES
+ID_STATUSES = vocabulary.ID_STATUSES
 SORTS = ("size", "priority", "name", "entity_id")
 
 
@@ -80,7 +82,7 @@ def _consensus_columns(entity_columns: list[str]) -> list[str]:
             if f"{c}_entity" in entity_columns]
 
 
-BASIS_RANK = {name: index for index, name in enumerate(BASES)}
+BASIS_RANK = vocabulary.BASIS_ORDER
 
 # The strongest basis of an entity, the same answer ``max(bases, key=rank)``
 # gives: the highest-ranked one, and among equals the alphabetically first,

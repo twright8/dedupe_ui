@@ -35,7 +35,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from app import duckdb_conn
+from app import duckdb_conn, vocabulary
 from app.pipeline.dedupe import label_overlay
 from app.pipeline.dedupe import units as units_module
 from app.pipeline.dedupe.stage_1_clean import RECORDS_FILENAME
@@ -57,7 +57,12 @@ ATTRIBUTE_TIE = "attribute_tie"
 
 TRUSTED_SOURCES = ("human", "import")
 
-BASIS_ORDER = {"single": 0, "exact_key": 1, "import": 2, "score": 3, "human": 4}
+# How strongly each kind of link decides, weakest first. One definition, in
+# ``app/vocabulary.py``, derived from the ordered provenance list
+# (`docs/DESIGN.md` D22): Earlier grouping beats Score. This list used to
+# rank Score above Earlier grouping, which contradicted `docs/RULESET.md`,
+# so a record whose path held both kinds of edge reported the weaker one.
+BASIS_ORDER = vocabulary.BASIS_ORDER
 
 # The view names the SQL uses. Both entry points bind the same three names —
 # to registered frames, or to read_parquet over the run's files.
@@ -531,9 +536,12 @@ def _parts(con, summary: pd.DataFrame, n_units: int) -> None:
 def _part_source(con) -> None:
     """``s4_part_source``: the strongest accepted edge inside each proposed part.
 
-    The ranks are unique over the sources an accepted edge can carry — ``score``,
-    ``import`` and ``human`` — so the ``source DESC`` tie-break never decides
-    anything; it is there to keep the answer deterministic.
+    The ranks come from ``app/vocabulary.BASIS_ORDER`` and are unique over the
+    sources an accepted edge can carry — ``score``, ``import`` and ``human`` —
+    so the ``source DESC`` tie-break never decides anything; it is there to keep
+    the answer deterministic. ``import`` outranks ``score`` (`docs/DESIGN.md`
+    D22): a merge the earlier grouping already made is stronger evidence than a
+    score, so a part joined by both reports Earlier grouping.
     """
     ranks = " ".join(f"WHEN '{name}' THEN {rank}" for name, rank in BASIS_ORDER.items())
     con.execute(f"""

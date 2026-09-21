@@ -46,8 +46,9 @@ logger = logging.getLogger(__name__)
 
 # The sentence `MODEL.md` requires in every training report.
 KNOWN_LIMIT = (
-    "The imported labels were made mostly on the name. They cannot teach the model "
-    "when two people with one name are different people. Only new keep-apart labels can."
+    "The earlier grouping was made mostly on the name. It cannot teach the model "
+    "when two people with one name are different people. Only new answers of "
+    "Not a match can."
 )
 
 # The calibrated-score grid the threshold table walks.
@@ -463,9 +464,9 @@ def train(run_dir, db_path: str | None, track: str, seed: int | None = None,
         )
     if len(np.unique(training.y)) < 2:
         raise TrainingError(
-            "Every training row has the same verdict, so there is nothing for a "
-            "classifier to separate. Label some pairs FALSE, or run on a config "
-            "whose imported ids disagree somewhere."
+            "Every training row carries the same answer, so there is nothing for "
+            "the model to tell apart. Answer some pairs Not a match, or run on a "
+            "config whose earlier IDs disagree somewhere."
         )
 
     step("features")
@@ -670,16 +671,20 @@ def _brier(y, raw, calibrated) -> dict:
 def _no_test_reason(training: dataset.TrainingSet, settings: dict) -> str:
     n = len(training.test_y)
     if n == 0:
-        return "no frozen test set (no human labels with held_out = 1)"
+        return "no test set — no reviewer answers have been held back for testing"
     if len(np.unique(training.test_y)) < 2:
-        return "the frozen test set is all one verdict, so precision cannot be measured"
+        return ("the test set holds only one answer, either all Match or all "
+                "Not a match, so precision cannot be measured")
     if n < int(settings["min_test_labels"]):
-        return (f"the frozen test set has {n} labels and {int(settings['min_test_labels'])} "
-                "are needed before a threshold means anything")
+        return (f"the test set has {n} answers and {int(settings['min_test_labels'])} "
+                "are needed before a line means anything")
     if training.n_human < int(settings["min_human_labels"]):
-        return (f"cold start: {training.n_human} human labels, and "
+        # "new model", never "cold start" (docs/GLOSSARY.md, DESIGN.md D21).
+        # ModelPanel reads the number out of this sentence, so the phrase
+        # "are needed" and the two figures have to stay.
+        return (f"new model: {training.n_human} reviewer answers, and "
                 f"{int(settings['min_human_labels'])} are needed")
-    return "no threshold could be set"
+    return "no line could be set"
 
 
 def _warnings(training, settings, cold_start, graded, has_test, reference_status,
@@ -689,31 +694,36 @@ def _warnings(training, settings, cold_start, graded, has_test, reference_status
         out.append({
             "code": "metrics_on_imported_labels",
             "message": (
-                "AUC and average precision here are measured against the imported "
-                "labels, and those labels were made mostly on the name. A high number "
-                "says the model reproduces the earlier name-based work, not that it "
-                "decides pairs correctly. Only human labels can show that."
+                "These figures are measured against the earlier grouping, which was "
+                "made mostly on the name. A high number says the model reproduces "
+                "that earlier work, not that it decides pairs correctly. Only a "
+                "reviewer's own answers can show that."
             ),
         })
     if cold_start:
         out.append({
+            # The code stays `cold_start`: it is a machine value the frontend
+            # already matches on. The words a person reads say "new model"
+            # (docs/GLOSSARY.md). ModelPanel reads the number out of the
+            # message with /(\d+) are needed/, so that phrase has to stay.
             "code": "cold_start",
             "message": (
-                f"Trained on imported labels only — {training.n_human} human labels, "
-                f"and {int(settings['min_human_labels'])} are needed. The model "
-                "re-orders the review queue and cannot decide a pair."
+                f"This is a new model, trained on the earlier grouping alone — "
+                f"{training.n_human} reviewer answers, and "
+                f"{int(settings['min_human_labels'])} are needed. It re-orders the "
+                "review queue and cannot decide a pair."
             ),
         })
     if not has_test:
         out.append({
             "code": "no_test_set",
-            "message": ("No frozen test set, so no accept or reject line was set and "
+            "message": ("No test set, so no accept or reject line was set and "
                         "every pair the model scores goes to review."),
         })
     elif not graded:
         out.append({
             "code": "test_set_single_class",
-            "message": "The frozen test set cannot grade this model; nothing was set.",
+            "message": ("The test set cannot grade this model, so no line was set."),
         })
     folds = np.bincount(training.fold, minlength=int(settings["n_folds"]))
     if len(folds) > 1 and folds.sum() and folds.max() > 2 * folds.sum() / len(folds):

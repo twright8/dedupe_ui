@@ -177,7 +177,7 @@ def test_applying_with_no_active_model_is_refused(run):
 
 def test_the_guard_catches_a_near_two_valued_score():
     assert stage_3b_model.collapse_reason(100, 100, 2) is not None
-    assert "two-valued" in stage_3b_model.collapse_reason(0, 0, 2)
+    assert "same two scores" in stage_3b_model.collapse_reason(0, 0, 2)
     assert stage_3b_model.collapse_reason(100, 100, 400) is None
     # Nothing scored yet is not a collapse.
     assert stage_3b_model.collapse_reason(100, 100, 0) is None
@@ -185,7 +185,7 @@ def test_the_guard_catches_a_near_two_valued_score():
 
 def test_the_guard_catches_a_collapsed_review_band():
     assert stage_3b_model.collapse_reason(200, 0, 500) is not None
-    assert "review band" in stage_3b_model.collapse_reason(200, 1, 500)
+    assert "left for review" in stage_3b_model.collapse_reason(200, 1, 500)
     # A band that merely shrinks is not a collapse.
     assert stage_3b_model.collapse_reason(200, 150, 500) is None
 
@@ -386,7 +386,7 @@ def test_pair_detail_explains_the_model_score(run, client):
     explanation = body["model_explanation"]
     assert explanation["track"] == "person"
     assert explanation["graded"] is False
-    assert "imported labels were made mostly on the name" in explanation["known_limit"]
+    assert "earlier grouping was made mostly on the name" in explanation["known_limit"]
     assert explanation["contributions"]
     first = explanation["contributions"][0]
     assert set(first) == {"name", "label", "group", "value", "value_label",

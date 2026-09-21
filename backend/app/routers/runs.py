@@ -17,17 +17,15 @@ from app.auth import current_user
 from app.db import query_db, write_db
 from app.profiles import get_profile
 from app.services.config_manager import get_version
+from app import vocabulary
+from app.services import bucketing_history
 from app.services import exact_groups_reader
 from app.services import pairs_reader
 from app.services import pipeline_runner
 from app.services import records_reader
 from app.services import run_counts
+from app.services import run_manifest
 from app.services.audit_logger import log_event
-from app.services.label_applier import apply_labels as _apply_labels
-from app.services.match_reader import get_matches as _get_matches
-from app.services.match_reader import get_matches_by_ocod as _get_matches_by_ocod
-from app.services.match_reader import get_matches_by_roe as _get_matches_by_roe
-from app.routers.labels import upsert_label
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
@@ -130,28 +128,27 @@ def _top_jurisdictions_from_outputs(paths: list[Path]) -> list[dict]:
 _FILE_DESCRIPTIONS = {
     "records_raw.parquet": "Loaded records, one row per record, before any rules",
     "records.parquet": "Records with their track and every cleaning target",
-    "units.parquet": "One representative row per unit — a merged group or a single record",
+    "units.parquet": "One row per unit — an exact group, or a record on its own",
     "unit_members.parquet": "Which records make up each unit",
     "pairs.parquet": "Every scored pair, with its bucket and how it was decided",
     "blocking_report.json": "Pairs each blocking rule would make, per track, against the budget",
-    "score_eval.json": "What the exact groups plus the accepted pairs do to the existing labels",
-    "ruleset.json": "The ruleset this run used",
-    "matches_exact.csv": "Phase 1 deterministic exact matches",
-    "matches_high_confidence.csv": "All high-confidence matches (exact + probabilistic)",
-    "matches_for_review.csv": "Probabilistic matches in the review band",
-    "matches_ambiguous.csv": "Ambiguous OCOD records with multiple close candidates",
-    "unmatched_ocod.csv": "OCOD proprietors with no high-confidence match",
-    "unmatched_roe.csv": "ROE entities with no high-confidence match",
-    "merged_dataset.csv": "Full OCOD dataset (one row per title-proprietor) with matched OE numbers",
-    "merged_roe.csv": "Full ROE register (one row per company) with matched land titles",
-    "standardisation_report.txt": "Name and jurisdiction standardisation report",
-    "events.jsonl": "Pipeline event log",
-    "roe_preprocessed.parquet": "Preprocessed ROE data",
-    "ocod_preprocessed.parquet": "Preprocessed OCOD data",
-    "ocod_dedup.parquet": "Deduplicated OCOD data (for linkage)",
-    "exact_matches.parquet": "Phase 1 exact match pairs",
-    "linkage_scored.parquet": "Phase 2 Splink scored pairs",
-    "splink_model.json": "Trained Splink model parameters",
+    "score_eval.json": "How the exact groups and the accepted pairs compare with the earlier grouping",
+    "ruleset.json": "The rules this run used, frozen at the moment it started",
+    "linkage_settings.json": "The comparisons, the blocking rules and the lines this run used",
+    "exact_groups.parquet": "Every group a match key made, merged or held",
+    "exact_eval.json": "How the match keys compare with the earlier grouping",
+    "clusters.parquet": "One row per unit: its cluster, what the gate found, and the strongest link",
+    "entities.parquet": "One row per record: its entity ID, why it is there, and the settled values",
+    "entity_report.json": "What the entity stage did, and every ID that was claimed twice",
+    "run_manifest.json": "What produced this run: the input file and its hash, the code, the rules, the models",
+    "bucketing_history.json": "Every change to the lines that set the buckets, oldest first",
+    "model_state.json": "Which model version scored this run, and where its lines are",
+    "contradictions.json": "Pairs a reviewer kept apart that a match key then merged",
+    "events.parquet": "The evidence rows behind each record",
+    "events.jsonl": "What the run did, step by step, as it ran",
+    "pipeline.log": "Everything the stages printed while the run was working",
+    "splink_model_person.json": "The trained comparison weights for the people track",
+    "splink_model_organisation.json": "The trained comparison weights for the organisations track",
 }
 
 
@@ -172,12 +169,6 @@ class CreateRunRequest(BaseModel):
     review_lower_bound: float | None = None
     render_diagnostics: bool = True
     quick_mode: bool = False
-
-
-class MarkUnlabelledRequest(BaseModel):
-    bucket: str = "review"
-    is_true_match: str = "FALSE"
-    reviewer_notes: str | None = "Bulk marked unlabelled as FALSE"
 
 
 class ReBucketRequest(BaseModel):
@@ -550,6 +541,49 @@ def cancel_run(run_id: str, user_name: str = Depends(current_user)):
     return {"ok": True, "run_id": run_id, "status": "cancelled"}
 
 
+@router.get("/{run_id}/manifest")
+def get_manifest(run_id: str):
+    """What produced this run: the input file, the code, the rules, the models.
+
+    The file itself is ``run_manifest.json`` in the run folder; a few of its
+    fields are also on the run row. ``bucketing`` is the history of every change
+    to the lines that set the buckets, oldest first, and ``bucketing_now`` is the
+    one in force.
+    """
+    run_dir = _run_dir_or_404(run_id)
+    rows = query_db(_db_path(), "SELECT * FROM runs WHERE id = ?", (run_id,))
+    row = dict(rows[0]) if rows else {}
+    manifest = run_manifest.read(run_dir)
+    if not manifest:
+        # A run from before the manifest existed. Say what the row still knows
+        # rather than 404: the answer is thin, not missing.
+        manifest = {
+            "run_id": run_id,
+            "started_at": row.get("started_at"),
+            "finished_at": row.get("finished_at"),
+            "triggered_by": row.get("triggered_by"),
+            "code_version": row.get("code_version") or "unknown",
+            "config_version": row.get("config_version"),
+            "thresholds": {
+                "accept_line": row.get("threshold_high"),
+                "review_line": row.get("threshold_review"),
+                "lowest_score_kept": None,
+            },
+            "input": {
+                "filename": row.get("input_filename"),
+                "sha256": row.get("input_sha256"),
+                "size_bytes": row.get("input_bytes"),
+                "row_count": row.get("input_rows"),
+                "uploaded_at": row.get("input_uploaded_at"),
+            },
+            "libraries": {}, "references": [], "scorers": {},
+            "partial": True,
+        }
+    history = bucketing_history.read(run_dir)
+    return {**manifest, "bucketing": history,
+            "bucketing_now": history[-1] if history else None}
+
+
 @router.get("/{run_id}/files")
 def list_files(run_id: str):
     """List output files in the run directory."""
@@ -855,131 +889,6 @@ def get_diagnostics(run_id: str):
     }
 
 
-@router.post("/{run_id}/apply-labels")
-def apply_labels(run_id: str, user_name: str = Depends(current_user)):
-    """Re-apply labels from the labels table to a completed run."""
-    db_path = _db_path()
-    data_dir = _data_dir_from_main()
-    run_dir = str(data_dir / "runs" / run_id)
-
-    rows = query_db(db_path, "SELECT id, status FROM runs WHERE id = ?", (run_id,))
-    if not rows:
-        raise HTTPException(status_code=404, detail="Run not found")
-
-    result = _apply_labels(db_path, run_dir)
-
-    # Re-applying labels changes the export, so the stored counts must move with it —
-    # otherwise the screen shows pre-label numbers over post-label data.
-    counts = pipeline_runner.refresh_counts_after_labels(
-        db_path, run_dir, run_id, result
-    )
-
-    log_event(
-        db_path,
-        user=user_name,
-        kind="label",
-        description=f"Applied labels to run {run_id}",
-        metadata={"run_id": run_id, "result": result},
-    )
-
-    return {**result, "counts": _normalize_counts(counts)}
-
-
-@router.post("/{run_id}/mark-unlabelled")
-def mark_unlabelled(
-    run_id: str,
-    body: MarkUnlabelledRequest | None = None,
-    user_name: str = Depends(current_user),
-):
-    """Create labels for every currently unlabelled match in a bucket."""
-    body = body or MarkUnlabelledRequest()
-    db_path = _db_path()
-    data_dir = _data_dir_from_main()
-    run_dir = str(data_dir / "runs" / run_id)
-
-    rows = query_db(db_path, "SELECT id FROM runs WHERE id = ?", (run_id,))
-    if not rows:
-        raise HTTPException(status_code=404, detail="Run not found")
-
-    bucket = (body.bucket or "review").strip().lower()
-    verdict = (body.is_true_match or "FALSE").strip().upper()
-    if verdict == "X":
-        verdict = "FALSE"
-    if verdict not in {"TRUE", "FALSE"}:
-        raise HTTPException(status_code=400, detail="is_true_match must be TRUE or FALSE")
-
-    marked = 0
-    skipped = 0
-    page = 1
-    per_page = 10000
-    total_pages = 1
-
-    while page <= total_pages:
-        match_data = _get_matches(
-            run_dir=run_dir,
-            db_path=db_path,
-            bucket=bucket,
-            page=page,
-            per_page=per_page,
-        )
-        total_pages = max(1, int(match_data.get("total_pages") or 0))
-        for item in match_data.get("items", []):
-            label = item.get("label")
-            if label is not None and str(label).strip() != "":
-                skipped += 1
-                continue
-
-            ocod_name_clean = (
-                item.get("ocod_name_clean")
-                or item.get("name_clean")
-                or item.get("ocod_name_raw")
-            )
-            jurisdiction_clean = item.get("jurisdiction_clean")
-            roe_company_number = item.get("roe_company_number")
-            if not all([ocod_name_clean, jurisdiction_clean, roe_company_number]):
-                skipped += 1
-                continue
-
-            upsert_label(
-                db_path=db_path,
-                ocod_name_clean=str(ocod_name_clean),
-                jurisdiction_clean=str(jurisdiction_clean),
-                roe_company_number=str(roe_company_number),
-                ocod_name_raw=item.get("ocod_name_raw"),
-                ocod_jurisdiction_raw=item.get("ocod_jurisdiction_raw") or jurisdiction_clean,
-                is_true_match=verdict,
-                reviewer=user_name,
-                notes=body.reviewer_notes,
-                run_id=run_id,
-                provenance="bulk_review",
-            )
-            marked += 1
-
-        page += 1
-
-    log_event(
-        db_path,
-        user=user_name,
-        kind="label",
-        description=f"Bulk marked {marked} unlabelled {bucket} matches as {verdict} for run {run_id}",
-        metadata={
-            "run_id": run_id,
-            "bucket": bucket,
-            "is_true_match": verdict,
-            "marked": marked,
-            "skipped": skipped,
-        },
-    )
-
-    return {
-        "run_id": run_id,
-        "bucket": bucket,
-        "is_true_match": verdict,
-        "marked": marked,
-        "skipped": skipped,
-    }
-
-
 @router.get("/{run_id}/records")
 def get_records(
     run_id: str,
@@ -1157,7 +1066,7 @@ def get_pairs(
     """
     run_dir = _run_dir_or_404(run_id)
     try:
-        return pairs_reader.get_pairs(
+        body = pairs_reader.get_pairs(
             run_dir=run_dir, track=track, bucket=bucket, decided_by=decided_by,
             import_state=import_state, held=held, min_score=min_score,
             max_score=max_score, min_gbt=min_gbt, max_gbt=max_gbt,
@@ -1165,6 +1074,10 @@ def get_pairs(
             offset=offset, limit=limit, labelled=labelled, vetoed=vetoed,
             labels=_run_labels(_db_path()),
         )
+        # Which lines put these pairs where they are. The entry in force, not
+        # three numbers stamped on every row (docs/PROVENANCE.md).
+        body["bucketing"] = bucketing_history.current(run_dir)
+        return body
     except pairs_reader.PairsNotFound:
         raise HTTPException(status_code=404, detail="Run has no scored pairs yet")
     except pairs_reader.InvalidQuery as exc:
@@ -1178,6 +1091,8 @@ def get_pair(run_id: str, pair_id: str):
     try:
         pair = pairs_reader.get_pair(run_dir, pair_id,
                                      labels=_run_labels(_db_path()))
+        if isinstance(pair, dict):
+            pair["bucketing"] = bucketing_history.current(run_dir)
     except pairs_reader.PairsNotFound:
         raise HTTPException(status_code=404, detail="Run has no scored pairs yet")
     except pairs_reader.InvalidQuery as exc:
@@ -1350,7 +1265,8 @@ def apply_model(run_id: str, body: ApplyModelRequest | None = None,
     try:
         result = model_apply.apply_model(run_dir, _run_labels(db_path),
                                          force=bool(body and body.force),
-                                         db_path=db_path)
+                                         db_path=db_path,
+                                         who=user_name or "unknown")
     except model_apply.ModelApplyError as exc:
         status = 409 if exc.detail.get("reason") else 400
         log_event(db_path, user=user_name or "unknown", kind="model",
@@ -1388,7 +1304,8 @@ def revert_model(run_id: str, user_name: str = Depends(current_user)):
     run_dir = _run_dir_or_404(run_id)
     try:
         result = model_apply.revert_model(run_dir, _run_labels(db_path),
-                                          db_path=db_path)
+                                          db_path=db_path,
+                                          who=user_name or "unknown")
     except model_apply.ModelApplyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     merged = run_counts.merge(db_path, run_id, result["counts"])
@@ -1426,90 +1343,6 @@ def get_blocking_report(run_id: str):
     )
 
 
-@router.get("/{run_id}/matches")
-def get_matches(
-    run_id: str,
-    bucket: str = Query(..., description="Match bucket: exact, high, review, ambiguous, unmatched_ocod, unmatched_roe"),
-    page: int = Query(1, ge=1),
-    per_page: int = Query(50, ge=1, le=10000),
-    jurisdiction: str | None = Query(None),
-    search: str | None = Query(None),
-    match_method: str | None = Query(None, description="Filter by match_method column (e.g. 'probabilistic')"),
-):
-    """Return paginated matches for a run, with label joins and feature mapping."""
-    db_path = _db_path()
-    data_dir = _data_dir_from_main()
-    run_dir = str(data_dir / "runs" / run_id)
-
-    # Validate run exists
-    rows = query_db(db_path, "SELECT id FROM runs WHERE id = ?", (run_id,))
-    if not rows:
-        raise HTTPException(status_code=404, detail="Run not found")
-
-    result = _get_matches(
-        run_dir=run_dir,
-        db_path=db_path,
-        bucket=bucket,
-        page=page,
-        per_page=per_page,
-        jurisdiction=jurisdiction,
-        search=search,
-        match_method=match_method,
-    )
-    for item in result.get("items", []):
-        match_id = item.get("match_id") or item.get("id")
-        if match_id and not str(match_id).startswith(f"{run_id}:"):
-            item["match_id"] = f"{run_id}:{match_id}"
-            item["id"] = item["match_id"]
-    return result
-
-
-def _stamp_candidate_ids(run_id: str, candidates: list, bucket_label: str) -> None:
-    for c in candidates or []:
-        ocod = c.get("ocod_unique_id") or c.get("ocod_name_clean") or "ocod"
-        roe = c.get("roe_unique_id") or c.get("roe_company_number") or "roe"
-        c["match_id"] = f"{run_id}:{bucket_label}:{ocod}:{roe}"
-        c["id"] = c["match_id"]
-
-
-@router.get("/{run_id}/matches/by-ocod")
-def get_matches_by_ocod(
-    run_id: str,
-    page: int = Query(1, ge=1),
-    per_page: int = Query(50, ge=1, le=10000),
-    jurisdiction: str | None = Query(None),
-    search: str | None = Query(None),
-):
-    """Entity-centric review: one OCOD entity per item with ranked ROE candidates + margin."""
-    db_path = _db_path()
-    run_dir = str(_data_dir_from_main() / "runs" / run_id)
-    if not query_db(db_path, "SELECT id FROM runs WHERE id = ?", (run_id,)):
-        raise HTTPException(status_code=404, detail="Run not found")
-    result = _get_matches_by_ocod(run_dir, db_path, page, per_page, jurisdiction, search)
-    for entity in result.get("items", []):
-        _stamp_candidate_ids(run_id, entity.get("candidates"), "review")
-    return result
-
-
-@router.get("/{run_id}/matches/by-roe")
-def get_matches_by_roe(
-    run_id: str,
-    page: int = Query(1, ge=1),
-    per_page: int = Query(50, ge=1, le=10000),
-    jurisdiction: str | None = Query(None),
-    search: str | None = Query(None),
-):
-    """ROE-centric review: one ROE company per item with its OCOD claimants."""
-    db_path = _db_path()
-    run_dir = str(_data_dir_from_main() / "runs" / run_id)
-    if not query_db(db_path, "SELECT id FROM runs WHERE id = ?", (run_id,)):
-        raise HTTPException(status_code=404, detail="Run not found")
-    result = _get_matches_by_roe(run_dir, db_path, page, per_page, jurisdiction, search)
-    for group in result.get("items", []):
-        _stamp_candidate_ids(run_id, group.get("claimants"), "roe")
-    return result
-
-
 @router.post("/{run_id}/re-bucket")
 def re_bucket(run_id: str, body: ReBucketRequest, user_name: str = Depends(current_user)):
     """Commit a new auto-accept / review threshold: re-partition the already-scored
@@ -1537,6 +1370,7 @@ def re_bucket(run_id: str, body: ReBucketRequest, user_name: str = Depends(curre
                 db_path, str(run_dir), str(config_dir), run_id=run_id,
                 threshold_high=body.threshold_high,
                 threshold_review=body.threshold_review,
+                who=user_name or "unknown",
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -1549,16 +1383,11 @@ def re_bucket(run_id: str, body: ReBucketRequest, user_name: str = Depends(curre
         )
         return {"ok": True, "counts": _normalize_counts(counts)}
 
-    from app.services.pipeline_runner import rebucket_run
-
-    counts = rebucket_run(
-        db_path, str(run_dir), str(config_dir), run_id=run_id,
-        threshold_high=body.threshold_high, threshold_review=body.threshold_review,
+    # A run with no pairs.parquet came from the two-dataset tool this app was
+    # copied from. That pipeline is gone (docs/DESIGN.md D21), so say so rather
+    # than failing somewhere deeper.
+    raise HTTPException(
+        status_code=400,
+        detail=("This run has no scored pairs, so its lines cannot be moved. "
+                "Start the run again."),
     )
-    log_event(
-        db_path, user=user_name or "unknown", kind="threshold",
-        description=f"Re-bucketed run {run_id} (high={body.threshold_high}, review={body.threshold_review})",
-        metadata={"run_id": run_id, "threshold_high": body.threshold_high,
-                  "threshold_review": body.threshold_review, "counts": counts},
-    )
-    return {"ok": True, "counts": counts}

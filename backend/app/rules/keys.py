@@ -16,11 +16,12 @@ either is not an option.
 import numpy as np
 import pandas as pd
 
+from app import vocabulary
 from app.rules import engine, functions
 
 MERGED = "merged"
 HELD = "held"
-STATUSES = (MERGED, HELD)
+STATUSES = vocabulary.EXACT_GROUP_STATUSES
 
 # The columns stage 2 writes. A record appears at most once as merged and may
 # also appear in any number of held groups.

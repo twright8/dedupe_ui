@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 
 from app.auth import current_user
 from app.db import query_db, write_db
+from app.services import run_manifest
 from app.services.audit_logger import log_event
 from app.services.upload_handler import reassemble_chunks, safe_filename, save_chunk, validate_zip
 
@@ -151,21 +152,33 @@ async def upload_chunk(
                 ("Uploaded file is not a valid ZIP archive", upload_id),
             )
             raise HTTPException(status_code=400, detail="Uploaded file is not a valid ZIP archive")
+        # Hashed once, here, while the file is still the thing that was
+        # uploaded. A run copies the hash onto its own row, so a file swapped
+        # under the same name later shows up (docs/PROVENANCE.md).
+        try:
+            digest = run_manifest.sha256_of(out_path)
+            size_bytes = Path(out_path).stat().st_size
+        except OSError:
+            digest, size_bytes = None, None
         write_db(
             db_path,
             """UPDATE upload_sessions
-               SET status = 'complete', stored_filename = ?, completed_at = datetime('now')
+               SET status = 'complete', stored_filename = ?, sha256 = ?,
+                   completed_at = datetime('now')
                WHERE upload_id = ?""",
-            (Path(out_path).name, upload_id),
+            (Path(out_path).name, digest, upload_id),
         )
         log_event(
             db_path,
             user=user_name,
             kind="upload",
             description=f"Uploaded {filename}",
-            metadata={"upload_id": upload_id, "filename": filename, "stored_filename": Path(out_path).name},
+            metadata={"upload_id": upload_id, "filename": filename,
+                      "stored_filename": Path(out_path).name,
+                      "sha256": digest, "size_bytes": size_bytes},
         )
-        return {"status": "complete", "filename": filename, "path": out_path}
+        return {"status": "complete", "filename": filename, "path": out_path,
+                "sha256": digest, "size_bytes": size_bytes}
 
     return {"status": "chunk_received", "chunk_index": chunk_index}
 

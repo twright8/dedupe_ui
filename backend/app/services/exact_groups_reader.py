@@ -18,7 +18,7 @@ from pathlib import Path
 
 import duckdb
 
-from app import duckdb_conn
+from app import duckdb_conn, vocabulary
 
 from app.profiles import get_profile
 
@@ -34,8 +34,8 @@ MAX_MEMBERS = 500
 MAX_EVENTS = 200
 
 TRACKS = ("person", "organisation")
-STATUSES = ("merged", "held")
-AGREEMENTS = ("consistent", "conflict", "extends", "new")
+STATUSES = vocabulary.EXACT_GROUP_STATUSES
+AGREEMENTS = vocabulary.AGREEMENTS
 SORTS = ("size", "priority", "name")
 
 MAX_EXISTING_IDS = 5
@@ -148,6 +148,47 @@ def _aggregate_sql(record_columns: list[str], priority: list[str], with_search: 
     """
 
 
+#: A guard's reason is machine-readable — ``max_group_size:12>10`` — so the
+#: frontend can parse it and a test can assert on it. It is also printed on the
+#: Exact groups screen, where ``name_core`` and a bare ``>`` mean nothing to a
+#: researcher. ``guard_text`` is the same fact as a sentence, built here at read
+#: time so the stored value never changes (docs/BACKEND_STRINGS.md §4).
+def guard_text(guard, column_labels: dict | None = None) -> str | None:
+    """One guard reason as a sentence, or None when the group passed."""
+    if not guard:
+        return None
+    text = str(guard)
+    kind, _, detail = text.partition(":")
+    labels = column_labels or {}
+    if kind == "max_group_size" and ">" in detail:
+        found, limit = detail.split(">", 1)
+        return (f"This match key would have put {found} records together, and the "
+                f"limit is {limit}.")
+    if kind == "max_distinct" and "=" in detail and ">" in detail:
+        column, rest = detail.split("=", 1)
+        found, limit = rest.split(">", 1)
+        name = labels.get(column) or _plain_column(column)
+        return (f"The records here hold {found} different values of {name}, and "
+                f"the limit is {limit}.")
+    if kind == "require_any_equal":
+        name = labels.get(detail) or _plain_column(detail)
+        return f"The records here do not all agree on {name}."
+    if kind == "blocklist":
+        return "The value this key matched on is on the blocklist."
+    return text
+
+
+def _plain_column(column: str) -> str:
+    """A cleaned column name as a phrase. One definition, in ``pairs_reader``.
+
+    Imported inside the function because ``pairs_reader`` reads this module's
+    neighbours at import time, and one word must not cost a cycle.
+    """
+    from app.services.pairs_reader import plain_column
+
+    return plain_column(column)
+
+
 def _item(row: dict, priority: list[str]) -> dict:
     key_ids = [k for k in str(row.get("key_ids") or "").split("|") if k]
     return {
@@ -155,6 +196,7 @@ def _item(row: dict, priority: list[str]) -> dict:
         "track": row["track"],
         "status": row["status"],
         "guard": row["guard"],
+        "guard_text": guard_text(row["guard"]),
         "key_ids": key_ids,
         "size": int(row["size"]),
         "n_labelled": int(row["n_labelled"]),
