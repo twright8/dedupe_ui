@@ -1429,3 +1429,107 @@ def test_the_stage_takes_the_route_by_route_path_above_the_limit(tmp_path,
         else:
             assert list(nulls_as_none(one[[column]])[column]) \
                 == list(nulls_as_none(many[[column]])[column]), column
+
+
+# ---------------------------------------------------------------------------
+# Reusing a model the run folder already holds
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_a_second_attempt_reuses_the_model_instead_of_training_again(tmp_path,
+                                                                    monkeypatch):
+    """Training is saved before prediction, so a failed predict is not paid twice.
+
+    A PSC run spends an hour and a half in EM and then hours in prediction, and
+    it is prediction that fails. The model is written the moment it is trained,
+    with a fingerprint of everything that shaped it, and a later attempt in the
+    same folder picks it up.
+    """
+    run_dir, config_dir = _multi_route_run(tmp_path)
+    run_stage_3_score(str(run_dir), str(config_dir), render_diagnostics=False)
+    first = pd.read_parquet(run_dir / "pairs.parquet")
+    model = (run_dir / "splink_model_person.json").read_text()
+    trained = json.loads((run_dir / "splink_trained_person.json").read_text())
+    assert trained["track"] == "person"
+    assert len(trained["fingerprint"]) == 64
+
+    from splink.internals.linker_components.training import LinkerTraining
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("the model was trained again")
+
+    monkeypatch.setattr(LinkerTraining, "estimate_u_using_random_sampling", refuse)
+    monkeypatch.setattr(
+        LinkerTraining, "estimate_parameters_using_expectation_maximisation", refuse)
+
+    run_stage_3_score(str(run_dir), str(config_dir), render_diagnostics=False)
+    second = pd.read_parquet(run_dir / "pairs.parquet")
+
+    # Nothing asked the linker to train — the stubs above would have said so —
+    # and the model on disk is untouched.
+    assert (run_dir / "splink_model_person.json").read_text() == model
+    # And the run is the same run.
+    assert len(first) == len(second)
+    order = ["unit_id_l", "unit_id_r"]
+    first = first.sort_values(order).reset_index(drop=True)
+    second = second.sort_values(order).reset_index(drop=True)
+    assert (first["match_probability"] - second["match_probability"]).abs().max() \
+        < 1e-9
+
+
+@pytest.mark.slow
+def test_a_changed_setting_retrains_rather_than_reusing(tmp_path):
+    """The fingerprint covers what shapes the model, so a change invalidates it."""
+    run_dir, config_dir = _multi_route_run(tmp_path)
+    run_stage_3_score(str(run_dir), str(config_dir), render_diagnostics=False)
+    before = json.loads(
+        (run_dir / "splink_trained_person.json").read_text())["fingerprint"]
+
+    settings = json.loads(json.dumps(MULTI_ROUTE_SETTINGS))
+    settings["tracks"]["person"]["comparisons"][0]["splink_args"][
+        "score_threshold_or_thresholds"] = [0.95]
+    (config_dir / "linkage_settings.json").write_text(json.dumps(settings),
+                                                      encoding="utf-8")
+    run_stage_3_score(str(run_dir), str(config_dir), render_diagnostics=False)
+    after = json.loads(
+        (run_dir / "splink_trained_person.json").read_text())["fingerprint"]
+    assert after != before
+
+
+def test_the_fingerprint_moves_with_the_controlled_sql_and_the_unit_count():
+    """It carries the blocking SQL *after* its control, which depends on the data."""
+    config = linkage.track_settings(MULTI_ROUTE_SETTINGS, "person")
+    ruleset = default_ruleset()
+    blocking = [{"id": "r0", "sql": "l.surname = r.surname"}]
+    em = [{"id": "", "sql": "l.surname = r.surname"}]
+
+    base = stage_3.training_fingerprint(config, MULTI_ROUTE_SETTINGS, ruleset,
+                                        "person", blocking, em, 1000)
+    assert base == stage_3.training_fingerprint(
+        config, MULTI_ROUTE_SETTINGS, ruleset, "person", blocking, em, 1000)
+    assert base != stage_3.training_fingerprint(
+        config, MULTI_ROUTE_SETTINGS, ruleset, "person", blocking, em, 1001)
+    controlled = [{"id": "r0", "sql": "l.surname = r.surname AND l.surname "
+                                      "NOT IN ('SMITH')"}]
+    assert base != stage_3.training_fingerprint(
+        config, MULTI_ROUTE_SETTINGS, ruleset, "person", controlled, em, 1000)
+
+
+def test_a_saved_model_is_only_reused_when_everything_matches(tmp_path,
+                                                              monkeypatch):
+    model = tmp_path / "splink_model_person.json"
+    trained = tmp_path / "splink_trained_person.json"
+    assert stage_3.saved_training_matches(trained, model, "abc") is False
+
+    model.write_text("{}", encoding="utf-8")
+    trained.write_text(json.dumps({"fingerprint": "abc"}), encoding="utf-8")
+    assert stage_3.saved_training_matches(trained, model, "abc") is True
+    assert stage_3.saved_training_matches(trained, model, "def") is False
+
+    trained.write_text("not json", encoding="utf-8")
+    assert stage_3.saved_training_matches(trained, model, "abc") is False
+
+    trained.write_text(json.dumps({"fingerprint": "abc"}), encoding="utf-8")
+    monkeypatch.setenv("REUSE_TRAINED_MODEL", "0")
+    assert stage_3.saved_training_matches(trained, model, "abc") is False

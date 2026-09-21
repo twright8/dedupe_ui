@@ -24,6 +24,7 @@ Outputs, all in the run folder:
 """
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -66,6 +67,11 @@ BLOCKING_REPORT_FILENAME = "blocking_report.json"
 SCORE_EVAL_FILENAME = "score_eval.json"
 CONTRADICTIONS_FILENAME = "contradictions.json"
 MODEL_FILENAME = "splink_model_{track}.json"
+# Beside the saved model, a fingerprint of everything that shaped it. A run
+# that dies after training — which is what a PSC run does, because prediction
+# is the expensive half — can then pick the model up instead of spending
+# another hour and a half in EM to arrive at the same numbers.
+TRAINED_FILENAME = "splink_trained_{track}.json"
 
 STAGE = 3
 STAGE_NAME = "score"
@@ -107,6 +113,11 @@ DEFAULT_MODEL_BATCH = 2_000_000
 # Donations, at a few hundred thousand, keeps the single pass.
 ROUTE_BY_ROUTE_ENV = "PREDICT_ROUTE_BY_ROUTE_ABOVE"
 DEFAULT_ROUTE_BY_ROUTE_ABOVE = 5_000_000
+
+# Set to "0" to train from scratch even when the run folder already holds a
+# model that matches. Nothing but a suspicion of the saved file should need it:
+# the fingerprint covers everything the training reads.
+REUSE_TRAINED_ENV = "REUSE_TRAINED_MODEL"
 
 
 def _positive_int(name: str, fallback: int) -> int:
@@ -765,21 +776,27 @@ def train_track(
     frame = _splink_frame(rows, config, deterministic)
     candidate, _review, _high = linkage.thresholds(settings)
 
+    # The control is measured on `frame`, not on `rows`, because `frame` is
+    # what Splink will apply the generated SQL to and the two do not spell
+    # their key values the same way (`cast_numeric_columns`). Measuring it on
+    # `rows` left every PSC route that blocks on `dob_year_clean` — four of the
+    # six — with a control that matched nothing and did nothing.
+    temp_dir = Path(run_dir) / "duckdb_tmp"
+    blocking = controlled_rules(frame, linkage.blocking_rules(config), track,
+                                temp_dir=temp_dir,
+                                progress_callback=progress_callback,
+                                cache=control_cache)
+    em_rules = controlled_rules(frame, linkage.em_entries(config), track,
+                                temp_dir=temp_dir,
+                                progress_callback=progress_callback,
+                                cache=control_cache)
+
     kwargs = dict(
         link_type="dedupe_only",
         unique_id_column_name="unit_id",
         comparisons=[linkage.build_comparison(c) for c in linkage.comparisons(config)],
-        # The control is measured on `frame`, not on `rows`, because `frame` is
-        # what Splink will apply the generated SQL to and the two do not spell
-        # their key values the same way (`cast_numeric_columns`). Measuring it
-        # on `rows` left every PSC route that blocks on `dob_year_clean` — four
-        # of the six — with a control that matched nothing and did nothing.
         blocking_rules_to_generate_predictions=[
-            linkage.build_blocking_rule(r["sql"])
-            for r in controlled_rules(frame, linkage.blocking_rules(config), track,
-                                      temp_dir=Path(run_dir) / "duckdb_tmp",
-                                      progress_callback=progress_callback,
-                                      cache=control_cache)
+            linkage.build_blocking_rule(r["sql"]) for r in blocking
         ],
         max_iterations=int(settings.get("em_iterations", linkage.DEFAULT_EM_ITERATIONS)),
         # Splink only emits the gamma columns — which agreement level each
@@ -793,7 +810,20 @@ def train_track(
     if prior is not None:
         kwargs["probability_two_random_records_match"] = float(prior)
 
-    db_api = _db_api(run_dir / "duckdb_tmp")
+    fingerprint = training_fingerprint(config, settings, ruleset, track,
+                                       blocking, em_rules, len(frame))
+    model_path = Path(run_dir) / MODEL_FILENAME.format(track=track)
+    trained_path = Path(run_dir) / TRAINED_FILENAME.format(track=track)
+    db_api = _db_api(temp_dir)
+
+    if saved_training_matches(trained_path, model_path, fingerprint):
+        _step(f"  Reusing the model this run folder already holds "
+              f"({fingerprint[:12]}); nothing about it has changed.",
+              progress_callback)
+        linker = Linker(frame, str(model_path), db_api=db_api)
+        return _predict_track(linker, candidate, settings, config, track, run_dir,
+                              kwargs, priced_pairs, progress_callback)
+
     linker = Linker(frame, SettingsCreator(**kwargs), db_api=db_api)
 
     if prior is None:
@@ -828,10 +858,7 @@ def train_track(
     # training rule may carry a hot-key control, and it is applied here for the
     # same reason it is applied to a prediction rule: the pairs inside a hot
     # block are never made rather than made and thrown away.
-    for rule in controlled_rules(frame, linkage.em_entries(config), track,
-                                 temp_dir=run_dir / "duckdb_tmp",
-                                 progress_callback=progress_callback,
-                                 cache=control_cache):
+    for rule in em_rules:
         rule = rule["sql"]
         _step(f"  EM on {rule}...", progress_callback)
         t0 = time.time()
@@ -844,6 +871,26 @@ def train_track(
             _step(f"  WARNING: EM on {rule} failed ({exc}); keeping the current m.",
                   progress_callback)
 
+    # Saved before predicting, not after. Prediction is the expensive half and
+    # the half that fails, and a model that has to be trained again from the
+    # top on every attempt makes each attempt cost an hour and a half more
+    # than it needs to.
+    linker.misc.save_model_to_json(str(model_path), overwrite=True)
+    trained_path.write_text(json.dumps({
+        "fingerprint": fingerprint,
+        "track": track,
+        "model": model_path.name,
+        "units": int(len(frame)),
+        "written": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }, indent=2), encoding="utf-8")
+
+    return _predict_track(linker, candidate, settings, config, track, run_dir,
+                          kwargs, priced_pairs, progress_callback)
+
+
+def _predict_track(linker, candidate, settings, config, track, run_dir, kwargs,
+                   priced_pairs, progress_callback):
+    """Predict one track, by whichever path its priced pair total calls for."""
     path = Path(run_dir) / PREDICTIONS_FILENAME.format(track=track)
     n_rules = len(kwargs["blocking_rules_to_generate_predictions"])
     limit = route_by_route_above()
@@ -862,6 +909,47 @@ def train_track(
     _step(f"  {n_pairs:,} candidate pairs ({time.time() - t0:.1f}s)",
           progress_callback)
     return linker, path, n_pairs, routes
+
+
+def training_fingerprint(config: dict, settings: dict, ruleset: dict, track: str,
+                         blocking: list[dict], em_rules: list[dict],
+                         n_rows: int) -> str:
+    """Everything that decides what a trained model comes out as, as one hash.
+
+    The comparisons, the prior and how it is estimated, the EM settings and the
+    seed, how many units there are, and the blocking and training SQL **after**
+    their hot-key controls — which is the part that depends on the data, since
+    the control inlines the oversized keys it found.
+    """
+    payload = json.dumps({
+        "track": track,
+        "comparisons": linkage.comparisons(config),
+        "prior": settings.get("probability_two_random_records_match"),
+        "deterministic_recall": settings.get("deterministic_recall"),
+        "deterministic_rules": _deterministic_rules(ruleset, track),
+        "em_iterations": settings.get("em_iterations",
+                                      linkage.DEFAULT_EM_ITERATIONS),
+        "random_seed": settings.get("random_seed"),
+        "u_sample_pairs": U_SAMPLE_PAIRS,
+        "units": int(n_rows),
+        "blocking": [r["sql"] for r in blocking],
+        "em": [r["sql"] for r in em_rules],
+    }, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def saved_training_matches(trained_path: Path, model_path: Path,
+                           fingerprint: str) -> bool:
+    """Whether this run folder already holds the model this training would give."""
+    if os.environ.get(REUSE_TRAINED_ENV, "1") == "0":
+        return False
+    if not (trained_path.is_file() and model_path.is_file()):
+        return False
+    try:
+        saved = json.loads(trained_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return saved.get("fingerprint") == fingerprint
 
 
 #: Everything the pairs file keeps out of a prediction, besides the gammas.
@@ -2076,8 +2164,9 @@ def run_stage_3_score(
                 "routes": routes,
             }
             _write_report()
+        # `train_track` saved the model before it predicted, so it survives a
+        # failure in prediction; this reads what it wrote.
         model_path = run_dir / MODEL_FILENAME.format(track=track)
-        linker.misc.save_model_to_json(str(model_path), overwrite=True)
         untrained.extend(inspect_trained_model(model_path, track, progress_callback))
         if render_diagnostics:
             with _phase(f"Rendering the {track} model charts", progress_callback):

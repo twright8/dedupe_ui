@@ -2589,3 +2589,18 @@ is the next thing to do to this pipeline.
 What would make this wrong, in the order I would bet on it: the overlay pass
 over 42 million pairs (it has never run at more than a million), the concat
 step (never run at more than 1.07 million), and stage 5's mint frame.
+
+### A trained model survives a failed prediction
+
+`train_track` saves the model the moment EM finishes, **before** it predicts,
+with `splink_trained_<track>.json` beside it holding a fingerprint of
+everything that shaped it: the comparisons, the prior and how it is estimated,
+the EM settings and the seed, the unit count, and the blocking and training SQL
+*after* their hot-key controls — the part that depends on the data, since a
+control inlines the keys it found. A later attempt in the same run folder whose
+fingerprint matches loads the model and goes straight to prediction. Set
+`REUSE_TRAINED_MODEL=0` to train anyway.
+
+This is insurance for exactly the failure that happened: a PSC run spends about
+an hour and a half in EM and then hours in prediction, and it is prediction
+that fails. Before this, every attempt paid for the training again.
