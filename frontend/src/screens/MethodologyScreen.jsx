@@ -7,6 +7,7 @@
 import { Fragment, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useProfile } from "../profile";
+import { usePipelineStages } from "../hooks/usePipelineStages";
 import { existingLabelName } from "../profileText";
 import {
   FIGURE_SETS,
@@ -40,6 +41,24 @@ function Stage({ tone, title, kicker, tech, labelsHere, children }) {
         )}
         <div className="mth-stage-text">{children}</div>
       </div>
+    </div>
+  );
+}
+
+/* The stages, by name, straight from GET /api/pipeline/stages. This is the one
+   list, so the cards below and the new-run preview cannot drift from it. */
+function StageIndex() {
+  const { stages } = usePipelineStages();
+  if (!stages || stages.length === 0) return null;
+  return (
+    <div className="stages" style={{ margin: "12px 0 6px" }}>
+      {stages.map((stage) => (
+        <div className="stage queued" key={stage.key}>
+          <span className="st-dot" />
+          <div className="st-name">{stage.label}</div>
+          <div className="st-meta">{stage.description}</div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -139,8 +158,11 @@ export default function MethodologyScreen() {
         <p className="mth-p">
           A run moves through these stages in order. Each stage hands its work to the next. The
           grey chip on each stage names the tab where you change it. The red marker shows where
-          your answers come in.
+          your answers come in. Stages are named, never numbered. &ldquo;Your answers&rdquo; is
+          your own step and not a stage of the run.
         </p>
+
+        <StageIndex />
 
         <div className="mth-pipe">
           <Stage tone="var(--muted)" kicker="Load" title="Read the file">
@@ -153,7 +175,7 @@ export default function MethodologyScreen() {
 
           <Stage
             tone="var(--blue)"
-            kicker="Tracks"
+            kicker="Clean"
             title={`Sort each record into ${trackA} or ${trackB}`}
             tech="Config → Tracks"
           >
@@ -171,7 +193,7 @@ export default function MethodologyScreen() {
 
           <Stage
             tone="var(--blue)"
-            kicker="Cleaning"
+            kicker="Clean"
             title="Tidy the values into new columns"
             tech="Config → Cleaning steps"
           >
@@ -288,7 +310,7 @@ export default function MethodologyScreen() {
 
           <Stage
             tone="var(--amber)"
-            kicker="Scoring"
+            kicker="Score pairs"
             title="Score the pairs that are not obvious"
             tech="Config → Thresholds & Splink"
           >
@@ -334,7 +356,7 @@ export default function MethodologyScreen() {
 
           <Stage
             tone="var(--violet)"
-            kicker="The model"
+            kicker="Model score"
             title="A trained model re-scores the pairs"
             tech="Diagnostics → Trained model"
           >
@@ -364,7 +386,7 @@ export default function MethodologyScreen() {
 
           <Stage
             tone="var(--ti-red)"
-            kicker="Review"
+            kicker="Your answers"
             title="You answer the pairs the tool is unsure about"
             labelsHere="your answers are saved here"
           >
@@ -391,7 +413,7 @@ export default function MethodologyScreen() {
 
           <Stage
             tone="var(--violet)"
-            kicker="Clusters"
+            kicker="Cluster"
             title="Join the accepted pairs into clusters"
             tech="Config → Thresholds & Splink"
           >

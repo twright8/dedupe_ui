@@ -20,9 +20,20 @@ import { Icons } from "../components/Icons";
 import { Empty } from "../components/Empty";
 import { Term, TermHint, Provenance, provenanceLabel } from "../components/Term";
 import { fmtDateTime, fmtNumber } from "../components/ProbBar";
-import { provenanceFor } from "../glossary";
+import { ANSWER_LABEL, provenanceFor } from "../glossary";
 import { noun } from "../profileText";
 import { useProfile } from "../profile";
+
+/* How many of the test set carry one answer. The API sends `by_answer` keyed
+   by the words a reviewer reads, and `by_verdict` keyed by the values it
+   stores. The words are preferred, so no screen has to know that TRUE means
+   Match. */
+function answerCount(testSet, value) {
+  const word = ANSWER_LABEL[value];
+  const byAnswer = testSet?.by_answer;
+  if (byAnswer && byAnswer[word] != null) return byAnswer[word];
+  return testSet?.by_verdict?.[value] || 0;
+}
 
 const PER_PAGE = 100;
 
@@ -336,8 +347,8 @@ export default function LabelsScreen() {
                   {evalSet.total > 0 && (
                     <span className="muted">
                       {" "}
-                      · {evalSet.by_verdict?.TRUE || 0} Match, {evalSet.by_verdict?.FALSE || 0} Not a
-                      match
+                      &middot; {answerCount(evalSet, "TRUE")} {ANSWER_LABEL.TRUE},{" "}
+                      {answerCount(evalSet, "FALSE")} {ANSWER_LABEL.FALSE}
                     </span>
                   )}
                   <span className="muted">

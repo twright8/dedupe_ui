@@ -26,6 +26,7 @@ import { patternSummary } from "../components/PairEvidence";
 import { FocusEvents } from "../components/FocusStrip";
 import { evidenceFocusFor, pickColumns } from "../evidenceFocus";
 import { guardReason } from "../components/ExactGroupsTable";
+import { RunEntityProvenance } from "../components/EntityProvenance";
 import { Term, TermHint, Provenance } from "../components/Term";
 import { useProfile } from "../profile";
 import { noun } from "../profileText";
@@ -161,12 +162,16 @@ function statusSentence(status, cluster) {
     );
   }
   if (status === "held_key") {
-    const reason = guardReason(cluster?.guard);
+    // The API says why in a full sentence, so it stands on its own. Our own
+    // parser gives a fragment, and it is the fallback for an answer that
+    // carries no `guard_text`.
+    const sentence = cluster?.guard_text || null;
+    const fragment = sentence ? null : guardReason(cluster?.guard);
     return (
       <>
         A <Term name="guard" /> on a match key stopped these records being put together
-        {reason ? `: ${reason}` : ""}. They are a <Term name="heldGroup" />, still separate and
-        waiting for you.
+        {fragment ? `: ${fragment}` : ""}.{sentence ? ` ${sentence}` : ""} They are a{" "}
+        <Term name="heldGroup" />, still separate and waiting for you.
       </>
     );
   }
@@ -674,6 +679,55 @@ function ClusterQueue({ items, selected, setSelected, priorityColumn, page, tota
   );
 }
 
+/* ------------------------------------------------------------
+   The entity a decided cluster became
+   ------------------------------------------------------------
+   A cluster carries no entity ID of its own: the entity stage gives
+   the IDs out after the decisions are in. So one member record is
+   looked up in this run's entities, and the entity that names this
+   cluster is the one. Nothing is shown until the entity stage has
+   run.
+   ------------------------------------------------------------ */
+function DecidedEntity({ runId, detail, recordPlural }) {
+  const [entityId, setEntityId] = useState(null);
+
+  const units = detail?.units || [];
+  const recordId =
+    units.map((u) => (u.members || [])[0]?.record_id).find(Boolean) ||
+    units.map((u) => u.unit_id).find(Boolean) ||
+    null;
+
+  useEffect(() => {
+    let alive = true;
+    setEntityId(null);
+    if (!recordId) return undefined;
+    api
+      .getRunEntities(runId, { q: String(recordId), limit: 50 })
+      .then((res) => {
+        if (!alive) return;
+        const items = res?.items || [];
+        const mine =
+          items.find((e) => e.cluster_id && e.cluster_id === detail.cluster_id) ||
+          (items.length === 1 ? items[0] : null);
+        setEntityId(mine ? mine.entity_id : null);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [runId, recordId, detail?.cluster_id]);
+
+  // Nothing to show until the entity stage has run and named one.
+  if (!entityId) return null;
+  return (
+    <RunEntityProvenance
+      runId={runId}
+      entityId={entityId}
+      recordPlural={recordPlural}
+    />
+  );
+}
+
 // ---------- the opened cluster ----------
 function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
   const navigate = useNavigate();
@@ -686,6 +740,7 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
   const [notes, setNotes] = useState("");
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
+  const recordPlural = noun(profile, "record_plural");
 
   const load = useCallback(() => {
     if (!clusterId) return;
@@ -956,6 +1011,10 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
           )}
         </div>
       </div>
+
+      {/* A decided cluster has become an entity, so the whole chain behind it
+          can be read here rather than only on the Entities tab. */}
+      {decision && <DecidedEntity runId={runId} detail={detail} recordPlural={recordPlural} />}
 
       {/* Units */}
       <div className="card" style={{ minWidth: 0 }}>

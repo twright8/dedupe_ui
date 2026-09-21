@@ -324,7 +324,9 @@ export default function NewRunScreen() {
   }
 
   // The stages this build's pipeline actually has, named by the backend so the
-  // card can never drift from the code that runs.
+  // card can never drift from the code that runs. They are shown by name and
+  // never numbered: three numberings are in use inside the pipeline and any one
+  // of them would be wrong here (docs/DESIGN.md D21).
   const [stages, setStages] = useState(null);
   useEffect(() => {
     api
@@ -413,7 +415,7 @@ export default function NewRunScreen() {
                 <div className="stages">
                   {stages.map((s, i) => (
                     <div className="stage queued" key={s.key || i}>
-                      <div className="st-num">{i}</div>
+                      <span className="st-dot" />
                       <div className="st-name">{s.label || s.key}</div>
                       <div className="st-meta">{s.description}</div>
                     </div>

@@ -667,7 +667,9 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 .features .ft {
   display: grid;
-  grid-template-columns: 130px 1fr 60px;
+  /* The label column carries a plain sentence, the column as a phrase, and
+     sometimes the engine's own wording, so it is given room to breathe. */
+  grid-template-columns: minmax(140px, 250px) 1fr 60px;
   gap: 12px;
   align-items: center;
   font-size: 12.5px;
@@ -792,10 +794,11 @@ input, select, textarea { font: inherit; color: inherit; }
   transition: width .3s ease;
 }
 
-/* stage chips */
+/* stage chips. Stages are named and never numbered (docs/DESIGN.md D21), so
+   the grid fits as many named chips per row as the card is wide. */
 .stages {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 8px;
 }
 .stage {
@@ -805,11 +808,12 @@ input, select, textarea { font: inherit; color: inherit; }
   background: var(--surface);
   position: relative;
 }
-.stage .st-num {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--muted-2);
-  letter-spacing: 0.02em;
+.stage .st-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line-strong);
+  display: inline-block;
 }
 .stage .st-name {
   font-size: 13px;
@@ -819,9 +823,9 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 .stage .st-meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
 .stage.done    { border-color: var(--green); }
-.stage.done    .st-num { color: var(--green); }
+.stage.done    .st-dot { background: var(--green); }
 .stage.running { border-color: var(--ti-red); background: var(--ti-red-50); }
-.stage.running .st-num { color: var(--ti-red); }
+.stage.running .st-dot { background: var(--ti-red); }
 .stage.queued  { color: var(--muted); }
 
 /* skeleton spinner / loading dot */

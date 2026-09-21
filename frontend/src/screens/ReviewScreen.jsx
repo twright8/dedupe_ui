@@ -39,14 +39,11 @@ import { Cell, NUMERIC_TYPES, SYSTEM_COLUMNS, PATTERN_COLUMNS } from "../compone
 import MethodologyNotes from "../components/MethodologyNotes";
 import { useKeyboardNav } from "../hooks/useKeyboardNav";
 import { useProfile } from "../profile";
+import { ANSWER_LABEL as ANSWER, SCORER, valueLabel } from "../glossary";
 import { existingLabelName, hasExistingLabels, noun } from "../profileText";
 
 const PER_PAGE = 50;
 const BULK_LIMIT = 500; // the API's own cap, and the batch size for saving
-
-/* The API's two values, turned into the two words a reviewer reads. This is
-   the only place the mapping happens. */
-const ANSWER = { TRUE: "Match", FALSE: "Not a match" };
 
 // The bucket tabs, in the order a reviewer works through them.
 const BUCKETS = [
@@ -1396,6 +1393,7 @@ function ReviewDiff({
       {/* The pair */}
       <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
         <DiffHero pair={pair} high={threshold} review={reviewLow} />
+        <BucketingLine bucketing={pair.bucketing} />
         {/* The hero's tag says where the pair landed. This says how it got
             there — the same chip, in the same words, as in the table. */}
         {pair.decided_by && (
@@ -1445,6 +1443,34 @@ function ReviewDiff({
 }
 
 const CLEANED_OPEN_KEY = "review.cleanedColumnsOpen";
+
+/* Which lines put this pair in its bucket, when they were set and who set
+   them. The lines are not stamped on every pair row — the change is written
+   down instead — so this is the entry in force when the pair was bucketed. */
+function BucketingLine({ bucketing }) {
+  if (!bucketing) return null;
+  const at = bucketing.at ? new Date(bucketing.at) : null;
+  const day =
+    at && !Number.isNaN(at.getTime())
+      ? at.toLocaleDateString("en-GB", { day: "numeric", month: "short" })
+      : null;
+  const who = bucketing.who && bucketing.who !== "system" ? bucketing.who : null;
+  const scorer = valueLabel(SCORER, bucketing.scorer);
+  const parts = [];
+  if (bucketing.accept_line != null)
+    parts.push(`accept at ${Number(bucketing.accept_line).toFixed(2)}`);
+  if (bucketing.review_line != null)
+    parts.push(`review at ${Number(bucketing.review_line).toFixed(2)}`);
+  if (scorer) parts.push(`scorer ${scorer}`);
+  if (parts.length === 0) return null;
+
+  return (
+    <p className="muted" style={{ fontSize: 12, margin: 0, lineHeight: 1.5 }}>
+      Placed by the lines set{day ? ` on ${day}` : ""}
+      {who ? ` by ${who}` : ""}: {parts.join(", ")}.
+    </p>
+  );
+}
 
 function readOpen() {
   try {

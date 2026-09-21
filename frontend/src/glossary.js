@@ -278,6 +278,14 @@ export const TERMS = [
     seeAlso: ["earlierGrouping", "entityId"],
   },
   {
+    key: "link",
+    term: "link",
+    plural: "links",
+    definition:
+      "One accepted join between two records inside an entity. It carries what joined them: a match key, a score, an earlier ID or a reviewer.",
+    seeAlso: ["entity", "pair"],
+  },
+  {
     key: "cluster",
     term: "cluster",
     plural: "clusters",
@@ -367,6 +375,22 @@ export const TERMS = [
     plural: "config versions",
     definition: "One saved, frozen copy of every rule and setting. A run names the version it used.",
     retire: ["ruleset", "linkage settings"],
+    seeAlso: ["run"],
+  },
+  {
+    key: "codeVersion",
+    term: "code version",
+    plural: "code versions",
+    definition:
+      "The exact copy of this tool's code that produced a run. It is named by the commit it was built from.",
+    seeAlso: ["run", "configVersion"],
+  },
+  {
+    key: "fileFingerprint",
+    term: "file fingerprint",
+    plural: "file fingerprints",
+    definition:
+      "A short code worked out from a file's contents. Two files with the same fingerprint hold exactly the same bytes, whatever they are named.",
     seeAlso: ["run"],
   },
   {
@@ -662,17 +686,19 @@ export const PROVENANCE_MAP = {
     exact_key: { key: "matchKey" },
     single: { key: "alone" },
   },
-  // entity.entity_basis
+  // entity.entity_basis, registry entity_members.entity_basis
   entity_basis: {
     single: { key: "alone" },
     exact_key: { key: "matchKey" },
     import: { key: "earlier" },
     score: { key: "score" },
+    veto: { key: "veto" },
     human: { key: "reviewer" },
   },
-  // cluster edge.edge_source / edge.source
+  // cluster edge.edge_source / entity_edges.source — one accepted link
   edge_source: {
     score: { key: "score" },
+    model: { key: "score", detail: "Model score" },
     import: { key: "earlier" },
     human: { key: "reviewer" },
     veto: { key: "veto" },
@@ -795,6 +821,125 @@ export const AGREEMENT = {
     definition: "The earlier grouping said nothing about these records.",
   },
 };
+
+export const ANSWER_QUESTION = "The answer on this pair";
+
+/* pair_labels.is_match. The API keeps TRUE and FALSE; the screen never does.
+   `by_answer` on the test set is keyed by these labels, not by the values. */
+export const ANSWER = {
+  TRUE: {
+    label: "Match",
+    tag: "green",
+    definition: "These two records are the same person or the same organisation.",
+  },
+  FALSE: {
+    label: "Not a match",
+    tag: "red",
+    definition: "These two records are different people or different organisations.",
+  },
+};
+
+// The two words on their own, for a sentence that cannot hold an element.
+export const ANSWER_LABEL = {
+  TRUE: ANSWER.TRUE.label,
+  FALSE: ANSWER.FALSE.label,
+};
+
+/* ------------------------------------------------------------
+   3c. Where an answer was read from, and what moved the lines
+   ------------------------------------------------------------
+   Four more API values that reach the screen. Each is a stored word
+   with one label and one definition, exactly like the tables above.
+   ------------------------------------------------------------ */
+
+export const ANSWER_SOURCE_QUESTION = "Where this answer was read from";
+
+/* The `source` on an entity provenance response. */
+export const ANSWER_SOURCE = {
+  run: {
+    label: "From this run's files",
+    tag: "",
+    definition:
+      "Read from the run folder. Delete the run and this answer goes with it, unless the run was published.",
+  },
+  registry: {
+    label: "From the registry",
+    tag: "green",
+    definition:
+      "Read from the registry, which keeps this after a run is deleted. Publishing writes it down.",
+  },
+};
+
+export const RULES_REPLAYED_QUESTION = "Which rules these steps used";
+
+/* The `source` on a cleaning preview. */
+export const RULES_REPLAYED = {
+  run: {
+    label: "This run's own rules",
+    tag: "green",
+    definition:
+      "The frozen rules this run used, replayed on this record. They are what made the value you are looking at.",
+  },
+  draft: {
+    label: "The rules you are editing",
+    tag: "amber",
+    definition: "The draft rules on this screen. Nothing has been saved or run with them yet.",
+  },
+};
+
+export const SCORER_QUESTION = "Which score decided";
+
+/* The `scorer` on a run's details and on a change to the lines. */
+export const SCORER = {
+  splink: {
+    label: "Splink score",
+    tag: "",
+    definition: "The score the unsupervised engine works out from the shape of the data.",
+  },
+  model: {
+    label: "Model score",
+    tag: "violet",
+    definition: "The score the trained model works out from saved labels.",
+  },
+};
+
+export const LINE_CHANGE_QUESTION = "What moved the lines";
+
+/* The `action` on an entry in a run's history of the lines. */
+export const LINE_CHANGE = {
+  scored: {
+    label: "First scored",
+    tag: "",
+    definition: "The run scored its pairs and put each one in a bucket for the first time.",
+  },
+  "re-bucketed": {
+    label: "Lines moved",
+    tag: "amber",
+    definition:
+      "Someone moved the accept line or the review line, so every pair was put in a bucket again.",
+  },
+  "model applied": {
+    label: "Model applied",
+    tag: "violet",
+    definition: "A trained model scored the same pairs, and the buckets were set on its score.",
+  },
+  "model reverted": {
+    label: "Model taken off",
+    tag: "blue",
+    definition: "The model was taken off this run, so the buckets went back to the Splink score.",
+  },
+};
+
+/* One value from any of the four tables above, or null when it is empty or
+   unknown — so a caller can leave the words out rather than print a raw one. */
+export function valueMeta(table, value) {
+  if (value == null || value === "") return null;
+  return table[String(value).toLowerCase()] || null;
+}
+
+export function valueLabel(table, value, fallback = null) {
+  return valueMeta(table, value)?.label ?? fallback;
+}
 
 /* ------------------------------------------------------------
    3b. The seven sets of figures

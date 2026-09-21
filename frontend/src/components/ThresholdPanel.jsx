@@ -62,6 +62,9 @@ export function ThresholdPanel({
   // share one shape: edges of length bins+1, and every series a flat array of
   // length bins, so only the source object changes.
   const onModel = !!model?.active && histogram?.score_column === "gbt_score";
+  // The API names the score the histogram is drawn on. Use its word rather
+  // than working one out here, so the panel and the API cannot disagree.
+  const scoreName = histogram?.score_column_label || null;
   const [showModelScore, setShowModelScore] = useState(true);
   const useModel = onModel && showModelScore;
   const series = useModel ? histogram?.by_score_column || {} : histogram || {};
@@ -111,7 +114,8 @@ export function ThresholdPanel({
           Score distribution <TermHint name="score" />
         </h3>
         <span className="muted" style={{ fontSize: 12 }}>
-          · every pair this run scored · drag the chart to label a band
+          {scoreName ? `· ${scoreName} · ` : "· "}every pair this run scored · drag the chart to
+          label a band
         </span>
         <div className="actions">
           <div className="seg">
@@ -183,7 +187,7 @@ export function ThresholdPanel({
             {model.warning && <span style={{ width: "100%" }}>{model.warning}</span>}
             <div className="seg" style={{ marginLeft: "auto" }}>
               <button className={showModelScore ? "on" : ""} onClick={() => setShowModelScore(true)}>
-                Model score
+                {scoreName || "Model score"}
               </button>
               <button className={!showModelScore ? "on" : ""} onClick={() => setShowModelScore(false)}>
                 Splink score

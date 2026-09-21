@@ -10,6 +10,7 @@
    other score on every other screen.
    ============================================================ */
 
+import { useState } from "react";
 import { Icons } from "./Icons";
 import { Term } from "./Term";
 import { fmtProb } from "./ProbBar";
@@ -20,10 +21,14 @@ function barWidth(weight, max) {
 }
 
 export function PairExplain({ explanation, matchWeight, matchProbability }) {
+  // The engine's own wording is kept for a bug report and a diagnostic screen.
+  // It is never what a reviewer reads first.
+  const [technical, setTechnical] = useState(false);
   const rows = Array.isArray(explanation) ? explanation : [];
   if (rows.length === 0) return null;
 
   const max = Math.max(1, ...rows.map((r) => Math.abs(r.match_weight || 0)));
+  const hasEngineWords = rows.some((r) => r.engine_label);
 
   return (
     <div className="card">
@@ -33,8 +38,21 @@ export function PairExplain({ explanation, matchWeight, matchProbability }) {
         <span className="muted" style={{ fontSize: 12 }}>
           evidence in bits · 0 is even odds, each point doubles them
         </span>
+        {hasEngineWords && (
+          <button
+            className="btn sm ghost"
+            style={{ marginLeft: "auto" }}
+            onClick={() => setTechnical((v) => !v)}
+            aria-pressed={technical}
+          >
+            {technical ? "Hide the technical wording" : "Technical wording"}
+          </button>
+        )}
         {matchWeight != null && (
-          <span className="tag" style={{ marginLeft: "auto", fontFamily: "var(--font-mono)" }}>
+          <span
+            className="tag"
+            style={{ marginLeft: hasEngineWords ? 0 : "auto", fontFamily: "var(--font-mono)" }}
+          >
             total {matchWeight >= 0 ? "+" : "−"}
             {Math.abs(matchWeight).toFixed(2)}
           </span>
@@ -47,22 +65,34 @@ export function PairExplain({ explanation, matchWeight, matchProbability }) {
             const none = w == null;
             const positive = !none && w >= 0;
             return (
-              <div className="ft" key={r.column || i} style={{ alignItems: "center" }}>
-                {/* A null level has no Splink label worth reading — "x is NULL"
-                    tells a reviewer nothing — so the comparison's own
-                    description leads and the state is said in plain words. */}
+              <div
+                className="ft"
+                key={`${r.column || "c"}-${r.gamma ?? i}`}
+                style={{ alignItems: "center" }}
+              >
+                {/* `label` is what a reviewer reads: "Same forename", never
+                    "Exact match on forename_canon". `column_label` is the
+                    column as a phrase, so no stored column name reaches the
+                    screen. The engine's own wording sits behind the toggle
+                    above. */}
                 <div className="lab" style={{ whiteSpace: "normal" }}>
-                  {none ? r.description || r.column : r.label || r.description || r.column}
-                  <div className="mono muted" style={{ fontSize: 11 }}>
+                  {r.label || r.description || r.column_label || r.column}
+                  <div className="muted" style={{ fontSize: 11 }}>
                     {none ? (
-                      <span style={{ fontFamily: "var(--font-sans)" }}>nothing to compare</span>
+                      "nothing to compare"
                     ) : (
                       <>
-                        {r.column}
+                        {r.column_label || r.column}
                         {r.gamma != null && ` · comparison level ${r.gamma}`}
                       </>
                     )}
                   </div>
+                  {technical && (
+                    <div className="mono muted" style={{ fontSize: 11 }}>
+                      {r.engine_label || "no engine wording"}
+                      {r.column ? ` · ${r.column}` : ""}
+                    </div>
+                  )}
                 </div>
                 <div className="bar" title={none ? "contributed nothing" : `${w} bits`}>
                   <i

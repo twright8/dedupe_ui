@@ -8,13 +8,15 @@
    state. Later slices reuse it.
    ============================================================ */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Fragment } from "react";
 import { api } from "../api";
 import { Icons } from "./Icons";
 import { fmtNumber } from "./ProbBar";
 import { Empty } from "./Empty";
 import { Cell, NUMERIC_TYPES } from "./cells";
-import { TermHint } from "./Term";
+import { CleaningTrace } from "./CleaningTrace";
+import { Term, TermHint } from "./Term";
+import { RULES_REPLAYED, valueMeta } from "../glossary";
 import { noun } from "../profileText";
 
 const PER_PAGE = 100;
@@ -39,6 +41,7 @@ export default function RecordsTable({ runId, profile }) {
   const [order, setOrder] = useState("asc");
   const [page, setPage] = useState(0);
   const [showCleaned, setShowCleaned] = useState(false);
+  const [open, setOpen] = useState(null); // the record whose drawer is open
 
   // The run itself says which columns it holds, and whether each came from the
   // profile or from a cleaning step. Kept in state so the controls stay put
@@ -292,50 +295,67 @@ export default function RecordsTable({ runId, profile }) {
                 </tr>
               </thead>
               <tbody>
-                {items.map((r) => (
-                  <tr key={r.record_id}>
-                    <td>
-                      <span className="tag">{trackLabel(r.track)}</span>
-                    </td>
-                    {columns.map((col, i) => {
-                      const numeric = NUMERIC_TYPES.has(col.type);
-                      return (
-                        <td
-                          key={col.key}
-                          className={numeric ? "mono tnum" : ""}
-                          style={{ textAlign: numeric ? "right" : "left" }}
-                        >
-                          <Cell value={r[col.key]} type={col.type} />
-                          {/* The record id rides under the first column, as run
-                              ids do on the runs list. */}
-                          {i === 0 && (
-                            <div className="mono muted" style={{ fontSize: 11 }}>
-                              {r.record_id}
+                {items.map((r) => {
+                  const isOpen = open === r.record_id;
+                  return (
+                    <Fragment key={r.record_id}>
+                      <tr
+                        className={isOpen ? "selected" : ""}
+                        style={{ cursor: "pointer" }}
+                        onClick={() => setOpen(isOpen ? null : r.record_id)}
+                        title="Open this record to see how it was cleaned"
+                      >
+                        <td>
+                          <span className="tag">{trackLabel(r.track)}</span>
+                        </td>
+                        {columns.map((col, i) => {
+                          const numeric = NUMERIC_TYPES.has(col.type);
+                          return (
+                            <td
+                              key={col.key}
+                              className={numeric ? "mono tnum" : ""}
+                              style={{ textAlign: numeric ? "right" : "left" }}
+                            >
+                              <Cell value={r[col.key]} type={col.type} />
+                              {/* The record id rides under the first column, as run
+                                  ids do on the runs list. */}
+                              {i === 0 && (
+                                <div className="mono muted" style={{ fontSize: 11 }}>
+                                  {r.record_id}
+                                </div>
+                              )}
+                            </td>
+                          );
+                        })}
+                        <td>
+                          {r.review_state === "labelled" ? (
+                            <span className="tag green">
+                              <span className="dot" />
+                              labelled
+                            </span>
+                          ) : (
+                            <span className="tag">
+                              <span className="dot" />
+                              unreviewed
+                            </span>
+                          )}
+                          {r.existing_entity_id && (
+                            <div className="muted" style={{ fontSize: 11 }}>
+                              earlier ID <span className="mono">{r.existing_entity_id}</span>
                             </div>
                           )}
                         </td>
-                      );
-                    })}
-                    <td>
-                      {r.review_state === "labelled" ? (
-                        <span className="tag green">
-                          <span className="dot" />
-                          labelled
-                        </span>
-                      ) : (
-                        <span className="tag">
-                          <span className="dot" />
-                          unreviewed
-                        </span>
+                      </tr>
+                      {isOpen && (
+                        <tr>
+                          <td colSpan={columns.length + 2} style={{ whiteSpace: "normal" }}>
+                            <RecordCleaning runId={runId} recordId={r.record_id} />
+                          </td>
+                        </tr>
                       )}
-                      {r.existing_entity_id && (
-                        <div className="muted" style={{ fontSize: 11 }}>
-                          earlier ID <span className="mono">{r.existing_entity_id}</span>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -378,6 +398,63 @@ export default function RecordsTable({ runId, profile }) {
             )}
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+/* ---------- one record, cleaned step by step ----------
+   POST /api/config/preview-cleaning with a record id and a run id
+   replays THAT RUN'S OWN frozen rules on that record. It does not use
+   today's rules, because today's rules did not make the value on screen.
+   The answer says which rules it replayed and that is printed here.
+   ---------------------------------------------------------- */
+function RecordCleaning({ runId, recordId }) {
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    setResult(null);
+    setError(null);
+    api
+      .previewCleaning({ record_id: String(recordId), run_id: runId })
+      .then((res) => alive && setResult(res))
+      .catch((err) => alive && setError(err.message));
+    return () => {
+      alive = false;
+    };
+  }, [runId, recordId]);
+
+  const samples = Array.isArray(result?.samples) ? result.samples : [];
+  const rules = valueMeta(RULES_REPLAYED, result?.source);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "4px 0 8px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span className="eyebrow">How this record was cleaned</span>
+        <span className="mono muted" style={{ fontSize: 11.5 }}>
+          {recordId}
+        </span>
+        {rules && <span className={"tag " + (rules.tag || "")}>{rules.label}</span>}
+      </div>
+      {rules && (
+        <p className="muted" style={{ fontSize: 12, margin: 0, lineHeight: 1.5 }}>
+          {rules.definition}
+        </p>
+      )}
+      {error ? (
+        <p style={{ fontSize: 12.5, color: "var(--ti-red)", margin: 0 }}>{error}</p>
+      ) : !result ? (
+        <p className="muted pulse" style={{ fontSize: 12.5, margin: 0 }}>
+          Replaying this run's <Term name="cleaningStep" plural />...
+        </p>
+      ) : samples.length === 0 ? (
+        <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+          This track has no <Term name="cleaningStep" plural />, so nothing changed.
+        </p>
+      ) : (
+        samples.map((sample, i) => <CleaningTrace key={i} sample={sample} />)
       )}
     </div>
   );

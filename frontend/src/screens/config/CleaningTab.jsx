@@ -13,6 +13,7 @@ import { useState, useEffect, useMemo } from "react";
 import { api } from "../../api";
 import { Icons } from "../../components/Icons";
 import { Term, TermHint } from "../../components/Term";
+import { CleaningTrace, OPS } from "../../components/CleaningTrace";
 import {
   ColumnCombo,
   DescriptionInput,
@@ -34,29 +35,6 @@ import {
   useDebounced,
   RunPicker,
 } from "./shared";
-
-// Ops in the order the document lists them: the plain text changes first, then
-// the ones that take arguments.
-const OPS = [
-  { op: "copy", label: "copy" },
-  { op: "upper", label: "upper-case" },
-  { op: "lower", label: "lower-case" },
-  { op: "trim", label: "trim" },
-  { op: "collapse_spaces", label: "collapse spaces" },
-  { op: "accent_fold", label: "fold accents" },
-  { op: "strip_punctuation", label: "strip punctuation" },
-  { op: "regex_replace", label: "regex replace" },
-  { op: "strip_tokens", label: "strip tokens" },
-  { op: "nullify", label: "nullify" },
-  { op: "lookup", label: "lookup" },
-  { op: "function", label: "function" },
-];
-
-// The plain words for one op, so the preview never prints the stored key.
-function opLabel(op) {
-  const found = OPS.find((o) => o.op === op);
-  return found ? found.label : String(op || "");
-}
 
 // Arguments that belong to an op. Changing op drops the rest, so a step never
 // carries an argument its op ignores.
@@ -772,7 +750,7 @@ function CleaningPreview({ ruleset, track, steps, rawColumns }) {
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 14, opacity: loading ? 0.5 : 1 }}>
             {samples.map((sample, si) => (
-              <SamplePreview key={si} sample={sample} />
+              <CleaningTrace key={si} sample={sample} />
             ))}
           </div>
         )}
@@ -806,99 +784,6 @@ function PreviewError({ error }) {
       <div className="mono" style={{ marginTop: 6, overflowWrap: "anywhere" }}>
         {values.slice(0, 12).map((v) => (typeof v === "string" ? v : v?.value ?? v?.raw)).join(", ")}
         {values.length > 12 ? ` and ${values.length - 12} more` : ""}
-      </div>
-    </div>
-  );
-}
-
-// One sample: every step's before and after, then the cleaned row.
-function SamplePreview({ sample }) {
-  const steps = Array.isArray(sample.steps) ? sample.steps : [];
-  const output = sample.output && typeof sample.output === "object" ? sample.output : {};
-  const input = sample.input && typeof sample.input === "object" ? sample.input : {};
-
-  return (
-    <div style={{ borderTop: "1px solid var(--line)", paddingTop: 10 }}>
-      <div className="eyebrow" style={{ marginBottom: 6 }}>
-        Input
-      </div>
-      <div className="mono" style={{ fontSize: 11.5, marginBottom: 8, overflowWrap: "anywhere" }}>
-        {Object.entries(input).map(([k, v]) => (
-          <div key={k}>
-            <span className="muted" style={{ marginRight: 6 }}>
-              {k}
-            </span>
-            {v === null || v === "" ? <span className="muted">(empty)</span> : String(v)}
-          </div>
-        ))}
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-        {steps.map((step, i) => (
-          <div
-            key={step.id || i}
-            style={{
-              fontSize: 11.5,
-              fontFamily: "var(--font-mono)",
-              padding: "4px 8px",
-              borderRadius: 4,
-              background: step.error
-                ? "var(--ti-red-50)"
-                : step.changed
-                  ? "var(--green-50)"
-                  : "transparent",
-              border: step.error
-                ? "1px solid var(--ti-red)"
-                : step.changed
-                  ? "1px solid var(--green)"
-                  : "1px solid transparent",
-            }}
-          >
-            <div className="muted">
-              {i + 1}. {opLabel(step.op)}
-              {step.source ? ` on ${step.source}` : ""}
-            </div>
-            {step.description && (
-              <div
-                className="muted"
-                style={{ fontFamily: "var(--font-sans)", fontSize: 11.5, lineHeight: 1.4 }}
-              >
-                {step.description}
-              </div>
-            )}
-            <div style={{ overflowWrap: "anywhere" }}>
-              {step.before === null || step.before === "" ? (
-                <span className="muted">(empty)</span>
-              ) : (
-                String(step.before)
-              )}
-              <span className="muted"> &rarr; </span>
-              {Object.entries(step.outputs || {}).map(([k, v]) => (
-                <span key={k} style={{ marginRight: 8 }}>
-                  <span className="muted">{k}=</span>
-                  {v === null || v === "" ? <span className="muted">(null)</span> : String(v)}
-                </span>
-              ))}
-            </div>
-            {step.error && (
-              <div style={{ color: "var(--ti-red)" }}>{step.error}</div>
-            )}
-          </div>
-        ))}
-      </div>
-
-      <div className="eyebrow" style={{ margin: "10px 0 6px" }}>
-        Cleaned row
-      </div>
-      <div className="mono" style={{ fontSize: 11.5, overflowWrap: "anywhere" }}>
-        {Object.entries(output).map(([k, v]) => (
-          <div key={k}>
-            <span className="muted" style={{ marginRight: 6 }}>
-              {k}
-            </span>
-            {v === null || v === "" ? <span className="muted">(null)</span> : String(v)}
-          </div>
-        ))}
       </div>
     </div>
   );

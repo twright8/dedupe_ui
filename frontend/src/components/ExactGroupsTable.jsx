@@ -29,9 +29,9 @@ export function AgreementTag({ value }) {
   return <Provenance kind="agreement" value={value} size="sm" />;
 }
 
-/* A guard string in plain words. The two shapes the pipeline writes are
-   "max_group_size=80>60" and "max_distinct:name_core=7>3"; anything else is
-   shown as it came, which is still more use than nothing. */
+/* A guard string in plain words, for an answer that carries no `guard_text`.
+   The API now builds that sentence itself and it is always preferred; this is
+   the fallback, and it is what an older answer gets. */
 export function guardReason(guard) {
   const raw = String(guard || "").trim();
   if (!raw) return "";
@@ -513,7 +513,7 @@ export default function ExactGroupsTable({ runId, profile, initialAgreement }) {
                         </div>
                         {g.status === "held" && (
                           <div style={{ fontSize: 12, color: "var(--amber)" }}>
-                            Held group: {guardReason(g.guard) || "a guard stopped this merge"}
+                            Held group: {g.guard_text || guardReason(g.guard) || "a guard stopped this merge"}
                           </div>
                         )}
                       </td>

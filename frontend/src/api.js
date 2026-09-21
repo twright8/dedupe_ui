@@ -151,6 +151,17 @@ export const api = {
     const qs = params ? "?" + new URLSearchParams(params).toString() : "";
     return get(`/api/runs/${id}/entities/${encodeURIComponent(entityId)}${qs}`);
   },
+  // Why these records are one entity, read from this run's own files.
+  getRunEntityProvenance(id, entityId, params) {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return get(`/api/runs/${id}/entities/${encodeURIComponent(entityId)}/provenance${qs}`);
+  },
+  // The same answer from the registry, which keeps it after a run is deleted.
+  // It follows a retired ID through to the one that is live.
+  getRegistryEntityProvenance(entityId, params) {
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    return get(`/api/registry/entities/${encodeURIComponent(entityId)}/provenance${qs}`);
+  },
   getPublishPreview(id) {
     return get(`/api/runs/${id}/publish-preview`);
   },
@@ -201,6 +212,11 @@ export const api = {
   },
   getRunTimeline(id) {
     return get(`/api/runs/${id}/timeline`);
+  },
+  // What produced this run: the input file, the code, the rules, the models,
+  // and every change to the lines that set the buckets.
+  getRunManifest(id) {
+    return get(`/api/runs/${id}/manifest`);
   },
   cancelRun(id) {
     return post(`/api/runs/${id}/cancel`);

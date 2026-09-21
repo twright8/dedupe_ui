@@ -110,6 +110,9 @@ export default function ModelPanel({ runId }) {
   const [job, setJob] = useState(null);
   const [openVersion, setOpenVersion] = useState(null);
   const [report, setReport] = useState(null);
+  // Which score this run is read on. The API names it, so the panel never has
+  // to work the word out from a column name.
+  const [scoreName, setScoreName] = useState(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -126,6 +129,19 @@ export default function ModelPanel({ runId }) {
   }, [track]);
 
   useEffect(load, [load]);
+
+  useEffect(() => {
+    if (!runId) return undefined;
+    let alive = true;
+    setScoreName(null);
+    api
+      .getRunPairsHistogram(runId, { track, bins: 10 })
+      .then((res) => alive && setScoreName(res?.score_column_label || null))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [runId, track]);
 
   // The report of whichever version is open, fetched on its own so a list of ten
   // versions never drags ten reports down the wire.
@@ -283,6 +299,12 @@ export default function ModelPanel({ runId }) {
             <div style={{ fontSize: 13.5, fontWeight: 500 }}>
               <StateSentence model={model} />
             </div>
+
+            {scoreName && (
+              <p className="muted" style={{ fontSize: 12.5, margin: 0, lineHeight: 1.55 }}>
+                This run is read on the {scoreName}.
+              </p>
+            )}
 
             {/* The caveats live in one place, above the importance numbers.
                 Here only the reason it cannot decide, and the way to fix it. */}

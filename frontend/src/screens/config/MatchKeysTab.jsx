@@ -38,9 +38,9 @@ import {
   RunPicker,
 } from "./shared";
 
-/* Every guard in plain words, for the preview's example groups. The editor
-   below already translates each guard's JSON key; this is the same vocabulary
-   on the reading side, so the stored key never reaches the screen. */
+/* Every guard in plain words, for a preview answer that carries no
+   `guard_text`. The API now builds that sentence itself and it is always
+   preferred; this is the fallback. */
 const GUARD_WORDS = {
   blocklists: "the value is on an ignored list",
   max_group_size: "too many records in the group",
@@ -785,12 +785,14 @@ function KeyPreview({ ruleset }) {
                                     {ex.status === "held" ? "Held group" : "Exact group"}
                                   </span>
                                   <span className="muted">{ex.size} records</span>
-                                  {ex.guard && (
+                                  {ex.guard_text ? (
+                                    <span className="muted"> &middot; {ex.guard_text}</span>
+                                  ) : ex.guard ? (
                                     <span className="muted">
                                       {" "}
                                       &middot; stopped because {GUARD_WORDS[ex.guard] || "a guard failed"}
                                     </span>
-                                  )}
+                                  ) : null}
                                   <div className="mono">{(ex.names || []).join(" | ")}</div>
                                 </div>
                               ))}

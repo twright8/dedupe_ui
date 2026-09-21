@@ -15,6 +15,7 @@ import { fmtNumber } from "./ProbBar";
 import { Empty } from "./Empty";
 import { Cell, NUMERIC_TYPES } from "./cells";
 import { Term, TermHint, Provenance, provenanceLabel } from "./Term";
+import { RunEntityProvenance } from "./EntityProvenance";
 import { noun } from "../profileText";
 
 const PER_PAGE = 50;
@@ -360,12 +361,23 @@ export default function EntitiesTable({ runId, profile }) {
                             colSpan={5 + attributeKeys.length + (priorityColumn ? 1 : 0)}
                             style={{ whiteSpace: "normal" }}
                           >
-                            <EntityMembers
-                              runId={runId}
-                              entityId={e.entity_id}
-                              columns={displayColumns}
-                              recordPlural={recordPlural}
-                            />
+                            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                              <EntityMembers
+                                runId={runId}
+                                entityId={e.entity_id}
+                                columns={displayColumns}
+                                recordPlural={recordPlural}
+                              />
+                              {/* Why these records are one entity, from the
+                                  run's own files. */}
+                              <RunEntityProvenance
+                                runId={runId}
+                                entityId={e.entity_id}
+                                recordPlural={recordPlural}
+                                columnLabel={(k) => columnLabel(k, displayColumns)}
+                                flat
+                              />
+                            </div>
                           </td>
                         </tr>
                       )}

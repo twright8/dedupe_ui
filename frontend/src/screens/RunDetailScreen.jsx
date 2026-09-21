@@ -13,6 +13,7 @@ import RecordsTable from "../components/RecordsTable";
 import ExactGroupsTable from "../components/ExactGroupsTable";
 import EntitiesTable from "../components/EntitiesTable";
 import PublishPanel from "../components/PublishPanel";
+import RunManifest from "../components/RunManifest";
 import { useProfile } from "../profile";
 import { Term, TermHint, Provenance } from "../components/Term";
 import { noun, existingLabelName } from "../profileText";
@@ -24,6 +25,7 @@ import {
   trackCountKey,
 } from "../counts";
 import { useRunProgress } from "../hooks/useRunProgress";
+import { usePipelineStages } from "../hooks/usePipelineStages";
 
 // ---------- Unmapped-lookup-values self-serve fix ----------
 // Shown when a run failed because a lookup whose fallback is "error" met values
@@ -817,13 +819,17 @@ function normalizeRun(r) {
 // pipeline produced — review queue, ambiguous cases, match exports — is absent.
 // hasPairCounts / hasRecordCounts (../counts) read the flags the API returns.
 
-function formatTimelineEvent(e) {
+/* One event as a sentence. A stage is named, never numbered, so the stage key
+   the event carries is turned into the name the stages list gives it; an event
+   that names no stage says "pipeline stage" rather than printing a number. */
+function formatTimelineEvent(e, stageName) {
   const event = e.event || e.type || "";
-  const stage = e.stage_name || e.stage || "";
+  const named = stageName ? stageName(e.name || e.stage_key) : null;
+  const stage = named || "pipeline stage";
   const message = e.message || e.msg || "";
   if (message) return message;
-  if (event === "stage_start") return `Started ${stage || "pipeline stage"}`;
-  if (event === "stage_end") return `Completed ${stage || "pipeline stage"}`;
+  if (event === "stage_start") return `Started ${stage}`;
+  if (event === "stage_end") return `Completed ${stage}`;
   if (event === "complete") return "Pipeline completed";
   if (event === "failed") return e.error || "Pipeline failed";
   return event.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
@@ -913,6 +919,9 @@ function RunSummary({ run, onReview, onVetoed, onConflicts, onQueue }) {
       {pairs && <ScoreKpis c={c} onReview={onReview} onVetoed={onVetoed} />}
       {entities && <EntityKpis c={c} onQueue={onQueue} />}
       {entities && <VersusEarlierIds scoreEval={scoreEval} />}
+      {/* What produced this run, and every change to the lines that set the
+          buckets. Both read GET /api/runs/{id}/manifest. */}
+      <RunManifest runId={run.id} tracks={profile.tracks || []} />
       <div className="card">
         <div className="card-h">
           <Icons.table size={16} />
@@ -1276,6 +1285,7 @@ function RunFiles({ runId }) {
 function RunHistory({ runId }) {
   const [timeline, setTimeline] = useState([]);
   const [loading, setLoading] = useState(true);
+  const { stageName } = usePipelineStages();
 
   useEffect(() => {
     setLoading(true);
@@ -1325,7 +1335,7 @@ function RunHistory({ runId }) {
                   gap: 12,
                 }}
               >
-                <span className="desc">{formatTimelineEvent(e)}</span>
+                <span className="desc">{formatTimelineEvent(e, stageName)}</span>
                 <span className="when">{e.at || e.timestamp || ""}</span>
               </div>
               {e.who && (
@@ -1347,14 +1357,16 @@ function RunHistory({ runId }) {
 // ---------- Live progress panel (for in-progress runs) ----------
 function RunProgress({ runId }) {
   const { events, status, isConnected } = useRunProgress(runId);
+  const { stageName } = usePipelineStages();
 
   if (!isConnected && events.length === 0) return null;
 
-  // Stages are named, never numbered. The name comes from the newest event
-  // that carries one; an event stream with no names says nothing here.
-  const stageName = [...events]
+  // Stages are named, never numbered. The stage key comes from the newest
+  // event that carries one, and the stages list turns it into the same name
+  // the new-run preview and How it works use.
+  const running = [...events]
     .reverse()
-    .map((e) => e.stage_name || e.stage_label)
+    .map((e) => stageName(e.name || e.stage_key))
     .find((s) => typeof s === "string" && s.trim());
 
   return (
@@ -1377,9 +1389,9 @@ function RunProgress({ runId }) {
         </div>
       </div>
       <div className="card-b">
-        {stageName && (
+        {running && (
           <div style={{ marginBottom: 8, fontWeight: 500 }}>
-            Now running: {stageName}
+            Now running: {running}
           </div>
         )}
         <div
@@ -1389,7 +1401,7 @@ function RunProgress({ runId }) {
           {events.map((e, i) => (
             <div className="ev" key={i}>
               <span className="desc">
-                {e.message || e.event || e.raw || JSON.stringify(e)}
+                {e.raw || formatTimelineEvent(e, stageName)}
               </span>
             </div>
           ))}

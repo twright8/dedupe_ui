@@ -13,6 +13,7 @@ import { Icons } from "./Icons";
 import { fmtNumber, fmtDateTime } from "./ProbBar";
 import { Empty } from "./Empty";
 import { exportDescription, noun } from "../profileText";
+import { RegistryEntityLookup } from "./EntityProvenance";
 import { Term, TermHint } from "./Term";
 
 /* Each line of the preview, with the sentence that says what it means and the
@@ -64,6 +65,18 @@ function summaryRows(recordPlural) {
       warn: true,
     },
   ];
+}
+
+/* A column's own label, from the profile. A column the profile does not name
+   has its underscores opened out, so no stored name reaches the screen. */
+function columnLabelFor(profile) {
+  const columns = profile?.display_columns || [];
+  return (key) => {
+    const found = columns.find((c) => c.key === key);
+    if (found && found.label) return found.label;
+    const words = String(key || "").replace(/_/g, " ").trim();
+    return words ? words.charAt(0).toUpperCase() + words.slice(1) : String(key || "");
+  };
 }
 
 /* The preview compares every proposed entity with the registry, which takes
@@ -318,6 +331,16 @@ export default function PublishPanel({ runId, run, profile }) {
           </span>
         </div>
       </div>
+
+      {/* One entity ID, traced from the registry. It is shown once the run is
+          published, because before that the registry holds nothing this run
+          put there. */}
+      {publishedAt && (
+        <RegistryEntityLookup
+          recordPlural={recordPlural}
+          columnLabel={columnLabelFor(profile)}
+        />
+      )}
 
       {/* Exports */}
       <div className="card">
