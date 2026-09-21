@@ -16,7 +16,17 @@ import { Icons } from "../../components/Icons";
 import { Term, TermHint } from "../../components/Term";
 import { fmtNumber } from "../../components/ProbBar";
 import LinkageTrack from "./LinkageTrack";
-import { DEFAULT_EM_ITERATIONS, orderedThresholds } from "./linkage";
+import {
+  DEFAULT_CLUSTER_FLOOR,
+  DEFAULT_EM_ITERATIONS,
+  DEFAULT_MAX_CLUSTER_UNITS,
+  DEFAULT_MAX_EXISTING_IDS,
+  gateErrors,
+  isGatePath,
+  maxDistinctValues,
+  orderedThresholds,
+  setMaxDistinctValues,
+} from "./linkage";
 import {
   SectionErrors,
   SectionWarnings,
@@ -71,6 +81,232 @@ function ThresholdSlider({ label, value, min, max, onChange, help, colour }) {
   );
 }
 
+/* ============================================================
+   The gate's four limits
+   ------------------------------------------------------------
+   The clustering stage joins accepted pairs into clusters, then
+   holds back for a person the ones that look wrong. These four
+   numbers decide what "wrong" means. Three of them are the same
+   for every track. The fourth is set per track, one column at a
+   time, so a track that names no column is never held back for
+   that reason.
+   ============================================================ */
+
+// One message per bad value, beside the box that caused it.
+function GateErrors({ errors, tone }) {
+  if (!errors || errors.length === 0) return null;
+  return (
+    <div style={{ fontSize: 11.5, color: tone || "var(--ti-red)", lineHeight: 1.5 }}>
+      {errors.map((e, i) => (
+        <div key={i}>{e.message}</div>
+      ))}
+    </div>
+  );
+}
+
+// One whole-run limit: a number, one line of plain words, and its own errors.
+function GateNumber({ label, path, value, onChange, help, errors, warnings, ...input }) {
+  return (
+    <div className="field" style={{ width: 200 }}>
+      <label>{label}</label>
+      <input
+        className="input mono"
+        type="number"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        {...input}
+      />
+      <div className="muted" style={{ fontSize: 11.5, lineHeight: 1.5 }}>
+        {help}
+      </div>
+      <GateErrors errors={gateErrors(errors, path)} />
+      <GateErrors errors={gateErrors(warnings, path)} tone="var(--amber)" />
+    </div>
+  );
+}
+
+function GateLimits({
+  settings,
+  setSettings,
+  track,
+  trackLabel,
+  columnOptions,
+  errors,
+  warnings,
+}) {
+  const limits = maxDistinctValues(settings, track);
+  const base = "linkage_settings.max_distinct_values";
+  const trackPath = `${base}.${track}`;
+
+  function editLimits(fn) {
+    setSettings((s) => setMaxDistinctValues(s, track, fn(maxDistinctValues(s, track))));
+  }
+
+  function setNumber(key, raw, fallback) {
+    const n = raw === "" ? fallback : +raw;
+    setSettings((s) => ({ ...s, [key]: n }));
+  }
+
+  const unused = columnOptions.filter((c) => !limits.some((l) => l.column === c));
+
+  return (
+    <div className="card">
+      <div className="card-h">
+        <h3>When a cluster is held back for a person</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          a cluster that breaks one of these is a <Term name="withheldCluster" />
+        </span>
+      </div>
+      <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+          <GateNumber
+            label={
+              <>
+                Weakest pair inside a cluster <TermHint name="weakLink" />
+              </>
+            }
+            path="linkage_settings.cluster_floor"
+            min="0"
+            max="1"
+            step="0.01"
+            value={settings.cluster_floor ?? DEFAULT_CLUSTER_FLOOR}
+            onChange={(raw) => setNumber("cluster_floor", raw, DEFAULT_CLUSTER_FLOOR)}
+            help="A cluster holding a pair that scored below this may be a chain rather than one thing."
+            errors={errors}
+            warnings={warnings}
+          />
+          <GateNumber
+            label={
+              <>
+                Most units in one cluster <TermHint name="unit" />
+              </>
+            }
+            path="linkage_settings.max_cluster_units"
+            min="2"
+            step="1"
+            value={settings.max_cluster_units ?? DEFAULT_MAX_CLUSTER_UNITS}
+            onChange={(raw) => setNumber("max_cluster_units", raw, DEFAULT_MAX_CLUSTER_UNITS)}
+            help="A cluster over this size usually means the accept line is too low, or a match key is too loose."
+            errors={errors}
+            warnings={warnings}
+          />
+          <GateNumber
+            label={
+              <>
+                Most earlier IDs in one cluster <TermHint name="earlierId" />
+              </>
+            }
+            path="linkage_settings.max_existing_ids"
+            min="1"
+            step="1"
+            value={settings.max_existing_ids ?? DEFAULT_MAX_EXISTING_IDS}
+            onChange={(raw) => setNumber("max_existing_ids", raw, DEFAULT_MAX_EXISTING_IDS)}
+            help="A cluster over this would join records the earlier grouping deliberately kept apart."
+            errors={errors}
+            warnings={warnings}
+          />
+        </div>
+
+        <hr className="rule" style={{ margin: 0 }} />
+
+        <div>
+          <div className="eyebrow" style={{ marginBottom: 4 }}>
+            Most different values of one column &middot; {trackLabel}
+          </div>
+          <p className="muted" style={{ fontSize: 12, margin: "0 0 8px", lineHeight: 1.6, maxWidth: "80ch" }}>
+            A cluster whose members show more than this many different values of the column is a
+            cluster for review. One person has one birth year and only so many spellings of a name,
+            so a cluster with more is really several people. Each track has its own list, and a
+            track with an empty list is never held back for this reason.
+          </p>
+          <GateErrors errors={gateErrors(errors, base).filter((e) => e.path === base)} />
+          <GateErrors
+            errors={gateErrors(errors, trackPath).filter((e) => e.path === trackPath)}
+          />
+
+          {limits.length === 0 ? (
+            <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+              No column is checked this way for this track.
+            </p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {limits.map((limit, index) => (
+                <div key={index}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <select
+                      className="select mono"
+                      style={{ width: 240, fontSize: 12.5 }}
+                      value={limit.column}
+                      onChange={(e) =>
+                        editLimits((list) =>
+                          list.map((l, i) => (i === index ? { ...l, column: e.target.value } : l))
+                        )
+                      }
+                    >
+                      <option value="">column...</option>
+                      {columnOptions.map((col) => (
+                        <option key={col} value={col}>
+                          {col}
+                        </option>
+                      ))}
+                      {limit.column && !columnOptions.includes(limit.column) && (
+                        <option value={limit.column}>{limit.column}</option>
+                      )}
+                    </select>
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      at most
+                    </span>
+                    <input
+                      className="input mono"
+                      type="number"
+                      min="1"
+                      step="1"
+                      style={{ width: 90, fontSize: 12.5 }}
+                      value={Number.isFinite(limit.count) ? limit.count : ""}
+                      onChange={(e) =>
+                        editLimits((list) =>
+                          list.map((l, i) =>
+                            i === index
+                              ? { ...l, count: e.target.value === "" ? "" : +e.target.value }
+                              : l
+                          )
+                        )
+                      }
+                    />
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      different values
+                    </span>
+                    <button
+                      className="btn sm ghost"
+                      style={{ padding: "0 4px" }}
+                      title="Stop checking this column"
+                      onClick={() => editLimits((list) => list.filter((_, i) => i !== index))}
+                    >
+                      <Icons.x size={12} />
+                    </button>
+                  </div>
+                  <GateErrors errors={gateErrors(errors, `${trackPath}[${index}]`)} />
+                </div>
+              ))}
+            </div>
+          )}
+
+          <button
+            className="btn sm ghost"
+            style={{ marginTop: 8 }}
+            onClick={() =>
+              editLimits((list) => [...list, { column: unused[0] || columnOptions[0] || "", count: 3 }])
+            }
+          >
+            <Icons.plus size={12} />
+            Add a column
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ThresholdsTab({
   settings,
   setSettings,
@@ -93,21 +329,30 @@ export default function ThresholdsTab({
     setSettings((s) => ({ ...s, ...orderedThresholds(s, which, value) }));
   }
 
-  // Errors that belong to the settings as a whole rather than to one track row.
+  // Errors that belong to the settings as a whole rather than to one track row
+  // or to one of the gate's four limits. Those two carry their own messages,
+  // beside the box that caused them.
   const topErrors = (errors || []).filter(
-    (e) => !String(e.path || "").startsWith("linkage_settings.tracks")
+    (e) => !String(e.path || "").startsWith("linkage_settings.tracks") && !isGatePath(e.path)
   );
+  // A track's own badge counts its blocking rules and comparisons, and the
+  // limit on different values, which is the one gate setting set per track.
   const trackErrorCount = (key) =>
-    (errors || []).filter((e) => String(e.path || "").startsWith(`linkage_settings.tracks.${key}`))
-      .length;
+    (errors || []).filter(
+      (e) =>
+        String(e.path || "").startsWith(`linkage_settings.tracks.${key}`) ||
+        String(e.path || "").startsWith(`linkage_settings.max_distinct_values.${key}`)
+    ).length;
   // Warnings are counted the same way and shown in amber. They never block a
   // save: the run works, it just does less than the author thinks.
   const topWarnings = (warnings || []).filter(
-    (w) => !String(w.path || "").startsWith("linkage_settings.tracks")
+    (w) => !String(w.path || "").startsWith("linkage_settings.tracks") && !isGatePath(w.path)
   );
   const trackWarningCount = (key) =>
-    (warnings || []).filter((w) =>
-      String(w.path || "").startsWith(`linkage_settings.tracks.${key}`)
+    (warnings || []).filter(
+      (w) =>
+        String(w.path || "").startsWith(`linkage_settings.tracks.${key}`) ||
+        String(w.path || "").startsWith(`linkage_settings.max_distinct_values.${key}`)
     ).length;
 
   return (
@@ -248,7 +493,7 @@ export default function ThresholdsTab({
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <div className="seg" title="Which track these blocking rules and comparisons belong to">
+        <div className="seg" title="Which track these cluster limits, blocking rules and comparisons belong to">
           {tracks.map((t) => {
             const bad = trackErrorCount(t.key);
             const soft = trackWarningCount(t.key);
@@ -282,6 +527,16 @@ export default function ThresholdsTab({
           </span>
         )}
       </div>
+
+      <GateLimits
+        settings={settings}
+        setSettings={setSettings}
+        track={track}
+        trackLabel={tracks.find((t) => t.key === track)?.label || track}
+        columnOptions={columnOptions}
+        errors={errors}
+        warnings={warnings}
+      />
 
       <LinkageTrack
         track={track}

@@ -12,6 +12,65 @@
 export const DEFAULT_MAX_PAIRS = 20000000;
 export const DEFAULT_EM_ITERATIONS = 20;
 
+/* ---------- the gate's four limits ----------
+   Stage 4 joins the accepted pairs into clusters, then holds back for a person
+   the ones that look wrong. These four numbers decide what "wrong" means. The
+   first three are the same for every track. The fourth is set per track, one
+   column at a time, and a track that names no column is never held back for
+   that reason. The defaults are the backend's own (docs/ENTITIES.md). */
+
+export const DEFAULT_CLUSTER_FLOOR = 0.2;
+export const DEFAULT_MAX_CLUSTER_UNITS = 200;
+export const DEFAULT_MAX_EXISTING_IDS = 1;
+
+// The paths the backend reports a bad gate limit under.
+export const GATE_PATHS = [
+  "linkage_settings.cluster_floor",
+  "linkage_settings.max_cluster_units",
+  "linkage_settings.max_existing_ids",
+  "linkage_settings.max_distinct_values",
+];
+
+// Every error or warning about one gate limit, including the ones about a
+// single row of it, so the message lands beside the box that caused it.
+export function gateErrors(errors, path) {
+  const p = String(path);
+  return (errors || []).filter((e) => {
+    const q = String(e.path || "");
+    return q === p || q.startsWith(`${p}.`) || q.startsWith(`${p}[`);
+  });
+}
+
+export function isGatePath(path) {
+  return GATE_PATHS.some((g) => gateErrors([{ path }], g).length > 0);
+}
+
+/* One track's limits on different values, always as a list. The stored shape
+   allows a bare object for a single column, so it is read as a list of one. */
+export function maxDistinctValues(settings, track) {
+  const raw = (settings || {}).max_distinct_values;
+  if (!raw || typeof raw !== "object") return [];
+  const spec = raw[track];
+  if (!spec) return [];
+  return (Array.isArray(spec) ? spec : [spec])
+    .filter((e) => e && typeof e === "object")
+    .map((e) => ({ column: String(e.column || ""), count: Number(e.count) }));
+}
+
+/* Write one track's limits back. An empty list drops the track, and the last
+   track going drops the setting, so a config version never carries an empty
+   shell the backend has to guess at. */
+export function setMaxDistinctValues(settings, track, list) {
+  const raw = settings?.max_distinct_values;
+  const next = { ...(raw && typeof raw === "object" ? raw : {}) };
+  if (!list || list.length === 0) delete next[track];
+  else next[track] = list.map((e) => ({ column: e.column, count: e.count }));
+  const out = { ...settings };
+  if (Object.keys(next).length === 0) delete out.max_distinct_values;
+  else out.max_distinct_values = next;
+  return out;
+}
+
 // The fixed allow-list from LINKAGE.md, with the name each one goes by in the
 // UI and the argument Splink expects for it.
 export const COMPARISON_TYPES = [

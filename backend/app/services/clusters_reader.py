@@ -743,6 +743,11 @@ def get_cluster(run_dir: str, cluster_id: str, decisions: dict | None = None,
         "status": rows[0].get("status") or "ok",
         "statuses": [s for s in str(rows[0].get("statuses") or "").split("|") if s],
         "withheld": bool(rows[0].get("withheld")),
+        # How many different values each gated column shows across the cluster, as
+        # stage 4 counted them ("n_distinct_surname_clean": 5). The screen needs the
+        # column and the count to say why a mixed-names cluster was held back.
+        **{key: int(value) for key, value in rows[0].items()
+           if str(key).startswith("n_distinct_") and value is not None},
         "n_units": len(unit_ids),
         "n_records": int(total_records),
         "units_shown": len(unit_rows),

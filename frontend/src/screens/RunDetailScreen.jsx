@@ -17,6 +17,7 @@ import RunManifest from "../components/RunManifest";
 import { PublishedChip } from "../components/PublishedChip";
 import { useProfile } from "../profile";
 import { Term, TermHint, Provenance } from "../components/Term";
+import { CLUSTER_STATUS, CLUSTER_STATUSES } from "../glossary";
 import { noun, existingLabelName } from "../profileText";
 import {
   hasEntityCounts,
@@ -586,6 +587,77 @@ function EntityKpis({ c, onQueue }) {
   );
 }
 
+/* ---------- Clusters, by what the gate found ----------
+   The run's own numbers, one row per reason. The labels, the definitions and
+   the order all come from src/glossary.js, so this card and the review queue
+   read the same way. A reason the gate never raised is left out. */
+function ClustersByStatus({ c, onQueue }) {
+  const byStatus = c.clustersByStatus || {};
+  const rows = CLUSTER_STATUSES.filter((s) => (byStatus[s.key] || 0) > 0);
+  const settled = byStatus.ok || 0;
+  if (!rows.length && !settled) return null;
+
+  return (
+    <div className="card">
+      <div className="card-h">
+        <Icons.branch size={16} />
+        <h3>What the gate found</h3>
+        <span className="muted" style={{ fontSize: 12 }}>
+          {fmtNumber(c.clustersTotal)} <Term name="cluster" plural /> in all
+        </span>
+        <div className="actions">
+          <button className="btn sm" onClick={onQueue}>
+            <Icons.review size={13} /> Open the cluster review queue
+          </button>
+        </div>
+      </div>
+      <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ fontSize: 13.5 }}>
+          <strong>{fmtNumber(settled)}</strong> passed the gate and are{" "}
+          {CLUSTER_STATUS.ok.label.toLowerCase()} as one <Term name="entity" /> each.
+          {rows.length > 0 ? " The rest are below, with the reason each one was held back." : ""}
+        </div>
+        {rows.length > 0 && (
+          <div className="tbl-wrap">
+            <table className="t" style={{ borderRadius: 0 }}>
+              <thead>
+                <tr>
+                  <th style={{ width: 190 }}>
+                    Why it was held back <TermHint name="withheldCluster" />
+                  </th>
+                  <th style={{ width: 110, textAlign: "right" }}>
+                    Clusters <TermHint name="cluster" />
+                  </th>
+                  <th>What it means</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((s) => (
+                  <tr key={s.key}>
+                    <td>
+                      <span className={"tag " + s.tag}>{s.label}</span>
+                    </td>
+                    <td className="mono tnum" style={{ textAlign: "right" }}>
+                      {fmtNumber(byStatus[s.key])}
+                    </td>
+                    <td style={{ whiteSpace: "normal", fontSize: 12.5 }}>
+                      {s.definition} {s.term && <TermHint name={s.term} />}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="muted" style={{ fontSize: 11.5, margin: 0, lineHeight: 1.5 }}>
+          A cluster can trip more than one of these. It is counted once here, under the first
+          reason in the list.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // One line naming the scorer in force for the whole run.
 export function scoredBy(counts) {
   if (!counts?.modelActive) return "Splink score";
@@ -873,7 +945,6 @@ function RunSummary({ run, onReview, onVetoed, onConflicts, onQueue }) {
   const recordPlural = noun(profile, "record_plural");
   const recordsTab = recordPlural.charAt(0).toUpperCase() + recordPlural.slice(1);
   const [diagData, setDiagData] = useState(null);
-  const [labelStats, setLabelStats] = useState(null);
   const [scoreEval, setScoreEval] = useState(null);
 
   useEffect(() => {
@@ -882,14 +953,6 @@ function RunSummary({ run, onReview, onVetoed, onConflicts, onQueue }) {
         .then((data) => setDiagData(data))
         .catch(() => setDiagData(null));
       api.getRunScoreEval(run.id).then(setScoreEval).catch(() => setScoreEval(null));
-      api.listLabels({ active: 1, run_id: run.id, per_page: 1 })
-        .then((data) => {
-          const forRun = data.total || 0;
-          return api.listLabels({ active: 1, per_page: 1 }).then((all) => {
-            setLabelStats({ forRun, total: all.total || 0 });
-          });
-        })
-        .catch(() => setLabelStats(null));
     }
   }, [run?.id]);
 
@@ -919,6 +982,7 @@ function RunSummary({ run, onReview, onVetoed, onConflicts, onQueue }) {
       {exact && <ExactKpis c={c} onConflicts={onConflicts} />}
       {pairs && <ScoreKpis c={c} onReview={onReview} onVetoed={onVetoed} />}
       {entities && <EntityKpis c={c} onQueue={onQueue} />}
+      {entities && <ClustersByStatus c={c} onQueue={onQueue} />}
       {entities && <VersusEarlierIds scoreEval={scoreEval} />}
       {/* What produced this run, and every change to the lines that set the
           buckets. Both read GET /api/runs/{id}/manifest. */}

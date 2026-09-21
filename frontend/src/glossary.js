@@ -306,9 +306,9 @@ export const TERMS = [
     term: "cluster for review",
     plural: "clusters for review",
     definition:
-      "A cluster the gate held back for a person, because it conflicts, is too large, may be a chain, or mixes earlier IDs.",
+      "A cluster the gate held back for a person, because it conflicts, is too large, holds too many different names, may be a chain, or mixes earlier IDs.",
     retire: ["held cluster", "flagged cluster", "withheld group", "withheld cluster"],
-    seeAlso: ["cluster", "heldGroup"],
+    seeAlso: ["cluster", "heldGroup", "mixedNames"],
   },
   {
     key: "entity",
@@ -531,6 +531,15 @@ export const TERMS = [
     definition: "One cluster joins records that the earlier grouping gave different IDs.",
     retire: ["mixed ids"],
     seeAlso: ["earlierId", "withheldCluster"],
+  },
+  {
+    key: "mixedNames",
+    term: "mixed names",
+    plural: "mixed names",
+    definition:
+      "A cluster that holds more different values of a name or a birth year than one person could have, so it is really several people.",
+    retire: ["mixed-name cluster"],
+    seeAlso: ["cluster", "withheldCluster"],
   },
   {
     key: "idClash",
@@ -935,6 +944,160 @@ export const LINE_CHANGE = {
     label: "Model taken off",
     tag: "blue",
     definition: "The model was taken off this run, so the buckets went back to the Splink score.",
+  },
+};
+
+/* ------------------------------------------------------------
+   3d. What the gate found, and what a veto rule compares
+   ------------------------------------------------------------
+   Two more stored lists, copied word for word from the backend's
+   app/vocabulary.py. Neither is "how it was decided": a cluster
+   status says what the gate found, and a veto operator says what
+   one condition compares. So each keeps its own phrase.
+   ------------------------------------------------------------ */
+
+export const CLUSTER_STATUS_QUESTION = "Why this cluster is here";
+
+/* clusters.parquet `status`. The order below is the order the gate itself
+   uses, so the chips, the legend and the summary all read the same way. */
+export const CLUSTER_STATUS = {
+  ok: {
+    label: "Proposed",
+    tag: "",
+    definition:
+      "The gate found nothing wrong, so this cluster is proposed as one entity.",
+  },
+  conflict: {
+    label: "Conflict",
+    tag: "red",
+    definition: "A reviewer has already said two of these records are not the same.",
+    term: "label",
+  },
+  too_large: {
+    label: "Too large",
+    tag: "amber",
+    definition:
+      "This cluster holds more units than the limit. That usually means the " +
+      "accept line is too low, or a match key is too loose.",
+    term: "cluster",
+  },
+  mixed_names: {
+    label: "Mixed names",
+    tag: "amber",
+    definition:
+      "This cluster holds more different values of a name or a birth year " +
+      "than one person could have, so it is really several people.",
+    term: "mixedNames",
+  },
+  weak_link: {
+    label: "Weak link",
+    tag: "amber",
+    definition:
+      "Two units inside this cluster scored very low against each other, so " +
+      "it may be a chain.",
+    term: "weakLink",
+  },
+  mixed_ids: {
+    label: "Mixed earlier IDs",
+    tag: "blue",
+    definition:
+      "This cluster joins records that the earlier grouping gave different IDs.",
+    term: "mixedEarlierIds",
+  },
+  held_key: {
+    label: "Held by a match key",
+    tag: "amber",
+    definition:
+      "A guard on a match key stopped these records being put together, so " +
+      "they are still separate and waiting for a person.",
+    term: "heldGroup",
+  },
+  cross_track_ids: {
+    label: "Earlier ID spans tracks",
+    tag: "blue",
+    definition:
+      "An earlier ID covers a person and an organisation. The tool keeps them " +
+      "as two entities.",
+    term: "earlierId",
+  },
+  attribute_tie: {
+    label: "Value undecided",
+    tag: "violet",
+    definition:
+      "Two values were equally common, so one value for the whole cluster " +
+      "could not be settled.",
+    term: "consensusColumn",
+  },
+};
+
+/* The order a reviewer meets the reasons, strongest first. `ok` is left out:
+   it is the answer for a cluster the gate passed, so it is never a reason. */
+export const CLUSTER_STATUS_ORDER = [
+  "conflict",
+  "too_large",
+  "mixed_names",
+  "weak_link",
+  "mixed_ids",
+  "held_key",
+  "cross_track_ids",
+  "attribute_tie",
+];
+
+/* Every reason, in that order, each with its key. The cluster screen's chips
+   and legend and the run summary all read this one list. */
+export const CLUSTER_STATUSES = CLUSTER_STATUS_ORDER.map((key) => ({
+  key,
+  ...CLUSTER_STATUS[key],
+}));
+
+export const VETO_OP_QUESTION = "What a veto rule compares";
+
+/* ruleset.vetoes[].when[].op. `arg` is what the author must supply beside the
+   column: a number, a similarity, a set of token lists, or nothing at all. */
+export const VETO_OP = {
+  differs: {
+    label: "Different",
+    tag: "",
+    definition: "Both sides have a value and the two are not the same.",
+    arg: null,
+  },
+  not_equal_or_missing: {
+    label: "Not the same, or missing",
+    tag: "",
+    definition:
+      "The two values are different, or one side has no value at all. " +
+      "Use it to say that nothing here corroborates the pair.",
+    arg: null,
+  },
+  abs_diff_gt: {
+    label: "Further apart than",
+    tag: "",
+    definition: "Both sides are numbers and the gap between them is over the limit.",
+    arg: "number",
+  },
+  abs_diff_gte: {
+    label: "At least this far apart",
+    tag: "",
+    definition: "Both sides are numbers and the gap between them reaches the limit.",
+    arg: "number",
+  },
+  similarity_lt: {
+    label: "Less alike than",
+    tag: "",
+    definition: "Both sides have a value and the two look less alike than the limit.",
+    arg: "similarity",
+  },
+  both_in_and_differ: {
+    label: "Two different words from a list",
+    tag: "",
+    definition: "Both values are on the named token lists and they are not the same.",
+    arg: "lists",
+  },
+  no_overlap: {
+    label: "Nothing in common",
+    tag: "",
+    definition: "Both sides hold a set of values and the two sets share nothing.",
+    arg: null,
   },
 };
 

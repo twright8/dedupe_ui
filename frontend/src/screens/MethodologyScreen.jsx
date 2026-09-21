@@ -424,12 +424,18 @@ export default function MethodologyScreen() {
             <p>
               A gate then checks every cluster of two or more units. A cluster the gate holds back
               is a cluster for review, and it goes to a queue for a person to decide. The gate holds
-              a cluster back if you have said two of its units are not the same, if one pair
-              inside it scores very low and the cluster may be a chain of weak links, if it holds
-              more units than the size limit, or if its records carry more than one earlier ID.
-              The limits are settings on the Thresholds tab; this tool ships with 0.20 for a weak
-              link and 200 units for the size limit. A cluster for review is rebuilt from your
-              answers and the earlier grouping only.
+              a cluster back for five reasons. You have said two of its units are not the same. It
+              holds more units than the size limit. It shows more different values of a name or a
+              birth year than one person could have, so it is really several people. One pair
+              inside it scores very low, so it may be a chain of weak links. Its records carry more
+              than one earlier ID.
+            </p>
+            <p>
+              The limits are settings on the Thresholds tab; this tool ships with 200 units for the
+              size limit and 0.20 for a weak link. The limit on different values is set one column
+              at a time, for one track at a time, so a track that names no column is never held
+              back for that reason. A cluster for review is rebuilt from your answers and the
+              earlier grouping only.
             </p>
             <p>
               Out come the clusters. Each one carries a status that says whether it passed those

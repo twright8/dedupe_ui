@@ -9,10 +9,10 @@
    everything true of a label is true of it: a reviewer's answer
    always wins, and the old answer stays on record.
 
-   Every word on this screen comes from src/glossary.js. The one
-   thing this file names for itself is the list of reasons the gate
-   withheld a cluster, because that list is not a provenance: it
-   says what the gate found, not who decided.
+   Every word on this screen comes from src/glossary.js, the
+   reasons the gate withheld a cluster among them. That list is not
+   a provenance: it says what the gate found, not who decided, so it
+   keeps its own phrase and its own colours.
    ============================================================ */
 
 import { useState, useEffect, useMemo, useCallback, Fragment } from "react";
@@ -29,69 +29,21 @@ import { evidenceFocusFor, pickColumns } from "../evidenceFocus";
 import { guardReason } from "../components/ExactGroupsTable";
 import { RunEntityProvenance } from "../components/EntityProvenance";
 import { Term, TermHint, Provenance } from "../components/Term";
+import { CLUSTER_STATUSES } from "../glossary";
 import { useProfile } from "../profile";
 import { noun } from "../profileText";
 
 const PER_PAGE = 50;
 const PART_NAMES = ["A", "B", "C", "D", "E", "F", "G", "H"];
 
-/* Why the gate withheld a cluster, in the order ENTITIES.md gives them, with
-   the one line each needs so a reviewer knows why the cluster is here.
+/* Why the gate withheld a cluster, in the order the gate itself uses, so a
+   reviewer meets the strongest reason first.
 
    This is not "how it was decided". These reasons say what the gate found, so
-   they keep their own list and their own colours. `term` names the glossary
-   entry the legend explains beside each one. */
-const STATUSES = [
-  {
-    key: "conflict",
-    label: "Conflict",
-    tag: "red",
-    help: "A reviewer has already said two of these records are not the same.",
-    term: "label",
-  },
-  {
-    key: "too_large",
-    label: "Too large",
-    tag: "amber",
-    help: "This cluster holds more units than the limit. That usually means the accept line is too low, or a match key is too loose.",
-    term: "cluster",
-  },
-  {
-    key: "weak_link",
-    label: "Weak link",
-    tag: "amber",
-    help: "Two units inside this cluster scored very low against each other, so it may be a chain.",
-    term: "weakLink",
-  },
-  {
-    key: "mixed_ids",
-    label: "Mixed earlier IDs",
-    tag: "blue",
-    help: "This cluster joins records that the earlier grouping gave different IDs.",
-    term: "mixedEarlierIds",
-  },
-  {
-    key: "held_key",
-    label: "Held by a match key",
-    tag: "amber",
-    help: "A guard on a match key stopped these records being put together, so they are still separate and waiting for a person.",
-    term: "heldGroup",
-  },
-  {
-    key: "cross_track_ids",
-    label: "Earlier ID spans tracks",
-    tag: "blue",
-    help: "An earlier ID covers a person and an organisation. The tool keeps them as two entities.",
-    term: "earlierId",
-  },
-  {
-    key: "attribute_tie",
-    label: "Value undecided",
-    tag: "violet",
-    help: "Two values were equally common, so one value for the whole cluster could not be settled.",
-    term: "consensusColumn",
-  },
-];
+   they keep their own list and their own colours. Every word comes from
+   src/glossary.js, which holds the backend's own labels and definitions, and
+   `term` names the glossary entry the legend explains beside each one. */
+const STATUSES = CLUSTER_STATUSES.map((s) => ({ ...s, help: s.definition }));
 
 function statusMeta(key) {
   return STATUSES.find((s) => s.key === key);
@@ -123,6 +75,18 @@ export function StatusTag({ status }) {
   );
 }
 
+/* How many different values of a gated column this cluster shows. The gate
+   counts one column at a time and the answer carries a count per column, so
+   the biggest count is the one that tripped the limit. An answer that carries
+   no counts gives an empty list, and the sentence then names no column. */
+function distinctValueCounts(cluster) {
+  const prefix = "n_distinct_";
+  return Object.keys(cluster || {})
+    .filter((key) => key.startsWith(prefix) && Number(cluster[key]) > 0)
+    .map((key) => ({ column: key.slice(prefix.length), count: Number(cluster[key]) }))
+    .sort((a, b) => b.count - a.count);
+}
+
 /* The same reason in a full sentence, using this cluster's own numbers. It
    returns elements, not a string, so the words it introduces carry their
    definitions with them. */
@@ -151,6 +115,24 @@ function statusSentence(status, cluster) {
       <>
         {fmtNumber(cluster?.n_units)} units in one cluster is over the limit. That usually means the{" "}
         <Term name="acceptLine" /> is too low, or a <Term name="matchKey" /> is too loose.
+      </>
+    );
+  }
+  if (status === "mixed_names") {
+    const worst = distinctValueCounts(cluster)[0];
+    if (worst) {
+      return (
+        <>
+          The units here show {fmtNumber(worst.count)} different values of{" "}
+          {columnLabel(worst.column, cluster?.columns)}. One person cannot have that many, so this
+          cluster is really several people. Split it into one part per person.
+        </>
+      );
+    }
+    return (
+      <>
+        The units here show more different values of a name or a birth year than one person could
+        have, so this cluster is really several people. Split it into one part per person.
       </>
     );
   }
@@ -809,13 +791,15 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
 
   /* What to pre-fill depends on why the cluster is here. A guard on distinct
      names splits on that column, a guard on size means one name and one part,
-     and mixed earlier IDs split on the ID. */
+     mixed names split on the column that tripped the limit, and mixed earlier
+     IDs split on the ID. */
   function suggestParts() {
     const next = {};
     const proposed = detail?.parts || [];
     const guard = String(detail?.guard || "");
     const byColumn = guard.match(/^max_distinct:([^=]+)=/);
     const bySize = /^max_group_size=/.test(guard);
+    const mixedNames = (detail?.statuses || []).includes("mixed_names");
 
     const splitOn = (pick) => {
       const order = [];
@@ -826,11 +810,31 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
       }
     };
 
+    /* Which column to split a mixed-names cluster on. The answer carries one
+       count per gated column, so the column with the most different values is
+       the one that went over. With no counts, the surname is the fallback. */
+    const mixedColumn = () => {
+      const counted = distinctValueCounts(detail).find((c) =>
+        units.some((u) => u[c.column] != null)
+      );
+      if (counted) return counted.column;
+      const keys = units.length ? Object.keys(units[0]) : [];
+      return keys.find((k) => k.toLowerCase().includes("surname")) || null;
+    };
+
     if (bySize) {
       // One name, many records: the whole thing is one part.
       for (const u of units) next[u.unit_id] = 0;
     } else if (byColumn && units.some((u) => u[byColumn[1]] != null)) {
       splitOn((u) => String(u[byColumn[1]] ?? "").trim());
+    } else if (mixedNames) {
+      // One part per different value of the column that tripped the limit.
+      const column = mixedColumn();
+      splitOn((u) =>
+        String((column ? u[column] : u.name) ?? "")
+          .trim()
+          .toUpperCase()
+      );
     } else if (detail?.status === "mixed_ids" || units.some((u) => u.existing_entity_ids)) {
       splitOn((u) => String(u.existing_entity_ids || "").split("|")[0].trim());
     } else if (proposed.length > 1) {

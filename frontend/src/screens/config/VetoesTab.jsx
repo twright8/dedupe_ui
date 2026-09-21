@@ -8,7 +8,11 @@
 
    A veto rule's conditions compare the left side's value with the
    right side's value of one column. A condition is false when
-   either side is missing, so absent data never triggers one.
+   either side is missing, so absent data never triggers one. The
+   one exception is "Not the same, or missing", which is true when a
+   side has no value: it is how a rule says that nothing in this
+   column corroborates the pair. Because it is true for most pairs
+   on its own, it belongs beside a condition that is not.
    ============================================================ */
 
 import { useState, useEffect, useCallback } from "react";
@@ -16,6 +20,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../../api";
 import { Icons } from "../../components/Icons";
 import { Term, TermHint } from "../../components/Term";
+import { VETO_OP } from "../../glossary";
 import { fmtNumber, fmtProb } from "../../components/ProbBar";
 import { Empty } from "../../components/Empty";
 import {
@@ -38,21 +43,19 @@ import {
   RunPicker,
 } from "./shared";
 
-// The operators a veto rule may use, in plain words. `arg` says what the
-// author must supply beside the column.
-const OPS = [
-  { op: "differs", label: "both present and different", arg: null },
-  { op: "abs_diff_gt", label: "numbers more than … apart", arg: "number" },
-  { op: "abs_diff_gte", label: "numbers … or more apart", arg: "number" },
-  { op: "similarity_lt", label: "names less similar than …", arg: "similarity" },
-  { op: "both_in_and_differ", label: "both in these lists, and different", arg: "lists" },
-  { op: "no_overlap", label: "share nothing", arg: null },
-];
+// The operators a veto rule may use. The words come from src/glossary.js, which
+// carries the backend's own list: one label and one definition for each.
+// `arg` says what the author must supply beside the column.
+const OPS = Object.entries(VETO_OP).map(([op, meta]) => ({ op, ...meta }));
 
 const MAX_CONDITIONS = 3;
 
+function opMeta(op) {
+  return VETO_OP[op] || null;
+}
+
 function argKind(op) {
-  return (OPS.find((o) => o.op === op) || {}).arg ?? null;
+  return opMeta(op)?.arg ?? null;
 }
 
 // Switching operator drops an argument the new operator cannot use.
@@ -67,6 +70,7 @@ function retype(cond, op) {
 
 function ConditionRow({ cond, columns, tokenLists, canRemove, onChange, onRemove }) {
   const kind = argKind(cond.op);
+  const meta = opMeta(cond.op);
   return (
     <div
       style={{
@@ -110,6 +114,11 @@ function ConditionRow({ cond, columns, tokenLists, canRemove, onChange, onRemove
       </select>
 
       <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+        {meta && (
+          <div className="muted" style={{ fontSize: 11.5, lineHeight: 1.5 }}>
+            {meta.definition}
+          </div>
+        )}
         {kind === "number" && (
           <input
             className="input mono"
@@ -146,8 +155,8 @@ function ConditionRow({ cond, columns, tokenLists, canRemove, onChange, onRemove
           />
         )}
         {kind === null && (
-          <span className="muted" style={{ fontSize: 12 }}>
-            no value needed
+          <span className="muted" style={{ fontSize: 11.5 }}>
+            This one needs a column and nothing else.
           </span>
         )}
       </div>
@@ -219,6 +228,13 @@ export default function VetoesTab({ ruleset, setRuleset, errors, warnings, profi
         decide a pair, in this order: the score decides first, a veto rule can overrule the score,
         the earlier grouping can overrule a veto rule, and your own answer overrules everything.
       </p>
+      <p className="muted" style={{ fontSize: 12.5, margin: 0, lineHeight: 1.6, maxWidth: "80ch" }}>
+        A condition is false when either side has no value, so missing data cannot trigger a rule
+        by accident. One operator is different. &ldquo;Not the same, or missing&rdquo; is true when
+        a side has no value at all, because a column nobody filled in does not agree. It is how a
+        rule says that nothing in this column corroborates the pair. It is true for most pairs on
+        its own, so write it beside a condition that is not.
+      </p>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <div className="seg" title="Which track these veto rules apply to">
@@ -245,7 +261,8 @@ export default function VetoesTab({ ruleset, setRuleset, errors, warnings, profi
               <Term name="veto" plural cap />
             </h3>
             <span className="muted" style={{ fontSize: 12 }}>
-              every condition must hold &middot; a missing value never triggers one
+              every condition must hold &middot; only &ldquo;Not the same, or missing&rdquo; counts a
+              missing value
             </span>
           </div>
           {forTrack.length === 0 ? (
