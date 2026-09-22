@@ -68,8 +68,9 @@
       ],
       "em_blocking_rules": [
         "l.surname = r.surname",
-        "l.forename_canon = r.forename_canon"
+        "l.forename_canon = r.forename_canon AND l.parties = r.parties AND l.units = r.units AND l.title = r.title"
       ],
+      "_em_note": "The second rule is the one that trains the surname comparison, so it must not name the surname. It also has to be tight enough for EM to tell matches from non-matches inside the block. Blocking on the forename alone made 820,068 training pairs, 97% with different surnames and only 6.5% true matches, and EM concluded that half of all true matches have a different surname (m 0.479 for 'not the same'; the sheet's own labels say 0.000). Adding the recipient party, the accounting unit and the title narrows the block to 14,583 pairs at a 45% match rate. Those three columns are not compared, so blocking on them switches nothing off. Measured on the September 2026 sheet: m 0.0015, surname mismatch now costs 9.4 bits instead of 1.1, review queue 1,235 to 713, pair recall 62.4% to 64.2%, pair precision 98.7% to 98.3%. If this block ever gets thin on a future sheet, drop the parties clause: it blocks 31,592 pairs for the same result.",
       "max_pairs": 5000000,
       "_name_clean_note": "A cl.JaroWinklerAtThresholds comparison on name_clean was tried here and taken out again. It did break up the 0.70-0.80 spike, but by inflating every score: name_clean contains the forename and the surname, which are already comparisons of their own, and Splink assumes its comparisons are independent, so the same evidence was counted twice. Person pair precision fell 0.9872 -> 0.9008 (score_only), the review queue went from 1,059 pairs to 29,121, and no pair scored below 0.5 at all. Recall did rise 0.6236 -> 0.8899. The honest fix for the spike is evidence the name does not already carry - the donation amount profile and the recipients - which is what the GBT in slice 5 is for."
     },

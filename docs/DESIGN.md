@@ -170,22 +170,18 @@ Known follow-ups: donations person scores pile up at 0.70 to 0.80 because Splink
 
 ## Open items
 
-- **The laptop disk is full: under 1 GB free on `/`.** Mostly 53 GB of DuckDB
-  spill files orphaned by the stage-3 run a timeout killed. Nothing at PSC scale
-  can run until they are deleted — `PSC_HANDOVER.md` section 7 has the path and
-  the command. Stage 3 now clears stale spill on the way in, so it should not
-  recur.
-- D17's "one run at a time across both instances" is now built: an `fcntl.flock`
-  in `app/services/run_lock.py`. **The deploy kit must set `RUN_LOCK_DIR` to one
-  directory both instances share**; it defaults to the parent of `DATA_DIR`,
-  which is only right when they are deployed as siblings under one root. D17's
-  hard memory cap and low CPU priority are still not built.
-- The full PSC snapshot is still downloading. `dedupe_final/` holds part 1 of 32.
-- Features, thresholds, and blocking rules for both profiles will be tuned after the platform works.
+- **Donations person accept line.** On 2026-09-22 the second EM training rule for the person track was tightened (recipient party, accounting unit and title added), because blocking on the forename alone taught Splink that half of all true matches have a different surname. The surname now counts properly and the review queue on the September sheet falls from 1,235 to 713 pairs. Pair precision falls 98.7% to 98.3% because an exact surname match is now worth more too. The accept line was tuned against the old model and should be re-set on its own. Report: `psc_scratch/agent_reports/donations_surname_em_2026-09-22.md` on the laptop.
+- **An EM training rule that makes zero pairs is a silent failure.** The person track has no postcode, so a training rule on the postcode district blocks nothing, EM fails, and the comparisons that rule was meant to train stay untrained. The save-time check only compares column names. It should also refuse a priced rule that makes zero pairs.
+- **Organisation track, same check.** Its first training rule blocks on the first name token. Nobody has measured whether that block is loose enough to do to `name_core` what the forename block did to the surname.
+- D17's hard memory cap and low CPU priority are still not built. The run lock is.
+- PSC at full scale: see the progress table, slice 8, and `PSC_HANDOVER.md` section 108.
 
 Resolved or set aside:
 
-- Server disk space. On 2026-09-18 the raw API crawl `/home/ubuntu/ch_data` (19 GB) was deleted from the server after a checksum-verified copy to `/home/tomwright/PycharmProjects/ch_bulk`. Free space is now 34 GB. The server scripts `run_ingest.sh` and `run_flat.sh` need the crawl copied back before they can run again.
+- The laptop disk. The orphaned spill files were deleted on 2026-09-19 and the caches cleaned; about 50 GB is free.
+- `RUN_LOCK_DIR` is set to one shared directory in both service units on the server.
+- The full PSC snapshot was downloaded and run on the laptop; see slice 8.
+- Server disk space. On 2026-09-18 the raw API crawl `/home/ubuntu/ch_data` (19 GB) was deleted from the server after a checksum-verified copy to `/home/tomwright/PycharmProjects/ch_bulk`.
 - The Kibana password on the process command line, and HTTPS on port 8000: Tom set both aside on 2026-09-18.
 
 ## Sources
