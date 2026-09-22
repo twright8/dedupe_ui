@@ -1,3 +1,4 @@
+# SERVER_PUBLIC_IP stands for the server's public address. The live copy on the server, /etc/caddy/Caddyfile, carries the real one.
 # /etc/caddy/Caddyfile - AS IT IS TODAY, before anything changes.
 #
 # READ THIS BEFORE YOU USE THIS FILE FOR A ROLLBACK.
@@ -20,10 +21,10 @@
 # 127.0.0.1:8400. Nothing in this deployment touches it.
 
 {
-	default_sni 141.147.81.233
+	default_sni SERVER_PUBLIC_IP
 }
 
-https://141.147.81.233:8080 {
+https://SERVER_PUBLIC_IP:8080 {
 	tls {
 		issuer acme {
 			profile shortlived

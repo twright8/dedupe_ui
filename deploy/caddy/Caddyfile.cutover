@@ -1,3 +1,4 @@
+# SERVER_PUBLIC_IP stands for the server's public address. The live copy on the server, /etc/caddy/Caddyfile, carries the real one.
 # /etc/caddy/Caddyfile - AFTER CUTOVER
 #
 # This is a whole file. Applying it is a file replace, not an edit.
@@ -23,12 +24,12 @@
 # line differs, stop and fix this file first.
 
 {
-	default_sni 141.147.81.233
+	default_sni SERVER_PUBLIC_IP
 }
 
 # --- Harrier. Do not change these three blocks. ---
 
-https://141.147.81.233:8080 {
+https://SERVER_PUBLIC_IP:8080 {
 	tls {
 		issuer acme {
 			profile shortlived
