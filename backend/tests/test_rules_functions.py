@@ -146,6 +146,30 @@ def test_sorted_tokens(raw, expected):
     assert functions.sorted_tokens_value(raw) == expected
 
 
+@pytest.mark.parametrize("raw,expected", [
+    ("BANDULA WATTAGE BANDULA", "BANDULA | WATTAGE"),   # distinct tokens only
+    ("WATTAGE BANDULA", "BANDULA | WATTAGE"),           # order does not matter
+    ("JOHN", "JOHN"),
+    ("   ", None),
+    ("", None),
+])
+def test_token_set(raw, expected):
+    assert functions.token_set_value(raw) == expected
+
+
+def test_token_set_writes_the_separator_the_vetoes_read():
+    """A set column is only worth writing if `no_overlap` splits it the same
+    way. The two constants are deliberately not imported from one another, so
+    this is what keeps them together."""
+    from app.rules import vetoes
+
+    assert functions.SET_SEPARATOR == vetoes.SET_SEPARATOR
+
+
+def test_token_set_runs_through_the_engine_and_keeps_nulls_null():
+    assert list(_run("token_set", ["A B A", None, "C"])) == ["A | B", None, "C"]
+
+
 @pytest.mark.parametrize("raw,first,last,initials", [
     ("JOHN A SMITH", "JOHN", "SMITH", "JAS"),
     ("SMITH", "SMITH", "SMITH", "S"),

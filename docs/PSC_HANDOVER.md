@@ -3300,3 +3300,172 @@ probability and 8.4e-13 in the weight, and **no pair changes bucket**.
   comparison.
 - **`price_rule` and the blocking budget** are unchanged, and so is everything in
   sections 104 to 107 about how the run was produced.
+
+## 109. Two more person vetoes: v7 on the birth month, v8 on the review queue
+
+Section 108 left the person track with six vetoes and a review queue of
+2,605,985 pairs. The evidence report of 2026-09-22
+(`psc_scratch/agent_reports/psc_person_evidence_2026-09-22.md`) said where the
+next two rules were. This section is what they do, measured on the full run.
+
+### 1. What was added
+
+**v7, person, review.** The birth month differs and the two full postcodes
+differ. Both postcodes have to be filed; `differs` is false when either side is
+null. v6 already rejects a month that differs when the years differ too, and
+reject beats review, so v7 lands on pairs that share a birth year — or on pairs
+where one side filed no year at all, because then v6 cannot fire.
+
+**v8, person, reject.** The forename is clearly different, on the same test v2
+uses (`forename_canon`, Jaro-Winkler below 0.7), the two full postcodes differ,
+and the two sides share no given name at all.
+
+The last condition needed a column that did not exist. `no_overlap` compares two
+`" | "`-joined sets, and nothing in the cleaning engine wrote one. The change is
+one new function in the library, `token_set`: distinct tokens, sorted, joined by
+`" | "`. It is `sorted_tokens` with a different separator. Two cleaning steps use
+it, and they copy the shape of p16 and p17, which already build
+`name_fingerprint` the same way:
+
+- p28 concatenates `forename_clean` and `middle_clean` into `given_names`, with
+  `require_all: false` so a person who filed no middle name still gets a value;
+- p29 runs `token_set` over that into `given_tokens`.
+
+A new library function was the smallest change that works. It needs no new op,
+no entry in `vocabulary`, and no new branch in the validator, so
+`GET /api/config/functions`, the cleaning editor and the veto editor all pick it
+up on their own. `POST /api/config/preview-vetoes` reads the column with no
+change at all; there is a test that proves it.
+
+### 2. How it was measured
+
+Nothing was rescored. The vetoes were re-applied to the 40,992,151 pairs the
+psc_veto run had already scored, using `stage_3_score.rebucket`, which is the
+path a threshold move takes: it streams `pairs.parquet`, strips the overlays,
+applies the buckets and the vetoes again from the run's own snapshotted ruleset,
+and swaps the file in.
+
+v8 needs `given_tokens` on the units, and `rebucket` does not run stage 1. But
+p28 and p29 read only `forename_clean` and `middle_clean`, and both are already
+materialised in `units.parquet`. So the two steps were run over the existing
+units file through the engine's own `_run_step` — the same code on the same
+inputs, which is what a full re-clean would have produced. That took 66 seconds
+for 11,799,425 units instead of re-cleaning fifteen million records.
+
+One thing to know if that route is used again. Read back from parquet a missing
+value arrives as NaN, but stage 1 hands these columns to the step as None, and
+`_run_concat` treats only None as missing. Without normalising first, the
+literal string "nan" is concatenated into the key. In the live pipeline p27 and
+p16 never hit this, because their sources are engine-written and because p27
+requires every source, but a `concat` step with `require_all: false` over a raw
+column could.
+
+### 3. The numbers
+
+Person track, before and after:
+
+| bucket | before | after | change |
+|---|---|---|---|
+| accept | 5,317,154 | 5,129,300 | −187,854 |
+| review | 2,605,985 | 1,696,849 | −909,136 |
+| reject | 32,419,503 | 33,516,493 | +1,096,990 |
+
+The whole run moved on exactly two transitions, and nothing else moved at all:
+
+| from | to | pairs | rule |
+|---|---|---|---|
+| review | reject | 1,096,990 | v8 |
+| accept | review | 187,854 | v7 |
+
+That the table has only two rows is also the check that the baseline is
+comparable. If the code had drifted since psc_veto was built, some pair would
+have moved for a reason that is not v7 or v8. None did.
+
+What each rule holds after the run:
+
+- **v7** — 199,617 in review and 2,026 in reject. Of the review ones, 187,854
+  came out of accept and 11,763 were in review already. It moves nothing into
+  reject; the 2,026 were rejected already for another reason.
+- **v8** — 7,252,033, all in reject. 1,096,990 of those came out of review. The
+  other 6,155,043 were rejected already, on the score or by another veto. **It
+  takes no accepted pair**, which is what makes it free: v2 already caps a
+  clearly different forename at review.
+
+The review queue falls from 2,605,985 to 1,696,849, down 34.9%.
+
+Both rules hit less hard than the evidence report predicted — 187,854 against
+207,630 for v7, and 1,096,990 against 1,487,802 for v8. The reason is the same
+in both cases and it is deliberate. The report sized the rules with `NOT
+pc_same`, which is true when a postcode is missing. These rules use `differs`,
+which needs both sides filed. A pair where nobody filed a postcode is not a pair
+whose addresses disagree, and pattern P2 of the report — district missing —
+is 420,805 pairs, so the gap is about the size expected.
+
+### 4. Twenty pairs each, judged
+
+**v7, twenty of the 187,854 it moves out of accept.** These are the rule working
+as intended and they are a mixed bag, which is exactly why the action is review.
+Two are plainly one person: Liene Krastina, BD1 5DL against BD7 1RA, both in
+Bradford, born 1990, months 9 and 7; and Parmjit Kaur Dhillon, UB4 0HR against
+UB3 1AP, both in Hayes, identical given names, scoring 1.0000. Both now go to a
+reviewer rather than being merged unseen. One is plainly two people: Joanne
+Connor against Jean Connor, WA8 8QU and WA8 8PU, which v2 never caught because
+JOANNE and JEAN score above its threshold. The other seventeen — Daniel Drew of
+BL1 against LS1, Alison Ramsden of CM9 against M46, Aftab Iqbal of KT6 against
+BD7 — are pairs nobody can settle from the filing. A human has to read them.
+That is the whole argument for review over reject: the rule defers a merge, it
+never destroys one.
+
+**v8, twenty of the 1,096,990 it moves out of review.** Nineteen are clearly two
+different people. Nigel James against Sally Elizabeth Mackinnon. Rebecca Mary
+against Tracey May Ireland. Steven Andrew against Jonathan Francis Aspinall.
+Leanne Marie against Phillip Ronald Hatch. Zeeshan against Usama Khalid, two
+brothers in B33. The twentieth, Panna Nitin Kotecha of YO10 4HW against Kalpana
+Kotecha of LE4 4DF, is one a reader could argue about: both born January 1959,
+and Panna is not obviously a short form of Kalpana. One doubtful pair in twenty,
+on a rule that costs no accepted pair, is worth it.
+
+Both rules ship. Neither was added to `_vetoes_measured_and_not_shipped`.
+
+### 5. What this section does not say
+
+**The entity counts are not measured.** Stages 4 and 5 never ran. The rebuild
+was stopped by the machine part way through stage 3, after `pairs.parquet` had
+been rewritten and swapped in but before the pair index and the evaluation were
+written. The pairs numbers above are all complete and correct, because they come
+from that finished file. The proposed person entity count before and after is
+still open.
+
+What can be said is the input to it. Stage 4 clusters the accepted edges, and
+the accepted person edges fall from 5,317,154 to 5,129,300. The evidence report
+modelled a cut of that size as roughly +118,000 proposed person entities, but
+that is its arithmetic and not a measurement of this run.
+
+The run folder `psc_scratch/agent_c/runs/psc_v7v8` holds the rewritten pairs and
+the rebuilt units, so stages 4 and 5 can be finished from it without redoing the
+25 minutes the pairs rewrite took.
+
+### 6. Timings, and what else was checked
+
+The units rebuild took 66 seconds for 11,799,425 units. The pairs rewrite took
+about 25 minutes for 40,992,151 pairs, single-threaded through one writer. The
+total for a full rebuild is not known, because the job did not finish.
+
+**Donations does not move.** The donations pipeline was run headless through
+stages 1 to 5 twice, once on the unpatched code and once on the patched code,
+from the same `records_raw.parquet`. Every bucket count, both entity counts, the
+stage counts, `entity_report.json`, `score_eval.json` and a full hash digest of
+the cleaned `units.parquet` are identical. Donations never names `token_set`,
+and adding a function to the registry changes nothing that existing rules read.
+For the record: person accept 23,358, review 1,059, reject 1,086; organisation
+accept 3,599, review 176, reject 1,198; 10,990 person and 6,578 organisation
+entities.
+
+**The suite.** 1,478 passed against 1,469 before the change, which is the nine
+tests added here. Both runs fail `test_the_real_checkout_has_a_commit`, and it
+failed before the change as well; it reads the git metadata of the checkout.
+
+**The frontend.** `npm ci`, `npm run build` and `node scripts/check-terms.mjs`
+all pass. No frontend source needed changing: the veto editor offers operators
+out of `vocabulary.VETO_OP`, which is untouched, and it offers `given_tokens` as
+a column because it is a cleaning target like any other.
