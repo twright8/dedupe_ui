@@ -85,6 +85,20 @@ def _cluster_floor(run_id: str) -> float:
     return float(settings.get("cluster_floor", linkage.DEFAULT_CLUSTER_FLOOR))
 
 
+def _gate_limits(run_id: str) -> dict:
+    """The run's own stage 4 gate, so the cluster screen can say what held it."""
+    from app.rules import linkage
+
+    path = _data_dir() / "runs" / run_id / "config" / "linkage_settings.json"
+    if not path.is_file():
+        return {}
+    try:
+        return linkage.max_distinct_values(
+            json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Clusters
 # ---------------------------------------------------------------------------
@@ -131,6 +145,7 @@ def get_cluster(
         cluster = clusters_reader.get_cluster(
             _run_dir(run_id), cluster_id, decisions=_decisions(),
             with_events=bool(events), cluster_floor=_cluster_floor(run_id),
+            gate=_gate_limits(run_id),
         )
     except clusters_reader.ClustersNotFound:
         raise HTTPException(status_code=404, detail="Run has no clusters yet")

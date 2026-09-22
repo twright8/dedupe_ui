@@ -537,7 +537,7 @@ export const TERMS = [
     term: "mixed names",
     plural: "mixed names",
     definition:
-      "A cluster that holds more different values of a name or a birth year than one person could have, so it is really several people.",
+      "A cluster that holds more different names, addresses or birth dates than one person could have, so it is really several people.",
     retire: ["mixed-name cluster"],
     seeAlso: ["cluster", "withheldCluster"],
   },

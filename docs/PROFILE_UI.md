@@ -12,7 +12,7 @@ still reads sensibly. Nothing in `src/` outside these fields names a dataset.
 | `key` | string | picks the worked examples on the How it works page | no examples, generic wording |
 | `title`, `subtitle` | string | page title, browser tab, How it works lede | — |
 | `input` | `{label, extensions, help}` | the New run upload card | "Input file", `.csv` |
-| `tracks` | `[{key, label}]` | every track chip, the Config tabs, the model panel | `person` / `organisation` |
+| `tracks` | `[{key, label}]` | every track chip, the Config tabs, the model panel, and one accept-line slider per track on the New run form and on Config → Thresholds | `person` / `organisation` |
 | `display_columns` | `[{key, label, type}]` | every record and unit table, the diff view, the focus strip | one `name` column |
 | `priority_columns` | `[key]` | the "highest first" sort on Review, Cluster review, Entities, Exact groups | no priority sort offered |
 | `event_columns` | `[{key, label, type}]` | the evidence tables on Review and Cluster review | no evidence panel |

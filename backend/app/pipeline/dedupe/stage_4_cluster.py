@@ -362,26 +362,52 @@ def import_edges(units: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def gate_columns(per_track: dict) -> list[str]:
-    """Every column the name gate counts, in a stable order, no repeats.
+def gate_limits(per_track: dict) -> list[dict]:
+    """Every limit the gate counts, in a stable order, no repeats.
 
-    A track may name several — the PSC person track counts cleaned surnames AND
-    canonical forenames — and a column may be named by more than one track, so
-    it is measured once and every track that named it reads the same number.
+    A track names several — the PSC person track counts cleaned surnames AND
+    canonical forenames — and the same limit may be named by more than one
+    track and by more than one clause, so it is measured once and everything
+    that named it reads the same number.
     """
-    out: list[str] = []
-    for limits in per_track.values():
-        for limit in limits:
-            if limit["column"] not in out:
-                out.append(limit["column"])
+    out: list[dict] = []
+    seen: set[str] = set()
+    for groups in per_track.values():
+        for group in groups:
+            for limit in group:
+                if limit["key"] not in seen:
+                    seen.add(limit["key"])
+                    out.append(limit)
     return out
 
 
-def _gate_value_sql(unit_columns: set, column: str) -> str:
-    """One gate column of a unit, blank read as nothing."""
-    if column not in unit_columns:
-        return "CAST(NULL AS VARCHAR)"
-    return f"""NULLIF(trim(CAST("{column}" AS VARCHAR)), '')"""
+def gate_columns(per_track: dict) -> list[str]:
+    """The name each limit's count comes back under, as ``n_distinct_<key>``.
+
+    One column keeps its own name. Several columns counted as one value join
+    with ``+`` — ``dob_year_clean+dob_month_clean`` is one full birth date.
+    """
+    return [limit["key"] for limit in gate_limits(per_track)]
+
+
+def _gate_value_sql(unit_columns: set, limit: dict) -> str:
+    """One limit's value for a unit, blank read as nothing.
+
+    Several columns are counted as one value, joined on a separator that cannot
+    occur in the data. A unit missing any one of them has no such value at all,
+    so a filing carrying a birth year but no month is not a second birth date —
+    it is a unit this limit cannot judge, and ``count(DISTINCT ...)`` skips it.
+    """
+    parts = []
+    for column in limit["columns"]:
+        if column not in unit_columns:
+            return "CAST(NULL AS VARCHAR)"
+        parts.append(f"""NULLIF(trim(CAST("{column}" AS VARCHAR)), '')""")
+    if len(parts) == 1:
+        return parts[0]
+    missing = " OR ".join(f"({part}) IS NULL" for part in parts)
+    joined = " || chr(31) || ".join(f"({part})" for part in parts)
+    return f"CASE WHEN {missing} THEN NULL ELSE {joined} END"
 
 
 def _unit_info(con, unit_columns: set, limits: dict | None = None) -> None:
@@ -397,10 +423,10 @@ def _unit_info(con, unit_columns: set, limits: dict | None = None) -> None:
     track = "CAST(track AS VARCHAR)" if "track" in unit_columns else "CAST(NULL AS VARCHAR)"
     labelled = f'CAST("{label}" AS VARCHAR)' if label in unit_columns \
         else "CAST(NULL AS VARCHAR)"
-    gates = gate_columns((limits or {}).get("max_distinct_values") or {})
+    gates = gate_limits((limits or {}).get("max_distinct_values") or {})
     gate_select = "".join(
-        f", {_gate_value_sql(unit_columns, column)} AS gate_{index}"
-        for index, column in enumerate(gates)
+        f", {_gate_value_sql(unit_columns, limit)} AS gate_{index}"
+        for index, limit in enumerate(gates)
     )
     con.execute(f"""
         CREATE OR REPLACE TABLE s4_unit_info AS
@@ -497,21 +523,27 @@ def _summary(con, limits: dict, pair_columns: set, decisions: dict | None) -> pd
 
     summary["too_large"] = summary["n_units"] > limits["max_cluster_units"]
     summary["mixed_ids"] = summary["n_existing_ids"] > limits["max_existing_ids"]
-    # The name gate. A cluster trips it when ANY column the track names shows
-    # more distinct values than that column's own limit. A track with no entry
+    # The gate. A track's entry is a list of clauses; the cluster is held when
+    # ANY clause holds, and a clause holds when EVERY limit in it is over its
+    # count. A plain single-column clause is a clause of one, so the any-of
+    # behaviour this setting has always had is unchanged. A track with no entry
     # is not gated this way at all, and neither is a profile that names none.
     per_track = limits.get("max_distinct_values") or {}
-    over = pd.Series(False, index=summary.index)
-    tracks = summary["track"]
-    for column in gates:
-        counted = summary[f"n_distinct_{column}"]
-        caps = tracks.map({
-            track: limit["count"]
-            for track, entries in per_track.items()
-            for limit in entries if limit["column"] == column
-        })
-        over = over | (counted > caps.fillna(np.inf)).fillna(False)
-    summary[MIXED_NAMES] = over.astype(bool)
+    over = np.zeros(len(summary), dtype=bool)
+    tracks = summary["track"].to_numpy()
+    for track, groups in per_track.items():
+        in_track = tracks == track
+        if not in_track.any():
+            continue
+        for group in groups:
+            holds = in_track.copy()
+            for limit in group:
+                counted = summary[f"n_distinct_{limit['key']}"].to_numpy()
+                holds = holds & (counted > limit["count"])
+                if not holds.any():
+                    break
+            over = over | holds
+    summary[MIXED_NAMES] = over
     # A cluster of one unit is nothing to gate: there is no merge to doubt.
     alone = (summary["n_units"] < 2).to_numpy()
     for status in STATUS_ORDER:

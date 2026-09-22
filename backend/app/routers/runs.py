@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from app.auth import current_user
 from app.db import query_db, write_db
 from app.profiles import get_profile
+from app.rules import linkage
 from app.services.config_manager import get_version
 from app import vocabulary
 from app.services import bucketing_history
@@ -172,6 +173,9 @@ class CreateRunRequest(BaseModel):
     threshold_review: float | None = None
     auto_accept_threshold: float | None = None
     review_lower_bound: float | None = None
+    # {track: accept line} for the tracks that set one of their own. The New
+    # run form sends one line per track the profile has (docs/LINKAGE.md).
+    threshold_high_by_track: dict[str, float] | None = None
     render_diagnostics: bool = True
     quick_mode: bool = False
 
@@ -179,6 +183,7 @@ class CreateRunRequest(BaseModel):
 class ReBucketRequest(BaseModel):
     threshold_high: float | None = None
     threshold_review: float | None = None
+    threshold_high_by_track: dict[str, float] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +191,8 @@ class ReBucketRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _thresholds_for_config(db_path: str, config_version: int) -> tuple[float, float]:
+def _thresholds_for_config(db_path: str, config_version: int) -> tuple[float, float, dict]:
+    """``(accept line, review line, per-track accept lines)`` of one version."""
     config = get_version(db_path, config_version)
     if not config:
         raise HTTPException(status_code=400, detail=f"Config version {config_version} not found")
@@ -197,6 +203,7 @@ def _thresholds_for_config(db_path: str, config_version: int) -> tuple[float, fl
     return (
         float(settings.get("match_probability_threshold_high", 0.92)),
         float(settings.get("match_probability_threshold_review", 0.50)),
+        linkage.high_by_track(settings),
     )
 
 
@@ -207,9 +214,32 @@ def create_run(body: CreateRunRequest, user_name: str = Depends(current_user)):
     data_dir = _data_dir_from_main()
 
     # Resolve thresholds (accept both naming conventions)
-    default_high, default_review = _thresholds_for_config(db_path, body.config_version)
+    default_high, default_review, default_by_track = _thresholds_for_config(
+        db_path, body.config_version)
     t_high = body.threshold_high or body.auto_accept_threshold or default_high
     t_review = body.threshold_review or body.review_lower_bound or default_review
+    # The form sends one accept line per track. Sending none keeps the config
+    # version's own per-track lines, so an API caller that knows nothing about
+    # them still gets the lines the version was saved with.
+    t_by_track = body.threshold_high_by_track
+    if t_by_track is None:
+        t_by_track = default_by_track or None
+    if t_by_track is not None:
+        bad = [t for t in t_by_track if t not in linkage.TRACK_KEYS]
+        if bad:
+            raise HTTPException(
+                status_code=400,
+                detail=vocabulary.choice_error("track", bad[0], linkage.TRACK_KEYS))
+        for track, line in t_by_track.items():
+            if not 0 <= float(line) <= 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"The {track} accept line must be between 0 and 1")
+            if float(line) < float(t_review):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"The {track} accept line must be at or above the "
+                            "review line"))
 
     # Resolve the one input file — accept either a direct filename or an upload_id
     uploads_dir = data_dir / "uploads"
@@ -300,6 +330,7 @@ def create_run(body: CreateRunRequest, user_name: str = Depends(current_user)):
         config_version=body.config_version,
         threshold_high=t_high,
         threshold_review=t_review,
+        threshold_high_by_track=t_by_track,
         render_diagnostics=body.render_diagnostics,
         quick_mode=body.quick_mode,
     )
@@ -572,6 +603,7 @@ def get_manifest(run_id: str):
             "config_version": row.get("config_version"),
             "thresholds": {
                 "accept_line": row.get("threshold_high"),
+                "accept_line_by_track": {},
                 "review_line": row.get("threshold_review"),
                 "lowest_score_kept": None,
             },
@@ -1386,6 +1418,7 @@ def re_bucket(run_id: str, body: ReBucketRequest, user_name: str = Depends(curre
                 db_path, str(run_dir), str(config_dir), run_id=run_id,
                 threshold_high=body.threshold_high,
                 threshold_review=body.threshold_review,
+                threshold_high_by_track=body.threshold_high_by_track,
                 who=user_name or "unknown",
             )
         except ValueError as exc:

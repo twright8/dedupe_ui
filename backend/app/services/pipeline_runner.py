@@ -16,6 +16,7 @@ from typing import Any
 from app.db import query_db, write_db
 from app.profiles.base import LoadOptions
 from app.services.audit_logger import log_event
+from app.rules import linkage
 from app.services.config_manager import get_version
 from app.services import bucketing_history, run_lock, run_manifest
 
@@ -106,6 +107,7 @@ def _write_config_files(
     threshold_high: float | None = None,
     threshold_review: float | None = None,
     cross_jurisdiction_name_matching: bool = True,
+    threshold_high_by_track: dict | None = None,
 ) -> None:
     """Snapshot a config version into the run's config folder.
 
@@ -129,6 +131,13 @@ def _write_config_files(
         linkage_settings["match_probability_threshold_high"] = threshold_high
     if threshold_review is not None:
         linkage_settings["match_probability_threshold_review"] = threshold_review
+    # A per-track accept line the caller chose replaces the config version's.
+    # Passing none leaves the version's own per-track lines alone, so moving
+    # only the shared line does not quietly wipe them (docs/LINKAGE.md).
+    if threshold_high_by_track is not None:
+        linkage_settings[linkage.HIGH_BY_TRACK_KEY] = {
+            str(track): float(line) for track, line in threshold_high_by_track.items()
+        }
     linkage_settings.setdefault("random_seed", 42)
 
     # The two-dataset tool this app was copied from kept one flat list of blocking
@@ -347,6 +356,7 @@ def start_run(
     threshold_review: float,
     render_diagnostics: bool = True,
     quick_mode: bool = False,
+    threshold_high_by_track: dict | None = None,
 ) -> str:
     """Prepare a run directory and launch the pipeline in a background thread.
 
@@ -364,7 +374,8 @@ def start_run(
     config_row = get_version(db_path, config_version)
     if config_row is None:
         raise ValueError(f"Config version {config_version} not found")
-    _write_config_files(config_row, config_dir, threshold_high, threshold_review)
+    _write_config_files(config_row, config_dir, threshold_high, threshold_review,
+                        threshold_high_by_track=threshold_high_by_track)
 
     # Update run status
     now = datetime.now(timezone.utc).isoformat()
@@ -378,7 +389,8 @@ def start_run(
     # its hash, the code version, the config version, the lines in force and
     # the library versions (docs/PROVENANCE.md). It never fails a run.
     _write_start_manifest(db_path, run_id, run_dir, config_row, input_path,
-                          threshold_high, threshold_review, now)
+                          threshold_high, threshold_review, now,
+                          config_dir=config_dir)
 
     with _run_lock:
         _active_run_id = run_id
@@ -406,7 +418,8 @@ def start_run(
 
 
 def _write_start_manifest(db_path, run_id, run_dir, config_row, input_path,
-                          threshold_high, threshold_review, started_at):
+                          threshold_high, threshold_review, started_at,
+                          config_dir=None):
     """Build ``run_manifest.json`` and copy its headline fields onto the run row."""
     try:
         row = query_db(db_path, "SELECT * FROM runs WHERE id = ?", (run_id,))
@@ -426,6 +439,11 @@ def _write_start_manifest(db_path, run_id, run_dir, config_row, input_path,
             input_path=input_path,
             thresholds={
                 "accept_line": threshold_high,
+                # Read back off the snapshot the run will actually score with,
+                # not off the config row, so the manifest cannot disagree with
+                # the lines stage 3 uses.
+                "accept_line_by_track": linkage.high_by_track(
+                    _run_settings(config_dir) if config_dir else settings),
                 "review_line": threshold_review,
                 "lowest_score_kept": settings.get(
                     "match_probability_threshold_candidate"),
@@ -611,6 +629,7 @@ def _run_stages(
         bucketing_history.append(
             run_dir, "scored",
             accept_line=threshold_high, review_line=threshold_review,
+            accept_line_by_track=linkage.high_by_track(_run_settings(config_dir)),
             lowest_score_kept=_run_settings(config_dir).get(
                 "match_probability_threshold_candidate"),
             scorer="splink", counts=counts, who="system",
@@ -706,6 +725,7 @@ def rebucket_pairs(
     threshold_high: float | None = None,
     threshold_review: float | None = None,
     who: str = "",
+    threshold_high_by_track: dict | None = None,
 ) -> dict:
     """Move a scored run's bucket lines without re-running Splink.
 
@@ -735,6 +755,20 @@ def rebucket_pairs(
     if review > high:
         raise ValueError("The review threshold must be at or below the accept threshold")
 
+    # A per-track accept line the caller sent replaces what the run had.
+    # Sending none leaves the run's own per-track lines where they were, so
+    # moving the review line alone does not move any track's accept line.
+    if threshold_high_by_track is not None:
+        settings[linkage.HIGH_BY_TRACK_KEY] = {
+            str(track): float(line) for track, line in threshold_high_by_track.items()
+        }
+    by_track = linkage.high_by_track(settings)
+    for track, line in by_track.items():
+        if review > line:
+            raise ValueError(
+                "The review threshold must be at or below every track's accept line"
+            )
+
     settings["match_probability_threshold_high"] = high
     settings["match_probability_threshold_review"] = review
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
@@ -746,14 +780,15 @@ def rebucket_pairs(
 
     counts = run_counts.merge(
         db_path, run_id,
-        rebucket(run_dir, high, review, labels_frame(db_path)),
+        rebucket(run_dir, high, review, labels_frame(db_path),
+                 threshold_high_by_track=by_track),
         extra_sql="threshold_high = ?, threshold_review = ?, ",
         extra_params=(high, review),
     )
     state = _model_state(run_dir)
     bucketing_history.append(
         run_dir, "re-bucketed",
-        accept_line=high, review_line=review,
+        accept_line=high, review_line=review, accept_line_by_track=by_track,
         lowest_score_kept=settings.get("match_probability_threshold_candidate"),
         scorer="model" if state else "splink",
         model_version=state or None, counts=counts, who=who or "",
@@ -803,6 +838,7 @@ def enqueue_run(
     threshold_review: float,
     render_diagnostics: bool = True,
     quick_mode: bool = False,
+    threshold_high_by_track: dict | None = None,
 ) -> None:
     """If no run is active, start immediately. Otherwise queue for later."""
     kwargs = {
@@ -815,6 +851,7 @@ def enqueue_run(
         "threshold_review": threshold_review,
         "render_diagnostics": render_diagnostics,
         "quick_mode": quick_mode,
+        "threshold_high_by_track": threshold_high_by_track,
     }
 
     with _run_lock:

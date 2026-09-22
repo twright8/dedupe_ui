@@ -665,8 +665,33 @@ def _held_detail(con, run_dir: str, cluster_id: str, decisions: dict,
     }
 
 
+def gate_over(gate: dict | None, track, counts: dict) -> list[dict]:
+    """The gate limits this cluster is over, the most different values first.
+
+    *gate* is ``linkage.max_distinct_values`` — a list of clauses per track. A
+    clause holds the cluster only when EVERY limit in it is over its count, so
+    only the limits of a clause that actually held are reported. That is what
+    makes "split on the column with the most values" mean the column that held
+    this cluster, rather than whichever column happens to vary most: many
+    registered addresses is not by itself a reason to split anything.
+    """
+    out: dict[str, dict] = {}
+    for clause in (gate or {}).get(track) or []:
+        if not all(counts.get(limit["key"], 0) > limit["count"] for limit in clause):
+            continue
+        for limit in clause:
+            out[limit["key"]] = {
+                "key": limit["key"],
+                "columns": list(limit["columns"]),
+                "count": limit["count"],
+                "n_distinct": counts.get(limit["key"], 0),
+            }
+    return sorted(out.values(), key=lambda entry: -entry["n_distinct"])
+
+
 def get_cluster(run_dir: str, cluster_id: str, decisions: dict | None = None,
-                with_events: bool = False, cluster_floor: float = 0.20) -> dict | None:
+                with_events: bool = False, cluster_floor: float = 0.20,
+                gate: dict | None = None) -> dict | None:
     """One cluster with its units, the pairs between them and the proposed parts."""
     decisions = decisions or {}
     con, path, units_path = _open(run_dir)
@@ -748,6 +773,15 @@ def get_cluster(run_dir: str, cluster_id: str, decisions: dict | None = None,
         # column and the count to say why a mixed-names cluster was held back.
         **{key: int(value) for key, value in rows[0].items()
            if str(key).startswith("n_distinct_") and value is not None},
+        # Which of those counts actually held this cluster back, worst first.
+        # The counts alone cannot say: a limit only bites when every limit in
+        # its clause does.
+        "gate_over": gate_over(
+            gate, rows[0].get("track"),
+            {str(key)[len("n_distinct_"):]: int(value)
+             for key, value in rows[0].items()
+             if str(key).startswith("n_distinct_") and value is not None},
+        ),
         "n_units": len(unit_ids),
         "n_records": int(total_records),
         "units_shown": len(unit_rows),

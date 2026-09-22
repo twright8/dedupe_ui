@@ -33,9 +33,23 @@ function Stat({ label, value }) {
 // ---------- Chunked upload logic ----------
 const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB
 
-function readThresholds(settings = {}) {
+/* The lines a config version starts a run on. The accept line is one per
+   track, because the two tracks rarely want the same one: measured on the
+   donations sheet the person track wants 0.96 and the organisation track 0.92
+   (docs/LINKAGE.md). A track that sets none reads the shared line. */
+function readThresholds(settings = {}, trackKeys = []) {
+  const shared = +(
+    settings.match_probability_threshold_high ?? settings.threshold_auto_accept ?? 0.92
+  );
+  const own = settings.match_probability_threshold_high_by_track;
+  const byTrack = {};
+  for (const key of trackKeys) {
+    const line = own && typeof own === "object" ? Number(own[key]) : NaN;
+    byTrack[key] = Number.isFinite(line) ? line : shared;
+  }
   return {
-    high: +(settings.match_probability_threshold_high ?? settings.threshold_auto_accept ?? 0.92),
+    high: shared,
+    highByTrack: byTrack,
     review: +(settings.match_probability_threshold_review ?? settings.threshold_review_lower ?? 0.5),
   };
 }
@@ -263,33 +277,48 @@ export default function NewRunScreen() {
   // Config versions
   const [configVersions, setConfigVersions] = useState([]);
   const [config, setConfig] = useState("");
-  const [defaultThresh, setDefaultThresh] = useState(0.92);
+  const [defaultThresh, setDefaultThresh] = useState({});
   const [defaultReviewLow, setDefaultReviewLow] = useState(0.5);
+  // One accept line per track the profile has. The tracks come from the
+  // profile, so a profile with one track gets one slider.
+  const tracks = profile.tracks || [];
+  const trackKeys = tracks.map((t) => t.key);
 
   useEffect(() => {
+    if (!trackKeys.length) return;
     Promise.all([api.listConfigVersions(), api.currentConfig()])
       .then(([data, current]) => {
         const versions = Array.isArray(data) ? data : data.versions || [];
         setConfigVersions(versions);
-        const thresholds = readThresholds(current?.linkage_settings || {});
-        setDefaultThresh(thresholds.high);
-        setDefaultReviewLow(thresholds.review);
-        setThresh(thresholds.high);
-        setReviewLow(thresholds.review);
+        applyThresholds(readThresholds(current?.linkage_settings || {}, trackKeys));
         if (versions.length > 0) {
           setConfig(String(current?.version || versions[0].v || versions[0].version || ""));
         }
       })
       .catch(() => {});
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trackKeys.join(",")]);
 
   // Upload state — one input file per run
   const inputUpload = useChunkedUpload();
   const inputFileRef = useRef(null);
 
   // Settings
-  const [thresh, setThresh] = useState(0.92);
+  const [thresh, setThresh] = useState({});
   const [reviewLow, setReviewLow] = useState(0.5);
+
+  function applyThresholds(lines) {
+    setDefaultThresh(lines.highByTrack);
+    setThresh(lines.highByTrack);
+    setDefaultReviewLow(lines.review);
+    setReviewLow(lines.review);
+  }
+
+  // The highest line any track reads, which is what the run row stores as its
+  // single accept line and what an older reader of the run sees.
+  const sharedThresh = Object.keys(thresh).length
+    ? Math.max(...Object.values(thresh))
+    : 0.92;
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -301,25 +330,47 @@ export default function NewRunScreen() {
       // version, not the failed run's stale version.
       if (configOverride != null) setConfig(String(configOverride));
       else if (run.config_version != null) setConfig(String(run.config_version));
+      // A re-run starts from what that run used. The run's per-track lines
+      // live in its manifest, so the row's single line is only the fallback.
       if (run.threshold_high != null) {
-        setThresh(+run.threshold_high);
-        setDefaultThresh(+run.threshold_high);
+        const flat = {};
+        for (const key of trackKeys) flat[key] = +run.threshold_high;
+        setThresh(flat);
+        setDefaultThresh(flat);
       }
       if (run.threshold_review != null) {
         setReviewLow(+run.threshold_review);
         setDefaultReviewLow(+run.threshold_review);
       }
+      api
+        .getRunManifest(from)
+        .then((manifest) => {
+          const own = manifest?.thresholds?.accept_line_by_track;
+          if (!own || typeof own !== "object" || !Object.keys(own).length) return;
+          setThresh((prev) => {
+            const next = { ...prev };
+            for (const key of trackKeys) {
+              if (Number.isFinite(Number(own[key]))) next[key] = +own[key];
+            }
+            return next;
+          });
+          setDefaultThresh((prev) => {
+            const next = { ...prev };
+            for (const key of trackKeys) {
+              if (Number.isFinite(Number(own[key]))) next[key] = +own[key];
+            }
+            return next;
+          });
+        })
+        .catch(() => {});
     }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.search]);
 
   function handleConfigChange(value) {
     setConfig(value);
     api.getConfigVersion(value).then((cfg) => {
-      const thresholds = readThresholds(cfg?.linkage_settings || {});
-      setDefaultThresh(thresholds.high);
-      setDefaultReviewLow(thresholds.review);
-      setThresh(thresholds.high);
-      setReviewLow(thresholds.review);
+      applyThresholds(readThresholds(cfg?.linkage_settings || {}, trackKeys));
     }).catch(() => {});
   }
 
@@ -344,7 +395,8 @@ export default function NewRunScreen() {
       .createRun({
         input_upload_id: inputUpload.uploadId,
         config_version: config,
-        auto_accept_threshold: thresh,
+        auto_accept_threshold: sharedThresh,
+        threshold_high_by_track: thresh,
         review_lower_bound: reviewLow,
       })
       .then((result) => {
@@ -469,28 +521,32 @@ export default function NewRunScreen() {
               </select>
             </div>
 
-            <div className="field">
-              <label>
-                Accept line <TermHint name="acceptLine" /> &nbsp;
-                <span className="mono" style={{ color: "var(--ink)" }}>
-                  {thresh.toFixed(2)}
-                </span>
-              </label>
-              <input
-                type="range"
-                min="0.7"
-                max="0.99"
-                step="0.01"
-                value={thresh}
-                onChange={(e) => setThresh(+e.target.value)}
-                className="slider"
-              />
-              <div className="muted" style={{ fontSize: 11, lineHeight: 1.5 }}>
-                The score at or above which a pair is accepted without review. This config
-                version's own accept line is{" "}
-                <span className="mono">{defaultThresh.toFixed(2)}</span>.
+            {tracks.map((t) => (
+              <div className="field" key={t.key}>
+                <label>
+                  Accept line, {t.label} <TermHint name="acceptLine" /> &nbsp;
+                  <span className="mono" style={{ color: "var(--ink)" }}>
+                    {(thresh[t.key] ?? 0.92).toFixed(2)}
+                  </span>
+                </label>
+                <input
+                  type="range"
+                  min="0.7"
+                  max="0.99"
+                  step="0.01"
+                  value={thresh[t.key] ?? 0.92}
+                  onChange={(e) =>
+                    setThresh((prev) => ({ ...prev, [t.key]: +e.target.value }))
+                  }
+                  className="slider"
+                />
+                <div className="muted" style={{ fontSize: 11, lineHeight: 1.5 }}>
+                  The score at or above which a pair on this track is accepted without review.
+                  This config version's own line for it is{" "}
+                  <span className="mono">{(defaultThresh[t.key] ?? 0.92).toFixed(2)}</span>.
+                </div>
               </div>
-            </div>
+            ))}
 
             <div className="field">
               <label>
@@ -516,10 +572,11 @@ export default function NewRunScreen() {
             </div>
 
             <div className="muted" style={{ fontSize: 11, lineHeight: 1.5 }}>
-              Both lines are scores from 0 to 1, on the <Term name="splinkScore" />'s scale. They
-              set up this run's first pass. A trained model reads its own accept line and review
-              line off the <Term name="testSet" />, on a scale of its own, and you do not set
-              those here.
+              Every line is a score from 0 to 1, on the <Term name="splinkScore" />'s scale. Each
+              track has its own accept line, because the two tracks rarely want the same one; the
+              review line is one line for all of them. They set up this run's first pass. A
+              trained model reads its own accept line and review line off the{" "}
+              <Term name="testSet" />, on a scale of its own, and you do not set those here.
             </div>
 
             <div

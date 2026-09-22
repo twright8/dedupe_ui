@@ -69,6 +69,14 @@ def _thresholds(run_dir: Path) -> tuple[float, float, float]:
     return linkage.thresholds(json.loads(path.read_text(encoding="utf-8")))
 
 
+def _high_by_track(run_dir: Path) -> dict:
+    """The accept line of every track that set one of its own, for this run."""
+    path = run_dir / "config" / "linkage_settings.json"
+    if not path.is_file():
+        return {}
+    return linkage.high_by_track(json.loads(path.read_text(encoding="utf-8")))
+
+
 def _buckets_changed(before: pd.DataFrame, after: pd.DataFrame) -> bool:
     """Whether any pair ended up in a different bucket, or decided by something else.
 
@@ -108,7 +116,8 @@ def _recluster(run_dir: Path, db_path: str | None, labels) -> dict:
 
 def _finish(run_dir: Path, data: dict, pairs: pd.DataFrame, labels,
             lines: dict, review: float, high: float, candidate: float,
-            db_path: str | None = None) -> tuple[dict, bool]:
+            db_path: str | None = None,
+            high_by_track: dict | None = None) -> tuple[dict, bool]:
     """Write the pairs, redo everything downstream, and hand back the counts.
 
     Returns ``(counts, reclustered)``. The counts cover stage 3, and stages 4
@@ -126,7 +135,8 @@ def _finish(run_dir: Path, data: dict, pairs: pd.DataFrame, labels,
     write_contradictions(run_dir, outcome["contradictions"])
     evaluation = score_eval.evaluate(
         data["records"], data["groups"], data["units"], data["members"], pairs,
-        thresholds={"candidate": candidate, "review": review, "high": high},
+        thresholds={"candidate": candidate, "review": review, "high": high,
+                    "high_by_track": high_by_track or {}},
         applied=outcome["applied"], model_lines=lines,
     )
     _write_evaluation(run_dir, evaluation)
@@ -159,6 +169,7 @@ def apply_model(run_dir, labels: pd.DataFrame | None = None,
         raise ModelApplyError("No active model for any track")
 
     candidate, review, high = _thresholds(run_dir)
+    high_by_track = _high_by_track(run_dir)
     review_before = int((data["pairs"]["bucket"] == "review").sum())
 
     # The corpus statistics the run fitted, read back from its folder — the
@@ -182,7 +193,8 @@ def apply_model(run_dir, labels: pd.DataFrame | None = None,
     # overrides the model exactly as it overrides Splink (RULESET.md, Vetoes).
     pairs = finalise_pairs(
         apply_overlays(_strip_overlays(pairs), data["units"], review, high,
-                       model_lines=lines, ruleset=run_ruleset(run_dir)),
+                       model_lines=lines, ruleset=run_ruleset(run_dir),
+                       high_by_track=high_by_track),
         data["units"],
     )
     review_after = int((pairs["bucket"] == "review").sum())
@@ -203,10 +215,11 @@ def apply_model(run_dir, labels: pd.DataFrame | None = None,
 
     state = stage_3b_model.write_state(run_dir, used, warning=reason, applied=True)
     counts, reclustered = _finish(run_dir, data, pairs, labels, lines, review, high,
-                                  candidate, db_path)
+                                  candidate, db_path, high_by_track=high_by_track)
     bucketing_history.append(
         run_dir, "model applied",
         accept_line=high, review_line=review, lowest_score_kept=candidate,
+        accept_line_by_track=high_by_track,
         scorer="model",
         model_version={track: model.version for track, model in used.items()},
         counts=counts, who=who or "",
@@ -244,6 +257,7 @@ def revert_model(run_dir, labels: pd.DataFrame | None = None,
     run_dir = Path(run_dir)
     data = _read(run_dir)
     candidate, review, high = _thresholds(run_dir)
+    high_by_track = _high_by_track(run_dir)
 
     pairs = data["pairs"]
     dropped = [column for column in (stage_3b_model.MODEL_SCORE_COLUMN,
@@ -253,15 +267,16 @@ def revert_model(run_dir, labels: pd.DataFrame | None = None,
         pairs = pairs.drop(columns=dropped)
     pairs = finalise_pairs(
         apply_overlays(_strip_overlays(pairs), data["units"], review, high,
-                       ruleset=run_ruleset(run_dir)),
+                       ruleset=run_ruleset(run_dir), high_by_track=high_by_track),
         data["units"],
     )
     stage_3b_model.clear_state(run_dir)
     counts, reclustered = _finish(run_dir, data, pairs, labels, {}, review, high,
-                                  candidate, db_path)
+                                  candidate, db_path, high_by_track=high_by_track)
     bucketing_history.append(
         run_dir, "model reverted",
         accept_line=high, review_line=review, lowest_score_kept=candidate,
+        accept_line_by_track=high_by_track,
         scorer="splink", counts=counts, who=who or "",
     )
     return {"ok": True, "counts": counts, "reclustered": reclustered}

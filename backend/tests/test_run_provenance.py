@@ -463,3 +463,72 @@ def test_the_words_are_the_vocabularys(client):
               for entry in vocabulary.as_dict()["fields"]["scorer"]["values"]}
     for column, meta in pairs_reader.SCORE_COLUMNS.items():
         assert served[meta["scorer"]] == meta["label"], column
+
+
+# ---------------------------------------------------------------------------
+# The accept line each track used
+# ---------------------------------------------------------------------------
+
+
+def test_the_manifest_records_the_accept_line_of_every_track():
+    """One number cannot answer "which line put this pair here" once the two
+    tracks read different lines, so the manifest records them all."""
+    manifest = run_manifest.build(
+        run_id="r1", run_dir="/tmp/nowhere", config_version=3, input_path=None,
+        thresholds={"accept_line": 0.92, "review_line": 0.50,
+                    "lowest_score_kept": 0.05,
+                    "accept_line_by_track": {"person": 0.96}},
+    )
+    assert manifest["thresholds"] == {
+        "accept_line": 0.92,
+        "accept_line_by_track": {"person": 0.96},
+        "review_line": 0.50,
+        "lowest_score_kept": 0.05,
+    }
+
+
+def test_a_manifest_from_before_the_lines_could_differ_still_reads():
+    manifest = run_manifest.build(
+        run_id="r1", run_dir="/tmp/nowhere", config_version=3, input_path=None,
+        thresholds={"accept_line": 0.92, "review_line": 0.50},
+    )
+    assert manifest["thresholds"]["accept_line_by_track"] == {}
+
+
+def test_the_history_records_the_accept_line_of_every_track(tmp_path):
+    entry = bucketing_history.append(
+        tmp_path, "scored", accept_line=0.92, review_line=0.50,
+        accept_line_by_track={"person": 0.96}, scorer="splink", who="system",
+    )
+    assert entry["accept_line"] == 0.92
+    assert entry["accept_line_by_track"] == {"person": 0.96}
+    assert bucketing_history.read(tmp_path)[-1]["accept_line_by_track"] == \
+        {"person": 0.96}
+
+
+def test_a_run_snapshots_the_per_track_lines_it_was_started_with(tmp_path):
+    """The run's own config folder is what stage 3 reads, so what the user
+    chose has to land there and not only in the database row."""
+    from app.services.pipeline_runner import _write_config_files
+
+    config_row = {"ruleset": {}, "linkage_settings": json.dumps({
+        "match_probability_threshold_high": 0.92,
+        "match_probability_threshold_high_by_track": {"person": 0.96},
+        "tracks": {"person": {}, "organisation": {}},
+    })}
+    config_dir = tmp_path / "config"
+
+    # No per-track lines sent: the version's own survive, so moving the shared
+    # line alone does not quietly wipe them.
+    _write_config_files(config_row, config_dir, threshold_high=0.93)
+    written = json.loads((config_dir / "linkage_settings.json").read_text())
+    assert written["match_probability_threshold_high"] == 0.93
+    assert written["match_probability_threshold_high_by_track"] == {"person": 0.96}
+
+    # Per-track lines sent: they replace what the version had.
+    _write_config_files(config_row, config_dir, threshold_high=0.92,
+                        threshold_high_by_track={"person": 0.98,
+                                                 "organisation": 0.94})
+    written = json.loads((config_dir / "linkage_settings.json").read_text())
+    assert written["match_probability_threshold_high_by_track"] == {
+        "person": 0.98, "organisation": 0.94}

@@ -119,7 +119,24 @@ function statusSentence(status, cluster) {
     );
   }
   if (status === "mixed_names") {
-    const worst = distinctValueCounts(cluster)[0];
+    const held = gateOver(cluster);
+    // Two counts together is a rule of its own: many addresses means nothing
+    // on its own, and many addresses with more than one birth date does.
+    if (held.length > 1) {
+      return (
+        <>
+          The units here show {fmtNumber(held[0].n_distinct)} different values of{" "}
+          {columnLabel(held[0].key, cluster?.columns)} and{" "}
+          {fmtNumber(held[1].n_distinct)} different values of{" "}
+          {columnLabel(held[1].key, cluster?.columns)}. Either on its own could be one person;
+          both together cannot, so this cluster is really several people. Split it into one part
+          per person.
+        </>
+      );
+    }
+    const worst = held[0]
+      ? { column: held[0].key, count: held[0].n_distinct }
+      : distinctValueCounts(cluster)[0];
     if (worst) {
       return (
         <>
@@ -131,8 +148,9 @@ function statusSentence(status, cluster) {
     }
     return (
       <>
-        The units here show more different values of a name or a birth year than one person could
-        have, so this cluster is really several people. Split it into one part per person.
+        The units here show more different values of a name, an address or a birth date than one
+        person could have, so this cluster is really several people. Split it into one part per
+        person.
       </>
     );
   }
@@ -180,11 +198,25 @@ function statusSentence(status, cluster) {
 function columnLabel(key, columns) {
   const hit = (columns || []).find((c) => c.key === key);
   if (hit?.label) return hit.label;
+  // A gate limit may count several columns as one value, and its key joins
+  // them with a plus. Read back, that is "a birth year and a birth month".
+  const parts = String(key || "").split("+").filter(Boolean);
+  if (parts.length > 1) {
+    return parts.map((part, i) => (i === 0 ? columnLabel(part, columns) : columnLabel(part, columns).toLowerCase())).join(" and ");
+  }
   const words = String(key || "")
     .replace(/_/g, " ")
     .trim();
   if (!words) return "This value";
   return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/* The gate limits this cluster is over, worst first, as the backend worked
+   them out. A clause holds only when every limit in it is over its count, so
+   this is narrower than "every column that varies a lot". */
+function gateOver(cluster) {
+  const list = cluster?.gate_over;
+  return Array.isArray(list) ? list : [];
 }
 
 // ---------- main screen ----------
@@ -810,16 +842,22 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
       }
     };
 
-    /* Which column to split a mixed-names cluster on. The answer carries one
-       count per gated column, so the column with the most different values is
-       the one that went over. With no counts, the surname is the fallback. */
-    const mixedColumn = () => {
+    /* Which column or columns to split a mixed-names cluster on. The answer
+       names the limits this cluster is actually over, worst first, so the split
+       follows the rule that held it rather than whichever column happens to
+       vary most. With no such list, the counts and then the surname stand in. */
+    const mixedColumns = () => {
+      const held = gateOver(detail).find((limit) =>
+        (limit.columns || []).every((c) => units.some((u) => u[c] != null))
+      );
+      if (held) return held.columns;
       const counted = distinctValueCounts(detail).find((c) =>
         units.some((u) => u[c.column] != null)
       );
-      if (counted) return counted.column;
+      if (counted) return [counted.column];
       const keys = units.length ? Object.keys(units[0]) : [];
-      return keys.find((k) => k.toLowerCase().includes("surname")) || null;
+      const surname = keys.find((k) => k.toLowerCase().includes("surname"));
+      return surname ? [surname] : [];
     };
 
     if (bySize) {
@@ -828,12 +866,13 @@ function ClusterDetail({ runId, clusterId, profile, onDecided, onMove }) {
     } else if (byColumn && units.some((u) => u[byColumn[1]] != null)) {
       splitOn((u) => String(u[byColumn[1]] ?? "").trim());
     } else if (mixedNames) {
-      // One part per different value of the column that tripped the limit.
-      const column = mixedColumn();
+      // One part per different value of the limit that held the cluster. A
+      // limit counting several columns as one value splits on all of them.
+      const columns = mixedColumns();
       splitOn((u) =>
-        String((column ? u[column] : u.name) ?? "")
-          .trim()
-          .toUpperCase()
+        (columns.length ? columns.map((c) => u[c]) : [u.name])
+          .map((value) => String(value ?? "").trim().toUpperCase())
+          .join(" ")
       );
     } else if (detail?.status === "mixed_ids" || units.some((u) => u.existing_entity_ids)) {
       splitOn((u) => String(u.existing_entity_ids || "").split("|")[0].trim());

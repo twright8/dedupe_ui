@@ -214,3 +214,149 @@ def test_a_bad_on_oversize_says_what_the_setting_is_for():
     assert messages == [vocabulary.choice_error("on_oversize", "explode",
                                                 linkage.ON_OVERSIZE)]
     assert "what happens when a blocking rule makes too many pairs" in messages[0]
+
+
+# ---------------------------------------------------------------------------
+# The accept line, per track
+# ---------------------------------------------------------------------------
+
+
+def test_a_track_may_set_an_accept_line_of_its_own():
+    """The two tracks want different lines, so a track may name its own.
+
+    Measured on the donations sheet: the person track needs 0.96 to buy back
+    the precision the surname fix cost, and the organisation track pays for
+    that line in recall without wanting the precision.
+    """
+    settings = default_linkage_settings()
+    settings["match_probability_threshold_high"] = 0.92
+    settings[linkage.HIGH_BY_TRACK_KEY] = {"person": 0.96}
+    assert _paths(_check(settings)) == []
+    assert linkage.high_by_track(settings) == {"person": 0.96}
+    assert linkage.accept_line(settings, "person") == 0.96
+    assert linkage.accept_line(settings, "organisation") == 0.92
+    # The single line still answers a caller with no pair in front of it.
+    assert linkage.thresholds(settings)[2] == 0.92
+
+
+def test_a_track_with_no_line_of_its_own_reads_the_shared_one():
+    settings = default_linkage_settings()
+    settings.pop(linkage.HIGH_BY_TRACK_KEY, None)
+    settings["match_probability_threshold_high"] = 0.92
+    assert linkage.high_by_track(settings) == {}
+    assert linkage.accept_line(settings, "person") == 0.92
+    assert linkage.accept_line(settings) == 0.92
+    assert linkage.accept_lines(settings) == {"person": 0.92, "organisation": 0.92}
+
+
+def test_a_per_track_accept_line_must_be_a_score_above_the_review_line():
+    settings = default_linkage_settings()
+    settings["match_probability_threshold_review"] = 0.5
+    settings[linkage.HIGH_BY_TRACK_KEY] = {"person": 0.4}
+    assert _paths(_check(settings)) == \
+        [f"linkage_settings.{linkage.HIGH_BY_TRACK_KEY}.person"]
+
+    settings[linkage.HIGH_BY_TRACK_KEY] = {"person": 1.4}
+    assert _paths(_check(settings)) == \
+        [f"linkage_settings.{linkage.HIGH_BY_TRACK_KEY}.person"]
+
+    settings[linkage.HIGH_BY_TRACK_KEY] = {"person": "high"}
+    assert _paths(_check(settings)) == \
+        [f"linkage_settings.{linkage.HIGH_BY_TRACK_KEY}.person"]
+
+
+def test_a_per_track_accept_line_must_name_a_track_that_exists():
+    settings = default_linkage_settings()
+    settings[linkage.HIGH_BY_TRACK_KEY] = {"persons": 0.96}
+    assert _paths(_check(settings)) == \
+        [f"linkage_settings.{linkage.HIGH_BY_TRACK_KEY}.persons"]
+    # Dropped rather than guessed at, so nothing downstream reads a bad track.
+    assert linkage.high_by_track(settings) == {}
+
+
+def test_a_per_track_accept_line_must_be_an_object():
+    settings = default_linkage_settings()
+    settings[linkage.HIGH_BY_TRACK_KEY] = 0.96
+    assert _paths(_check(settings)) == \
+        [f"linkage_settings.{linkage.HIGH_BY_TRACK_KEY}"]
+
+
+# ---------------------------------------------------------------------------
+# The stage 4 gate: conjunctions, and columns counted together
+# ---------------------------------------------------------------------------
+
+
+def test_a_gate_clause_may_ask_for_two_counts_at_once():
+    """A limit on postcode districts alone is wrong 14 times in 20 on the full
+    PSC run, because one person's companies have many registered offices. Paired
+    with 'more than one full birth date' it stops being a guess."""
+    settings = default_linkage_settings()
+    settings["max_distinct_values"] = {"person": [
+        {"column": "surname", "count": 3},
+        {"all": [{"column": "postcode_district", "count": 5},
+                 {"columns": ["dob_year_clean", "dob_month_clean"], "count": 1}]},
+    ]}
+    assert _paths(_check(settings)) == []
+    assert linkage.max_distinct_values(settings) == {"person": [
+        [{"columns": ["surname"], "count": 3, "key": "surname"}],
+        [{"columns": ["postcode_district"], "count": 5, "key": "postcode_district"},
+         {"columns": ["dob_year_clean", "dob_month_clean"], "count": 1,
+          "key": "dob_year_clean+dob_month_clean"}],
+    ]}
+
+
+def test_a_single_column_gate_entry_is_unchanged_by_the_conjunction():
+    """The shape that shipped keeps working and keeps its own key name."""
+    settings = default_linkage_settings()
+    settings["max_distinct_values"] = {"person": {"column": "surname", "count": 3}}
+    assert _paths(_check(settings)) == []
+    assert linkage.max_distinct_values(settings) == {
+        "person": [[{"columns": ["surname"], "count": 3, "key": "surname"}]]}
+
+
+def test_a_conjunction_needs_a_column_and_a_count_on_every_member():
+    settings = default_linkage_settings()
+    settings["max_distinct_values"] = {"person": [
+        {"all": [{"column": "surname", "count": 3}, {"count": 1}]}]}
+    assert _paths(_check(settings)) == \
+        ["linkage_settings.max_distinct_values.person[0].all[1].column"]
+    # One bad member drops the whole clause: a half-read conjunction would hold
+    # MORE clusters than its author meant, which is the dangerous direction.
+    assert linkage.max_distinct_values(settings) == {}
+
+
+def test_an_empty_conjunction_is_refused():
+    settings = default_linkage_settings()
+    settings["max_distinct_values"] = {"person": [{"all": []}]}
+    assert _paths(_check(settings)) == \
+        ["linkage_settings.max_distinct_values.person[0].all"]
+
+
+def test_a_conjunction_cannot_hold_another_conjunction():
+    settings = default_linkage_settings()
+    settings["max_distinct_values"] = {"person": [
+        {"all": [{"all": [{"column": "surname", "count": 1}]}]}]}
+    assert _paths(_check(settings)) == \
+        ["linkage_settings.max_distinct_values.person[0].all[0]"]
+
+
+def test_columns_counted_together_must_be_a_list_of_names():
+    settings = default_linkage_settings()
+    settings["max_distinct_values"] = {"person": [{"columns": [], "count": 1}]}
+    assert _paths(_check(settings)) == \
+        ["linkage_settings.max_distinct_values.person[0].columns"]
+    assert linkage.max_distinct_values(settings) == {}
+
+
+def test_a_gate_count_must_be_a_whole_number_of_one_or_more():
+    settings = default_linkage_settings()
+    settings["max_distinct_values"] = {"person": [{"column": "surname", "count": 0}]}
+    assert _paths(_check(settings)) == \
+        ["linkage_settings.max_distinct_values.person[0].count"]
+
+
+def test_the_gate_must_name_a_track_that_exists():
+    settings = default_linkage_settings()
+    settings["max_distinct_values"] = {"people": [{"column": "surname", "count": 3}]}
+    assert _paths(_check(settings)) == \
+        ["linkage_settings.max_distinct_values.people"]

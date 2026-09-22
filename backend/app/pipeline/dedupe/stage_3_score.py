@@ -1142,6 +1142,26 @@ def bucket_of(scores, review: float, high: float) -> np.ndarray:
                     np.where(values >= review, "review", "reject"))
 
 
+def splink_buckets(pairs: pd.DataFrame, review: float, high: float,
+                   high_by_track: dict | None = None) -> np.ndarray:
+    """The Splink bucket of every pair, at its own track's accept line.
+
+    ``high_by_track`` is ``{track: accept line}`` for the tracks that set one of
+    their own (``linkage.high_by_track``). Everything else uses *high*, so an
+    empty mapping gives exactly the single-line behaviour this had before.
+    """
+    scores = pairs["match_probability"]
+    out = np.asarray(bucket_of(scores, review, high), dtype=object)
+    if not high_by_track or "track" not in pairs.columns:
+        return out
+    tracks = pairs["track"].to_numpy()
+    for track, line in high_by_track.items():
+        mask = tracks == track
+        if mask.any():
+            out[mask] = bucket_of(scores[mask], review, float(line))
+    return out
+
+
 def _model_buckets(pairs: pd.DataFrame, score_bucket: np.ndarray,
                    model_lines: dict | None) -> tuple[np.ndarray, np.ndarray]:
     """Replace the Splink bucket with the model's, for the tracks it decides.
@@ -1174,13 +1194,15 @@ def apply_overlays(
     high: float,
     model_lines: dict | None = None,
     ruleset: dict | None = None,
+    high_by_track: dict | None = None,
 ) -> pd.DataFrame:
     """Bucket the pairs, apply the vetoes, and lay the imported labels on top.
 
-    The score decides first — Splink's, or a graded model's on the tracks
-    ``model_lines`` names (`MODEL.md`, stage 3b), which is where ``decided_by``
-    reads ``model`` rather than ``score``. Then, per LINKAGE.md and the "Vetoes"
-    section of RULESET.md, lowest precedence first:
+    The score decides first — Splink's, at the accept line of the pair's own
+    track (*high_by_track*, falling back to *high*), or a graded model's on the
+    tracks ``model_lines`` names (`MODEL.md`, stage 3b), which is where
+    ``decided_by`` reads ``model`` rather than ``score``. Then, per LINKAGE.md
+    and the "Vetoes" section of RULESET.md, lowest precedence first:
 
       * a veto caps the pair at review or puts it in reject, and records
         ``vetoed_by`` and ``veto_reason``. It overrides the scorer and the model;
@@ -1214,7 +1236,7 @@ def apply_overlays(
     disagrees = (both & (left_id != right_id)).to_numpy()
 
     score_bucket, by_model = _model_buckets(
-        pairs, bucket_of(pairs["match_probability"], review, high), model_lines
+        pairs, splink_buckets(pairs, review, high, high_by_track), model_lines
     )
     vetoed = vetoes.apply_to_buckets(pairs, units, ruleset or {}, score_bucket)
     pairs["score_bucket"] = score_bucket
@@ -1271,6 +1293,7 @@ def overlay_predictions(
     model_lines: dict | None = None,
     batch_rows: int | None = None,
     progress_callback=None,
+    high_by_track: dict | None = None,
 ) -> int:
     """Bucket, veto and finalise every prediction, a batch at a time.
 
@@ -1297,11 +1320,13 @@ def overlay_predictions(
             batch = batch.reindex(columns=union)
             batch["track"] = track
             frame = apply_overlays(batch, units, review, high,
-                                   model_lines=model_lines, ruleset=ruleset)
+                                   model_lines=model_lines, ruleset=ruleset,
+                                   high_by_track=high_by_track)
             writer.write(finalise_pairs(frame, units))
     empty = finalise_pairs(
         apply_overlays(pd.DataFrame(columns=union), units, review, high,
-                       model_lines=model_lines, ruleset=ruleset),
+                       model_lines=model_lines, ruleset=ruleset,
+                       high_by_track=high_by_track),
         units,
     )
     return writer.close(empty=empty)
@@ -1512,6 +1537,7 @@ def apply_active_models(
     progress_callback=None,
     ruleset: dict | None = None,
     overlay_units: pd.DataFrame | None = None,
+    high_by_track: dict | None = None,
 ) -> dict:
     """Stage 3b: score the pairs with each track's active model and re-bucket.
 
@@ -1548,7 +1574,7 @@ def apply_active_models(
     scored_path = Path(pairs_path).with_suffix(".scored.parquet")
     used, review_before, review_after, distinct = _score_pairs_file(
         pairs_path, scored_path, units, overlay_units, models, unit_events,
-        review, high, ruleset, fitted,
+        review, high, ruleset, fitted, high_by_track=high_by_track,
     )
     warning = None
     lines = stage_3b_model.deciding_lines(used)
@@ -1580,7 +1606,8 @@ def apply_active_models(
 
 
 def _score_pairs_file(pairs_path, out_path, units, overlay_units, models,
-                      unit_events, review, high, ruleset, corpus=None):
+                      unit_events, review, high, ruleset, corpus=None,
+                      high_by_track=None):
     """One batched pass: model scores on, buckets redone, written to *out_path*.
 
     Both the scored-and-rebucketed file and the numbers the collapse guard needs
@@ -1608,7 +1635,8 @@ def _score_pairs_file(pairs_path, out_path, units, overlay_units, models,
         lines_by_track = stage_3b_model.deciding_lines(used)
         rebucketed = finalise_pairs(
             apply_overlays(_strip_overlays(scored), overlay_units, review, high,
-                           model_lines=lines_by_track, ruleset=ruleset),
+                           model_lines=lines_by_track, ruleset=ruleset,
+                           high_by_track=high_by_track),
             overlay_units,
         )
         review_after += int((rebucketed["bucket"] == "review").sum())
@@ -1710,7 +1738,8 @@ def unit_counts_of(units_path, temp_dir=None) -> dict:
 
 def rewrite_pairs(pairs_path, units, review: float, high: float,
                   ruleset: dict | None = None, model_lines: dict | None = None,
-                  batch_rows: int | None = None) -> int:
+                  batch_rows: int | None = None,
+                  high_by_track: dict | None = None) -> int:
     """Apply the buckets and the overlays again, in place, a batch at a time.
 
     This is what a threshold move costs, and what reverting a model costs. It
@@ -1728,7 +1757,8 @@ def rewrite_pairs(pairs_path, units, review: float, high: float,
             continue
         frame = finalise_pairs(
             apply_overlays(_strip_overlays(batch), units, review, high,
-                           model_lines=model_lines, ruleset=ruleset),
+                           model_lines=model_lines, ruleset=ruleset,
+                           high_by_track=high_by_track),
             units,
         )
         writer.write(frame)
@@ -2037,6 +2067,7 @@ def run_stage_3_score(
     render_diagnostics: bool = True,
     labels: pd.DataFrame | None = None,
     progress_callback=None,
+    threshold_high_by_track: dict | None = None,
 ) -> dict:
     """Score the units of ``<run_dir>`` and write the pairs, the report and the eval.
 
@@ -2049,6 +2080,11 @@ def run_stage_3_score(
         ``linkage_settings.json``.
     threshold_high, threshold_review : float, optional
         The run's own bucket lines. When omitted the settings' lines are used.
+    threshold_high_by_track : dict, optional
+        ``{track: accept line}`` for the tracks that set one of their own. When
+        omitted the settings' per-track lines are used, which is the normal
+        path: the run's config snapshot already carries what the user chose.
+        *threshold_high* stays the line every other track reads.
     render_diagnostics : bool
         Whether to write Splink's charts. Off makes a re-bucket cheap.
     labels : DataFrame, optional
@@ -2074,6 +2110,8 @@ def run_stage_3_score(
     candidate, settings_review, settings_high = linkage.thresholds(settings)
     review = float(threshold_review) if threshold_review is not None else settings_review
     high = float(threshold_high) if threshold_high is not None else settings_high
+    high_by_track = {str(t): float(v) for t, v in threshold_high_by_track.items()} \
+        if threshold_high_by_track is not None else linkage.high_by_track(settings)
 
     temp_dir = run_dir / "duckdb_tmp"
     units_path = run_dir / units_module.UNITS_FILENAME
@@ -2193,6 +2231,7 @@ def run_stage_3_score(
         n_written = overlay_predictions(
             predictions, overlay_units, review, high, pairs_path,
             ruleset=ruleset, progress_callback=progress_callback,
+            high_by_track=high_by_track,
         )
     _step(f"  {n_written:,} pairs written", progress_callback)
     for path in predictions.values():
@@ -2202,7 +2241,8 @@ def run_stage_3_score(
         with _phase("Rendering the score distributions", progress_callback):
             for track in predictions:
                 render_score_histogram(pairs_path, track, run_dir / "diagnostics",
-                                       review, high, temp_dir, progress_callback)
+                                       review, high_by_track.get(track, high),
+                                       temp_dir, progress_callback)
 
     groups = pd.read_parquet(run_dir / EXACT_GROUPS_FILENAME)
     outcome = label_outcomes_from_files(labels, members_path, groups)
@@ -2212,7 +2252,8 @@ def run_stage_3_score(
         # A human decided these; blocking or the candidate floor never offered
         # them. They join the file with no score rather than being lost.
         append_pairs(pairs_path, finalise_pairs(
-            apply_overlays(forced, overlay_units, review, high, ruleset=ruleset),
+            apply_overlays(forced, overlay_units, review, high, ruleset=ruleset,
+                           high_by_track=high_by_track),
             overlay_units))
         _step(f"  {len(forced):,} labelled pair(s) added that scoring never produced",
               progress_callback)
@@ -2222,6 +2263,7 @@ def run_stage_3_score(
         model_state = apply_active_models(
             run_dir, pairs_path, units_path, members_path, events_path, review, high,
             progress_callback, ruleset=ruleset, overlay_units=overlay_units,
+            high_by_track=high_by_track,
         )
 
     write_contradictions(run_dir, outcome["contradictions"])
@@ -2238,7 +2280,8 @@ def run_stage_3_score(
                                               "existing_entity_id")),
             pd.read_parquet(members_path),
             pairs_path,
-            thresholds={"candidate": candidate, "review": review, "high": high},
+            thresholds={"candidate": candidate, "review": review, "high": high,
+                        "high_by_track": high_by_track},
             applied=outcome["applied"],
             model_lines=stage_3b_model.deciding_lines(
                 stage_3b_model.models_from_state(run_dir)),
@@ -2316,6 +2359,7 @@ def rebucket(
     threshold_high: float,
     threshold_review: float,
     labels: pd.DataFrame | None = None,
+    threshold_high_by_track: dict | None = None,
 ) -> dict:
     """Re-bucket an already-scored run on new thresholds, without Splink.
 
@@ -2323,6 +2367,11 @@ def rebucket(
     back, applies the buckets and the overlays again, and rewrites the pairs and
     the evaluation. The vetoes are re-applied with them, from the run's own
     snapshotted ruleset.
+
+    *threshold_high_by_track* is ``{track: accept line}`` for the tracks that
+    set one of their own. Omitted, the run's own snapshotted settings are read,
+    so a re-bucket that moves only the review line leaves every track's accept
+    line exactly where the run put it.
     """
     run_dir = Path(run_dir)
     units_path = run_dir / units_module.UNITS_FILENAME
@@ -2333,20 +2382,23 @@ def rebucket(
     ruleset = run_ruleset(run_dir)
     overlay_units = read_unit_projection(units_path, overlay_columns(ruleset))
 
+    settings_path = run_dir / "config" / "linkage_settings.json"
+    candidate = linkage.DEFAULT_CANDIDATE
+    settings = {}
+    if settings_path.is_file():
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        candidate = linkage.thresholds(settings)[0]
+    high_by_track = {str(t): float(v) for t, v in threshold_high_by_track.items()} \
+        if threshold_high_by_track is not None else linkage.high_by_track(settings)
+
     # A threshold move must not un-apply the model: the lines being moved are
     # Splink's, and a graded model keeps deciding whichever tracks it decided.
     lines = stage_3b_model.deciding_lines(stage_3b_model.models_from_state(run_dir))
     rewrite_pairs(pairs_path, overlay_units, float(threshold_review),
-                  float(threshold_high), ruleset=ruleset, model_lines=lines)
+                  float(threshold_high), ruleset=ruleset, model_lines=lines,
+                  high_by_track=high_by_track)
     outcome = label_outcomes_from_files(labels, members_path, groups)
     write_contradictions(run_dir, outcome["contradictions"])
-
-    settings_path = run_dir / "config" / "linkage_settings.json"
-    candidate = linkage.DEFAULT_CANDIDATE
-    if settings_path.is_file():
-        candidate = linkage.thresholds(
-            json.loads(settings_path.read_text(encoding="utf-8"))
-        )[0]
 
     evaluation = score_eval.evaluate(
         read_projection(run_dir / RECORDS_FILENAME, score_eval.RECORD_COLUMNS),
@@ -2355,7 +2407,8 @@ def rebucket(
         pd.read_parquet(members_path),
         pairs_path,
         thresholds={"candidate": candidate, "review": float(threshold_review),
-                    "high": float(threshold_high)},
+                    "high": float(threshold_high),
+                    "high_by_track": high_by_track},
         applied=outcome["applied"], model_lines=lines,
     )
     _write_evaluation(run_dir, evaluation)
@@ -2381,10 +2434,11 @@ def refresh_after_labels(run_dir: str, labels: pd.DataFrame | None) -> dict:
 
     settings_path = run_dir / "config" / "linkage_settings.json"
     candidate, review, high = linkage.DEFAULT_CANDIDATE, None, None
+    high_by_track: dict = {}
     if settings_path.is_file():
-        candidate, review, high = linkage.thresholds(
-            json.loads(settings_path.read_text(encoding="utf-8"))
-        )
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        candidate, review, high = linkage.thresholds(settings)
+        high_by_track = linkage.high_by_track(settings)
 
     outcome = label_outcomes_from_files(labels, members_path, groups)
     write_contradictions(run_dir, outcome["contradictions"])
@@ -2394,7 +2448,8 @@ def refresh_after_labels(run_dir: str, labels: pd.DataFrame | None) -> dict:
         read_unit_projection(units_path, ("unit_id", "track", "existing_entity_id")),
         pd.read_parquet(members_path),
         pairs_path,
-        thresholds={"candidate": candidate, "review": review, "high": high},
+        thresholds={"candidate": candidate, "review": review, "high": high,
+                    "high_by_track": high_by_track},
         applied=outcome["applied"],
         model_lines=stage_3b_model.deciding_lines(
             stage_3b_model.models_from_state(run_dir)),

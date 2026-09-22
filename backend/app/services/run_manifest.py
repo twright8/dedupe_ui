@@ -264,6 +264,10 @@ def build(
         "config_version": config_version,
         "thresholds": {
             "accept_line": thresholds.get("accept_line"),
+            # The accept line of every track that set one of its own. The two
+            # tracks want different lines (docs/LINKAGE.md), so a run has to
+            # record what each one used, not just the line they started from.
+            "accept_line_by_track": dict(thresholds.get("accept_line_by_track") or {}),
             "review_line": thresholds.get("review_line"),
             "lowest_score_kept": thresholds.get("lowest_score_kept"),
         },

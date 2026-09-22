@@ -69,6 +69,7 @@ def append(
     accept_line: float | None = None,
     review_line: float | None = None,
     lowest_score_kept: float | None = None,
+    accept_line_by_track: dict | None = None,
     scorer: str | None = None,
     model_version=None,
     counts: dict | None = None,
@@ -77,14 +78,17 @@ def append(
 ) -> dict:
     """Record one change to the lines, and return the entry that was written.
 
-    *counts* is ``{bucket: n}`` after the change. A failure to write is logged
-    and never raises: losing a line of history must not fail a re-bucket.
+    *counts* is ``{bucket: n}`` after the change. *accept_line_by_track* is the
+    accept line of every track that set one of its own; *accept_line* is the
+    line every other track read. A failure to write is logged and never raises:
+    losing a line of history must not fail a re-bucket.
     """
     entry = {
         "at": _now(),
         "who": who or "",
         "action": action,
         "accept_line": accept_line,
+        "accept_line_by_track": dict(accept_line_by_track or {}),
         "review_line": review_line,
         "lowest_score_kept": lowest_score_kept,
         "scorer": scorer,

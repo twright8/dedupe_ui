@@ -316,8 +316,24 @@
       {
         "column": "dob_year_clean",
         "count": 2
+      },
+      {
+        "all": [
+          {
+            "column": "postcode_district",
+            "count": 5
+          },
+          {
+            "columns": [
+              "dob_year_clean",
+              "dob_month_clean"
+            ],
+            "count": 1
+          }
+        ]
       }
     ]
   },
+  "_postcode_district_conjunction_measured": "The fourth clause is a conjunction: it holds a cluster only when BOTH counts are over their limits. A limit on postcode districts alone is wrong, and measurably so. On the full run, of the twenty person entities with more than five districts, fourteen are one real person with several companies at several registered offices — Blažena Murgacova has 17 districts, one birth date and one name; Xuemei Gong has 10. A district-only gate at 5 would hold 14,221 entities and 183,033 records, about seven in ten of them right. Raised to 8 it holds 1,899 entities and catches none of the four genuinely wrong ones in the sample. The signal is the BIRTH DATE, not the address: 'more than one distinct birth date' flags exactly the four wrong entities and the two doubtful ones and none of the fourteen right ones, six for six and fourteen for fourteen. The two together hold 3,596 entities and 45,151 records, and they catch both known bad entities — PSCP-0001415599 (Mohammed/Muhammad Imran, 75 records, 36 districts, 9 birth dates) and PSCP-0001416257 (46 records, 22 districts, 5 birth dates). The birth date is counted as the year and the month TOGETHER, as one value, because PSC units carry dob_year_clean and dob_month_clean and no combined column, and the combining belongs to the gate rather than to a new cleaning step. Report: psc_person_evidence_2026-09-22.md, section 2.",
   "_max_distinct_values_measured": "The cluster gate had no equivalent of the match keys' max_distinct guard, and it showed: on the full run too_large fired on 17 person clusters and missed all twenty of the largest proposed person entities, one of which held 217 records under 165 distinct names. Counted over that run's own clusters, a person cluster of two units carries at most 2 distinct cleaned surnames and averages 1.11; one of 6 to 20 units averages 2.33; one of over 100 units averages 104. Sampled at 4 to 8 distinct surnames, every cluster was a mixture. Three is the most one person can honestly show: a birth name, a married name, and one inconsistently filed hyphenated variant. THE FORENAME IS HERE BECAUSE THE SURNAME WAS NOT ENOUGH: with the surname gated and the new veto rules in, the twelve largest remaining wrong person entities were all one surname and many forenames — 206 records under 55 names, every one of them Singh, and the same for Khan, Mia and Ali. A chain that cannot run away on the surname runs away on the forename instead. The organisation track names no column, so it is not gated this way, and neither is donations, where a trade union's branches legitimately carry many different names. THE BIRTH YEAR IS HERE FOR THE SAME REASON, ONE STEP ON: with the surname and the forename both gated, the largest wrong person entities left were 111 records under 57 names, every one of them 'Mohammed <something> Ali', spread over 29 different birth years. The chain runs away on the middle name and the year instead. A person has one birth year, and v1 leaves one year of slack for a filing slip, so a cluster can honestly show two adjacent years; three or more is a chain. Counted on the full run's own person clusters, 1,713,278 show one birth year and 36,156 show two, against 2,037 that show more than two — one tenth of one per cent, and a clean break in the data."
 }

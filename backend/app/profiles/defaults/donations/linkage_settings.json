@@ -160,6 +160,10 @@
   "deterministic_recall": 0.8,
   "match_probability_threshold_candidate": 0.05,
   "match_probability_threshold_high": 0.92,
+  "match_probability_threshold_high_by_track": {
+    "person": 0.96
+  },
   "match_probability_threshold_review": 0.5,
+  "_accept_line_measured": "The two tracks want different accept lines, so the person track sets its own and the organisation track reads the shared 0.92. Measured on the September 2026 sheet after the second EM training rule was tightened (donations_surname_em_2026-09-22.md, 'Accept line sweep'). Person: 0.96 is the lowest line that clears the precision the shipped configuration had. It reaches 0.98770 against 0.98720, and the recall it costs is 0.0009 — about a tenth of the 0.0184 the training fix gained. 0.95 reaches only 0.98619 and falls short. Organisation: the same move would cost 0.0054 of recall for a precision gain of 0.0047, roughly two correct merges lost for each wrong one prevented, and it would take organisation pairs in the review band from 176 to 362. So the organisation line stays at 0.92.",
   "_notes": "Pair counts are from the units of the September 2026 donations sheet (13,310 person units, 9,125 organisation). Each track's rules cost about 128,000 pairs (person) and 11,000 (organisation), so max_pairs of 5,000,000 leaves plenty of headroom while still stopping a rule that blocks on a near-constant column. probability_two_random_records_match is null, so Splink estimates it from that track's match keys at the recall in deterministic_recall."
 }

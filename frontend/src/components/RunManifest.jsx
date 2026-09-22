@@ -122,6 +122,10 @@ export function RunManifestCard({ manifest, tracks }) {
   const missing = references.filter((r) => !r.present);
   const commit = String(manifest.code_version || "unknown");
   const sha = String(input.sha256 || "");
+  // A run records the accept line of every track that set one of its own. One
+  // Fact per track when it did; the single line when it did not, which is
+  // every run made before the lines could differ.
+  const acceptLines = Object.entries(thresholds.accept_line_by_track || {});
 
   function trackLabel(key) {
     const found = (tracks || []).find((t) => t.key === key);
@@ -195,9 +199,21 @@ export function RunManifestCard({ manifest, tracks }) {
             {manifest.config_version == null ? "—" : `v${manifest.config_version}`}
           </Fact>
 
-          <Fact label="Accept line" hint={<TermHint name="acceptLine" />}>
-            <span className="mono">{line(thresholds.accept_line)}</span>
-          </Fact>
+          {acceptLines.length > 0 ? (
+            acceptLines.map(([track, value]) => (
+              <Fact
+                key={track}
+                label={`Accept line, ${trackLabel(track)}`}
+                hint={<TermHint name="acceptLine" />}
+              >
+                <span className="mono">{line(value)}</span>
+              </Fact>
+            ))
+          ) : (
+            <Fact label="Accept line" hint={<TermHint name="acceptLine" />}>
+              <span className="mono">{line(thresholds.accept_line)}</span>
+            </Fact>
+          )}
           <Fact label="Review line" hint={<TermHint name="reviewLine" />}>
             <span className="mono">{line(thresholds.review_line)}</span>
           </Fact>

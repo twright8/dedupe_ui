@@ -17,14 +17,17 @@ import { Term, TermHint } from "../../components/Term";
 import { fmtNumber } from "../../components/ProbBar";
 import LinkageTrack from "./LinkageTrack";
 import {
+  ACCEPT_LINE_PATH,
   DEFAULT_CLUSTER_FLOOR,
   DEFAULT_EM_ITERATIONS,
   DEFAULT_MAX_CLUSTER_UNITS,
   DEFAULT_MAX_EXISTING_IDS,
+  acceptLines,
   gateErrors,
   isGatePath,
   maxDistinctValues,
   orderedThresholds,
+  setAcceptLine,
   setMaxDistinctValues,
 } from "./linkage";
 import {
@@ -125,6 +128,111 @@ function GateNumber({ label, path, value, onChange, help, errors, warnings, ...i
   );
 }
 
+/* One column of one limit. A limit may count several columns as one value, so
+   the column picker is a row of them with the word "with" between. */
+function LimitColumn({ value, columnOptions, onChange, onRemove }) {
+  return (
+    <>
+      <select
+        className="select mono"
+        style={{ width: 220, fontSize: 12.5 }}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        <option value="">column...</option>
+        {columnOptions.map((col) => (
+          <option key={col} value={col}>
+            {col}
+          </option>
+        ))}
+        {value && !columnOptions.includes(value) && <option value={value}>{value}</option>}
+      </select>
+      {onRemove && (
+        <button
+          className="btn sm ghost"
+          style={{ padding: "0 4px" }}
+          title="Stop counting this column with the one before it"
+          onClick={onRemove}
+        >
+          <Icons.x size={12} />
+        </button>
+      )}
+    </>
+  );
+}
+
+/* One limit: the column or columns counted together, and the count they may
+   not pass. */
+function GateLimitRow({ limit, columnOptions, onChange, onRemove, removeTitle }) {
+  const columns = limit.columns || [];
+  const several = columns.length > 1;
+
+  function setColumn(index, value) {
+    onChange({ ...limit, columns: columns.map((c, i) => (i === index ? value : c)) });
+  }
+
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+      {columns.map((column, index) => (
+        <span key={index} style={{ display: "contents" }}>
+          {index > 0 && (
+            <span className="muted" style={{ fontSize: 12 }}>
+              with
+            </span>
+          )}
+          <LimitColumn
+            value={column}
+            columnOptions={columnOptions}
+            onChange={(value) => setColumn(index, value)}
+            onRemove={
+              index > 0
+                ? () =>
+                    onChange({
+                      ...limit,
+                      columns: columns.filter((_, i) => i !== index),
+                    })
+                : null
+            }
+          />
+        </span>
+      ))}
+      <button
+        className="btn sm ghost"
+        style={{ padding: "0 4px" }}
+        title="Count another column with this one, as a single value"
+        onClick={() => onChange({ ...limit, columns: [...columns, ""] })}
+      >
+        <Icons.plus size={12} />
+      </button>
+      <span className="muted" style={{ fontSize: 12 }}>
+        at most
+      </span>
+      <input
+        className="input mono"
+        type="number"
+        min="1"
+        step="1"
+        style={{ width: 90, fontSize: 12.5 }}
+        value={Number.isFinite(limit.count) ? limit.count : ""}
+        onChange={(e) =>
+          onChange({ ...limit, count: e.target.value === "" ? "" : +e.target.value })
+        }
+      />
+      <span className="muted" style={{ fontSize: 12 }}>
+        {several ? "different pairs of values" : "different values"}
+      </span>
+      <button
+        className="btn sm ghost"
+        style={{ padding: "0 4px" }}
+        title={removeTitle}
+        onClick={onRemove}
+      >
+        <Icons.x size={12} />
+      </button>
+    </div>
+  );
+}
+
 function GateLimits({
   settings,
   setSettings,
@@ -134,12 +242,16 @@ function GateLimits({
   errors,
   warnings,
 }) {
-  const limits = maxDistinctValues(settings, track);
+  const clauses = maxDistinctValues(settings, track);
   const base = "linkage_settings.max_distinct_values";
   const trackPath = `${base}.${track}`;
 
-  function editLimits(fn) {
+  function editClauses(fn) {
     setSettings((s) => setMaxDistinctValues(s, track, fn(maxDistinctValues(s, track))));
+  }
+
+  function editClause(index, fn) {
+    editClauses((list) => list.map((c, i) => (i === index ? fn(c) : c)));
   }
 
   function setNumber(key, raw, fallback) {
@@ -147,7 +259,8 @@ function GateLimits({
     setSettings((s) => ({ ...s, [key]: n }));
   }
 
-  const unused = columnOptions.filter((c) => !limits.some((l) => l.column === c));
+  const used = clauses.flat().flatMap((l) => l.columns || []);
+  const unused = columnOptions.filter((c) => !used.includes(c));
 
   return (
     <div className="card">
@@ -219,70 +332,75 @@ function GateLimits({
             so a cluster with more is really several people. Each track has its own list, and a
             track with an empty list is never held back for this reason.
           </p>
+          <p className="muted" style={{ fontSize: 12, margin: "0 0 8px", lineHeight: 1.6, maxWidth: "80ch" }}>
+            Each rule below holds a cluster on its own. A rule may ask two questions at once, and
+            then it holds a cluster only when both counts are over their limits &mdash; which is how
+            you check something that means nothing by itself. Many registered addresses is not a
+            second person; many addresses and more than one birth date is. A rule may also count two
+            columns together as one value, so a birth year and a birth month make one birth date
+            rather than two separate counts.
+          </p>
           <GateErrors errors={gateErrors(errors, base).filter((e) => e.path === base)} />
           <GateErrors
             errors={gateErrors(errors, trackPath).filter((e) => e.path === trackPath)}
           />
 
-          {limits.length === 0 ? (
+          {clauses.length === 0 ? (
             <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
               No column is checked this way for this track.
             </p>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {limits.map((limit, index) => (
-                <div key={index}>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                    <select
-                      className="select mono"
-                      style={{ width: 240, fontSize: 12.5 }}
-                      value={limit.column}
-                      onChange={(e) =>
-                        editLimits((list) =>
-                          list.map((l, i) => (i === index ? { ...l, column: e.target.value } : l))
-                        )
-                      }
-                    >
-                      <option value="">column...</option>
-                      {columnOptions.map((col) => (
-                        <option key={col} value={col}>
-                          {col}
-                        </option>
-                      ))}
-                      {limit.column && !columnOptions.includes(limit.column) && (
-                        <option value={limit.column}>{limit.column}</option>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {clauses.map((clause, index) => (
+                <div
+                  key={index}
+                  style={{
+                    border: "1px solid var(--line)",
+                    borderRadius: 5,
+                    padding: "8px 10px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                  }}
+                >
+                  {clause.map((limit, at) => (
+                    <div key={at}>
+                      {at > 0 && (
+                        <div className="eyebrow" style={{ marginBottom: 4 }}>
+                          and
+                        </div>
                       )}
-                    </select>
-                    <span className="muted" style={{ fontSize: 12 }}>
-                      at most
-                    </span>
-                    <input
-                      className="input mono"
-                      type="number"
-                      min="1"
-                      step="1"
-                      style={{ width: 90, fontSize: 12.5 }}
-                      value={Number.isFinite(limit.count) ? limit.count : ""}
-                      onChange={(e) =>
-                        editLimits((list) =>
-                          list.map((l, i) =>
-                            i === index
-                              ? { ...l, count: e.target.value === "" ? "" : +e.target.value }
-                              : l
-                          )
-                        )
-                      }
-                    />
-                    <span className="muted" style={{ fontSize: 12 }}>
-                      different values
-                    </span>
+                      <GateLimitRow
+                        limit={limit}
+                        columnOptions={columnOptions}
+                        onChange={(next) =>
+                          editClause(index, (c) => c.map((l, i) => (i === at ? next : l)))
+                        }
+                        removeTitle={
+                          clause.length > 1
+                            ? "Stop asking this part of the rule"
+                            : "Stop checking this column"
+                        }
+                        onRemove={() =>
+                          clause.length > 1
+                            ? editClause(index, (c) => c.filter((_, i) => i !== at))
+                            : editClauses((list) => list.filter((_, i) => i !== index))
+                        }
+                      />
+                    </div>
+                  ))}
+                  <div>
                     <button
                       className="btn sm ghost"
-                      style={{ padding: "0 4px" }}
-                      title="Stop checking this column"
-                      onClick={() => editLimits((list) => list.filter((_, i) => i !== index))}
+                      onClick={() =>
+                        editClause(index, (c) => [
+                          ...c,
+                          { columns: [unused[0] || columnOptions[0] || ""], count: 1 },
+                        ])
+                      }
                     >
-                      <Icons.x size={12} />
+                      <Icons.plus size={12} />
+                      Add a second count this rule also needs
                     </button>
                   </div>
                   <GateErrors errors={gateErrors(errors, `${trackPath}[${index}]`)} />
@@ -295,7 +413,10 @@ function GateLimits({
             className="btn sm ghost"
             style={{ marginTop: 8 }}
             onClick={() =>
-              editLimits((list) => [...list, { column: unused[0] || columnOptions[0] || "", count: 3 }])
+              editClauses((list) => [
+                ...list,
+                [{ columns: [unused[0] || columnOptions[0] || ""], count: 3 }],
+              ])
             }
           >
             <Icons.plus size={12} />
@@ -324,6 +445,10 @@ export default function ThresholdsTab({
   const high = settings.match_probability_threshold_high;
   const review = settings.match_probability_threshold_review;
   const candidate = settings.match_probability_threshold_candidate;
+  // One accept line per track. A track that sets none reads the shared line,
+  // so a profile whose tracks agree still looks like one number moved twice.
+  const trackKeys = tracks.map((t) => t.key);
+  const lines = acceptLines(settings, trackKeys);
 
   function setThreshold(which, value) {
     setSettings((s) => ({ ...s, ...orderedThresholds(s, which, value) }));
@@ -382,23 +507,30 @@ export default function ThresholdsTab({
           <div className="card-h">
             <h3>Decision lines</h3>
             <span className="muted" style={{ fontSize: 12 }}>
-              the same three lines for every track &middot; each one is a score from 0 to 1
+              one accept line per track, one review line for all of them &middot; each one is a
+              score from 0 to 1
             </span>
           </div>
           <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-            <ThresholdSlider
-              label={
-                <>
-                  Accept line <TermHint name="acceptLine" />
-                </>
-              }
-              value={high}
-              min="0.5"
-              max="0.99"
-              onChange={(v) => setThreshold("high", v)}
-              colour="var(--green)"
-              help="The score at or above which a pair is accepted without review."
-            />
+            {tracks.map((t) => (
+              <ThresholdSlider
+                key={t.key}
+                label={
+                  <>
+                    Accept line, {t.label} <TermHint name="acceptLine" />
+                  </>
+                }
+                value={lines[t.key]}
+                min="0.5"
+                max="0.99"
+                onChange={(v) =>
+                  setSettings((s) => setAcceptLine(s, t.key, v, trackKeys))
+                }
+                colour="var(--green)"
+                help="The score at or above which a pair on this track is accepted without review."
+              />
+            ))}
+            <GateErrors errors={gateErrors(errors, ACCEPT_LINE_PATH)} />
             <ThresholdSlider
               label={
                 <>
@@ -425,8 +557,9 @@ export default function ThresholdsTab({
               help="The lowest score kept in the run's files. Anything weaker is thrown away."
             />
             <div className="muted" style={{ fontSize: 11.5 }}>
-              The three stay in order: lowest score kept, then review line, then accept line. Moving
-              one pushes the others.
+              They stay in order: lowest score kept, then review line, then every accept line.
+              Moving one pushes the others. The two tracks rarely want the same accept line, which
+              is why each one has its own.
             </div>
 
             <hr className="rule" style={{ margin: 0 }} />
@@ -661,7 +794,8 @@ function ThresholdEffect({ high, review }) {
         <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>
           These counts come from the pairs the latest completed run already scored. Lowering the
           lowest score kept only changes what a future run keeps, so pairs that were never scored
-          are not counted here.
+          are not counted here. Every track is counted at the highest accept line set above,
+          because the run's scores are kept as one distribution and not one per track.
         </div>
         <button className="btn primary">
           <Icons.play size={14} stroke="#fff" />

@@ -1592,3 +1592,89 @@ def test_a_saved_model_is_only_reused_when_everything_matches(tmp_path,
     trained.write_text(json.dumps({"fingerprint": "abc"}), encoding="utf-8")
     monkeypatch.setenv("REUSE_TRAINED_MODEL", "0")
     assert stage_3.saved_training_matches(trained, model, "abc") is False
+
+
+# ---------------------------------------------------------------------------
+# One accept line per track
+# ---------------------------------------------------------------------------
+
+
+def _two_track_pairs():
+    """Four pairs, two per track, scoring either side of 0.96."""
+    return pd.DataFrame([
+        {"unit_id_l": "a", "unit_id_r": "b", "track": "person",
+         "match_probability": 0.97},
+        {"unit_id_l": "c", "unit_id_r": "d", "track": "person",
+         "match_probability": 0.94},
+        {"unit_id_l": "e", "unit_id_r": "f", "track": "organisation",
+         "match_probability": 0.97},
+        {"unit_id_l": "g", "unit_id_r": "h", "track": "organisation",
+         "match_probability": 0.94},
+    ])
+
+
+def _two_track_units():
+    return pd.DataFrame([
+        {"unit_id": u, "existing_entity_id": None, "held_group_id": None}
+        for u in "abcdefgh"
+    ])
+
+
+def test_each_track_is_bucketed_at_its_own_accept_line():
+    """Person 0.96, organisation 0.92. The pair at 0.94 is accepted on one
+    track and sent to review on the other, which is the whole point."""
+    buckets = stage_3.splink_buckets(_two_track_pairs(), 0.50, 0.92,
+                                     {"person": 0.96})
+    assert list(buckets) == ["accept", "review", "accept", "accept"]
+
+
+def test_no_per_track_line_leaves_every_track_on_the_shared_one():
+    buckets = stage_3.splink_buckets(_two_track_pairs(), 0.50, 0.92, {})
+    assert list(buckets) == ["accept", "accept", "accept", "accept"]
+    assert list(buckets) == list(
+        bucket_of(_two_track_pairs()["match_probability"], 0.50, 0.92))
+
+
+def test_the_overlays_carry_the_per_track_accept_line_through():
+    pairs = apply_overlays(_two_track_pairs(), _two_track_units(), 0.50, 0.92,
+                           high_by_track={"person": 0.96})
+    by_pair = dict(zip(pairs["unit_id_l"], pairs["score_bucket"]))
+    assert by_pair == {"a": "accept", "c": "review",
+                       "e": "accept", "g": "accept"}
+    # `bucket` follows `score_bucket` when no overlay has anything to say.
+    assert dict(zip(pairs["unit_id_l"], pairs["bucket"])) == by_pair
+
+
+def test_a_track_with_no_pairs_costs_nothing_and_changes_nothing():
+    pairs = _two_track_pairs()
+    pairs = pairs[pairs["track"] == "organisation"].reset_index(drop=True)
+    buckets = stage_3.splink_buckets(pairs, 0.50, 0.92, {"person": 0.96})
+    assert list(buckets) == ["accept", "accept"]
+
+
+def test_pairs_with_no_track_column_read_the_shared_line():
+    pairs = _two_track_pairs().drop(columns=["track"])
+    buckets = stage_3.splink_buckets(pairs, 0.50, 0.92, {"person": 0.96})
+    assert list(buckets) == ["accept", "accept", "accept", "accept"]
+
+
+def test_the_shipped_donations_settings_give_the_person_track_its_own_line():
+    """Measured on the September 2026 sheet: 0.96 is the lowest person line
+    that clears the precision the shipped configuration had, and the
+    organisation track stays at 0.92 because it pays recall for nothing."""
+    settings = default_linkage_settings()
+    assert linkage.high_by_track(settings) == {"person": 0.96}
+    assert linkage.accept_lines(settings) == {"person": 0.96,
+                                              "organisation": 0.92}
+    assert linkage.thresholds(settings)[2] == 0.92
+
+
+def test_the_evaluation_measures_each_track_at_its_own_line():
+    """`splink_only` is the figure set read straight off the score, so it has
+    to use the line the track really used or it measures a run nobody ran."""
+    batch = _two_track_pairs()
+    edges = score_eval._Edges(pd.Series([0, 1, 2, 3, 4, 5, 6, 7],
+                                        index=list("abcdefgh")))
+    score_eval._add_at(edges, batch, "match_probability", 0.92,
+                       track_high={"person": 0.96})
+    assert edges.rows == 3

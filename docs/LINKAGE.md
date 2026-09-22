@@ -38,6 +38,7 @@ Stored beside the ruleset in each config version. Users edit it on the "Threshol
   "probability_two_random_records_match": null,
   "match_probability_threshold_candidate": 0.05,
   "match_probability_threshold_high": 0.92,
+  "match_probability_threshold_high_by_track": { "person": 0.96 },
   "match_probability_threshold_review": 0.50
 }
 ```
@@ -49,7 +50,11 @@ Stored beside the ruleset in each config version. Users edit it on the "Threshol
 
   **The column must be a number, and cleaning writes text.** `dob_year_clean` leaves `nullify_outside_range` as a string of digits. Stage 3 therefore casts every column a numeric-difference comparison names — and only those — with `pd.to_numeric(..., errors="coerce")` as it builds the frame it hands Splink (`_splink_frame`). `units.parquet` keeps the text, so the review screen, the exports and the vetoes still see what was filed. A value that is not a number becomes null and lands on the null level.
 - `term_frequency: true` turns on Splink's term-frequency adjustment for that column. **Splink attaches it only to an exact-match level.** `cl.PostcodeComparison` builds its sector, district and area levels by regular expression over the postcode column, so those three stay flat however common the value is: turning the flag on for `postcode_clean` individualises the full postcode and nothing below it. That asymmetry is what made a shared postcode district worth as much as a shared surname on the full PSC run — agreeing on SMITH is worth 5.53 bits after the adjustment, agreeing on E14, which is as common as JONES, a flat 9.26 (`docs/PSC_HANDOVER.md` section 108).
-- `max_distinct_values` is the stage 4 name gate, `{track: {"column": ..., "count": ...}}` at the top level of the document beside `cluster_floor`, `max_cluster_units` and `max_existing_ids`. See `docs/ENTITIES.md`.
+- `match_probability_threshold_high` is the accept line every track starts from. `match_probability_threshold_high_by_track` gives one track a line of its own: `{"person": 0.96}` means person pairs are accepted at 0.96 and every other track still reads 0.92. Each override must be a number between 0 and 1 and at or above the review line, which stays one line for every track. A track with no override behaves exactly as it did before this setting existed.
+
+  **Why the tracks differ.** Measured on the September 2026 donations sheet after the person track's second EM training rule was tightened (`donations_surname_em_2026-09-22.md`, "Accept line sweep"), 0.96 is the lowest line at which the person track clears the precision the shipped configuration had: 0.98770 against 0.98720, for 0.0009 of recall. The organisation track pays 0.0054 of recall at the same line for a precision gain nobody asked for, and its pairs in the review band go from 176 to 362. One number cannot serve both. With person at 0.96 and organisation at 0.92 the run's review pairs are 907, against 1,235 for the shipped single line at 0.92 and 1,093 for a single line at 0.96.
+
+- `max_distinct_values` is the stage 4 gate, `{track: [clause, ...]}` at the top level of the document beside `cluster_floor`, `max_cluster_units` and `max_existing_ids`. A cluster is held when ANY clause holds. A clause is either one limit, `{"column": "surname_clean", "count": 3}`, or a conjunction, `{"all": [ ... ]}`, which holds only when EVERY limit in it is over its count. A limit may name `columns` instead of `column` and count them together as one value: `{"columns": ["dob_year_clean", "dob_month_clean"], "count": 1}` is one full birth date, so 1985-03 and 1985-07 are two values and not one. Its count comes back on the cluster as `n_distinct_dob_year_clean+dob_month_clean`. See `docs/ENTITIES.md`.
 - `probability_two_random_records_match: null` means "estimate it from the deterministic rules". The deterministic rules are that track's match keys, read out of the ruleset, and `deterministic_recall` (default 0.8) is how much of the truth they are assumed to find. An estimate that fails is logged and Splink's own default stands, because a prior is not worth losing a run over.
 - `max_pairs` is the blocking budget. Before Splink predicts, the stage counts the pairs each blocking rule would create. If the total is over budget, the run fails with a structured error that names each rule and its count. Nothing is scored.
 - Labels never train Splink. u comes from random sampling and m from EM.
@@ -60,9 +65,11 @@ Every scored pair lands in one bucket:
 
 | bucket | rule |
 |---|---|
-| `accept` | score at or above `threshold_high` |
-| `review` | score between `threshold_review` and `threshold_high` |
+| `accept` | score at or above `threshold_high` **for that pair's track** |
+| `review` | score between `threshold_review` and that track's `threshold_high` |
 | `reject` | score below `threshold_review` (kept in the file down to `threshold_candidate`) |
+
+A track named in `match_probability_threshold_high_by_track` is bucketed at its own line; every other track reads `match_probability_threshold_high`. The review line and the candidate floor are one line each for the whole run. A run records the line each track used, in its own `config/linkage_settings.json`, in `run_manifest.json` under `thresholds.accept_line_by_track`, and in every `bucketing_history.json` entry — so "which line put this pair here" is answerable per track and not just per run.
 
 The bucket the score alone gives is kept as `score_bucket`, beside the `bucket` the overlays below leave behind. Without it, "how many review pairs do the imported labels agree with" is zero by construction — the first overlay has already moved every agreeing pair to `accept` — and the owner cannot see what the score is doing on its own. Vetoes never touch `score_bucket` either, so what the score made of a pair on its own is always readable.
 

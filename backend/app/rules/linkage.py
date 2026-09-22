@@ -45,6 +45,9 @@ COMPARISON_FUNCTIONS = SPLINK_FUNCTIONS + CUSTOM_FUNCTIONS
 DEFAULT_CANDIDATE = 0.05
 DEFAULT_REVIEW = 0.50
 DEFAULT_HIGH = 0.92
+# The accept line a track sets for itself, over the one line every track
+# starts from. `{"person": 0.96}` (docs/LINKAGE.md).
+HIGH_BY_TRACK_KEY = "match_probability_threshold_high_by_track"
 DEFAULT_EM_ITERATIONS = 20
 DEFAULT_MAX_PAIRS = 20_000_000
 # Assumed recall of the deterministic rules, used only when
@@ -171,13 +174,72 @@ def max_pairs(track_config: dict) -> int:
 
 
 def thresholds(settings: dict) -> tuple[float, float, float]:
-    """``(candidate, review, high)`` — the three lines, in order."""
+    """``(candidate, review, high)`` — the three lines, in order.
+
+    The third is the accept line every track starts from. A track that names
+    its own line in ``match_probability_threshold_high_by_track`` overrides it;
+    ``high_by_track`` and ``accept_line`` are what read that, and this function
+    is unchanged so that a caller with no pair in front of it — the budget
+    check, the candidate floor — still gets one number.
+    """
     settings = settings or {}
     return (
         float(settings.get("match_probability_threshold_candidate", DEFAULT_CANDIDATE)),
         float(settings.get("match_probability_threshold_review", DEFAULT_REVIEW)),
         float(settings.get("match_probability_threshold_high", DEFAULT_HIGH)),
     )
+
+
+def high_by_track(settings: dict) -> dict[str, float]:
+    """``{track: accept line}`` — only the tracks that set one of their own.
+
+    The two tracks want different lines. Measured on the donations sheet, the
+    person track needs 0.96 to buy back the precision the surname fix cost and
+    pays 0.0009 of recall for it, while the organisation track pays 0.0054 of
+    recall at the same line for a precision gain nobody asked for
+    (``donations_surname_em_2026-09-22.md``). One number cannot serve both.
+
+    A track missing from here uses ``match_probability_threshold_high``, so an
+    empty result means the tool behaves exactly as it did before this existed.
+    A malformed entry is dropped rather than guessed at;
+    ``validate_linkage_settings`` is what tells the user about it.
+    """
+    raw = (settings or {}).get(HIGH_BY_TRACK_KEY)
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for track, value in raw.items():
+        if track not in TRACK_KEYS:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if not 0 <= float(value) <= 1:
+            continue
+        out[str(track)] = float(value)
+    return out
+
+
+def accept_line(settings: dict, track: str | None = None) -> float:
+    """One track's accept line: its own, or the line every track starts from."""
+    lines = high_by_track(settings)
+    if track is not None and track in lines:
+        return lines[track]
+    return thresholds(settings)[2]
+
+
+def accept_lines(settings: dict, track_keys=None) -> dict[str, float]:
+    """The accept line of every track named, the default filled in.
+
+    This is what the New run form shows one slider per, and what a run records
+    as the lines it used. *track_keys* defaults to the tracks the settings
+    document actually describes, so a profile with one track gets one line.
+    """
+    if track_keys is None:
+        named = [t for t in TRACK_KEYS if t in tracks(settings)]
+        track_keys = named or list(TRACK_KEYS)
+    default = thresholds(settings)[2]
+    lines = high_by_track(settings)
+    return {track: lines.get(track, default) for track in track_keys}
 
 
 def sql_columns(sql: str) -> set[str]:
@@ -886,6 +948,38 @@ def _check_thresholds(settings: dict, errors: list[dict]) -> None:
     if review is not None and high is not None and review > high:
         _error(errors, "linkage_settings.match_probability_threshold_high",
                "The high threshold must be at or above the review threshold")
+    _check_high_by_track(settings, review, errors)
+
+
+def _check_high_by_track(settings: dict, review: float | None,
+                         errors: list[dict]) -> None:
+    """The per-track accept lines: a known track, a score, above the review line.
+
+    The review line is one line for every track, so a track's own accept line
+    has to clear it just as the shared accept line does.
+    """
+    raw = settings.get(HIGH_BY_TRACK_KEY)
+    if raw is None:
+        return
+    path = f"linkage_settings.{HIGH_BY_TRACK_KEY}"
+    if not isinstance(raw, dict):
+        _error(errors, path,
+               f"{HIGH_BY_TRACK_KEY} must be an object keyed by track")
+        return
+    for track, value in raw.items():
+        at = f"{path}.{track}"
+        if track not in TRACK_KEYS:
+            _error(errors, at, vocabulary.choice_error("track", track, TRACK_KEYS))
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            _error(errors, at, "A track's accept line must be a number between 0 and 1")
+            continue
+        if not 0 <= float(value) <= 1:
+            _error(errors, at, "A track's accept line must be between 0 and 1")
+            continue
+        if review is not None and float(value) < review:
+            _error(errors, at,
+                   "A track's accept line must be at or above the review threshold")
 
 
 def _check_numeric_difference(spec: dict, path: str, errors: list[dict]) -> None:
@@ -994,14 +1088,80 @@ def _check_block_control(rule: dict, sql: str, path: str, track: str,
                "it cannot take a hot-key control")
 
 
-def max_distinct_values(settings: dict) -> dict:
-    """``{track: [{"column": str, "count": int}, ...]}`` — the stage 4 name gate.
+def gate_key(columns) -> str:
+    """The name one limit's count comes back under, as ``n_distinct_<key>``.
 
-    A track may name more than one column, because a runaway cluster does not
-    always run away on the same one: the PSC person track needs both the
-    surname and the forename, and gating only the surname leaves every
-    "<different forename> Singh" cluster standing. One column may still be
-    written as a bare object rather than a list of one.
+    A limit on one column keeps that column's own name, which is what the
+    cluster screen and ``docs/ENTITIES.md`` have always read. A limit that
+    counts several columns as one value joins them with ``+``, so
+    ``dob_year_clean+dob_month_clean`` is one full birth date.
+    """
+    return "+".join(columns)
+
+
+def gate_limit(entry) -> dict | None:
+    """One limit, normalised to ``{"columns": [...], "count": int, "key": str}``.
+
+    ``{"column": "surname_clean", "count": 3}`` is one column. ``{"columns":
+    ["dob_year_clean", "dob_month_clean"], "count": 1}`` counts the two
+    together, so a cluster showing 1985-03 and 1985-07 shows two values and not
+    one. A malformed entry is dropped rather than guessed at.
+    """
+    if not isinstance(entry, dict):
+        return None
+    raw = entry.get("columns")
+    if isinstance(raw, str):
+        raw = [raw]
+    if raw is None:
+        column = entry.get("column")
+        raw = [column] if isinstance(column, str) and column else None
+    if not isinstance(raw, list) or not raw:
+        return None
+    columns = [c for c in raw if isinstance(c, str) and c]
+    if len(columns) != len(raw):
+        return None
+    count = entry.get("count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        return None
+    return {"columns": columns, "count": count, "key": gate_key(columns)}
+
+
+def _gate_group(entry) -> list[dict] | None:
+    """One clause of a track's gate: a single limit, or an ``all`` of them.
+
+    A group holds the cluster only when EVERY limit in it is over its count. A
+    half-understood conjunction would hold more clusters than its author meant,
+    which is the dangerous direction, so a group with one bad member is dropped
+    whole.
+    """
+    if isinstance(entry, dict) and "all" in entry:
+        raw = entry.get("all")
+        if not isinstance(raw, list) or not raw:
+            return None
+        group = [gate_limit(member) for member in raw]
+        return group if all(group) else None
+    limit = gate_limit(entry)
+    return [limit] if limit else None
+
+
+def max_distinct_values(settings: dict) -> dict:
+    """``{track: [group, ...]}`` — the stage 4 gate, as groups of limits.
+
+    A cluster is held when ANY group holds, and a group holds when EVERY limit
+    in it is over its count. A plain entry becomes a group of one, so the
+    any-of behaviour this setting has always had is unchanged.
+
+    A track names more than one clause because a runaway cluster does not always
+    run away on the same column: the PSC person track needs the surname AND the
+    forename, and gating only the surname leaves every "<different forename>
+    Singh" cluster standing.
+
+    The conjunction is for the opposite problem — a column that is wrong on its
+    own. On the full PSC run a limit on postcode districts alone is wrong 14
+    times in 20, because one person's companies have many registered offices
+    (``psc_person_evidence_2026-09-22.md``, section 2). Paired with "more than
+    one full birth date" it stops being a guess: 3,596 entities and 45,151
+    records, and it catches the two known bad "Mohammed Imran" entities.
 
     A malformed entry is dropped rather than guessed at; `validate_linkage_settings`
     is what tells the user about it.
@@ -1009,23 +1169,17 @@ def max_distinct_values(settings: dict) -> dict:
     raw = (settings or {}).get("max_distinct_values")
     if not isinstance(raw, dict):
         return {}
-    out: dict[str, list[dict]] = {}
+    out: dict[str, list[list[dict]]] = {}
     for track, spec in raw.items():
         if track not in TRACK_KEYS:
             continue
-        limits = []
+        groups = []
         for entry in (spec if isinstance(spec, list) else [spec]):
-            if not isinstance(entry, dict):
-                continue
-            column = entry.get("column")
-            count = entry.get("count")
-            if not isinstance(column, str) or not column:
-                continue
-            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-                continue
-            limits.append({"column": column, "count": count})
-        if limits:
-            out[track] = limits
+            group = _gate_group(entry)
+            if group:
+                groups.append(group)
+        if groups:
+            out[track] = groups
     return out
 
 
@@ -1049,14 +1203,53 @@ def _check_max_distinct_values(settings: dict, errors: list[dict]) -> None:
             continue
         for index, entry in enumerate(entries):
             at = f"{path}.{track}" + (f"[{index}]" if isinstance(spec, list) else "")
-            column = entry.get("column")
-            if not isinstance(column, str) or not column:
-                _error(errors, f"{at}.column",
-                       "max_distinct_values needs a column to count the values of")
-            count = entry.get("count")
-            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-                _error(errors, f"{at}.count",
-                       "count must be a whole number of 1 or more")
+            if "all" in entry:
+                _check_gate_conjunction(entry, at, errors)
+                continue
+            _check_gate_limit(entry, at, errors)
+
+
+def _check_gate_limit(entry: dict, at: str, errors: list[dict]) -> None:
+    """One limit: the column or columns it counts, and the count itself."""
+    raw = entry.get("columns")
+    if raw is None:
+        column = entry.get("column")
+        if not isinstance(column, str) or not column:
+            _error(errors, f"{at}.column",
+                   "max_distinct_values needs a column to count the values of")
+    elif isinstance(raw, str):
+        if not raw:
+            _error(errors, f"{at}.columns",
+                   "max_distinct_values needs a column to count the values of")
+    elif not isinstance(raw, list) or not raw \
+            or not all(isinstance(c, str) and c for c in raw):
+        _error(errors, f"{at}.columns",
+               "columns must be a list of one or more column names, counted "
+               "together as one value")
+    count = entry.get("count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        _error(errors, f"{at}.count",
+               "count must be a whole number of 1 or more")
+
+
+def _check_gate_conjunction(entry: dict, at: str, errors: list[dict]) -> None:
+    """An ``all`` clause: a list of limits, every one of which must be over."""
+    raw = entry.get("all")
+    if not isinstance(raw, list) or not raw:
+        _error(errors, f"{at}.all",
+               "'all' must be a list of limits, and the cluster is held only "
+               "when every one of them is over its count")
+        return
+    for index, member in enumerate(raw):
+        if not isinstance(member, dict):
+            _error(errors, f"{at}.all[{index}]",
+                   "Each limit under 'all' needs a column and a count")
+            continue
+        if "all" in member:
+            _error(errors, f"{at}.all[{index}]",
+                   "'all' cannot hold another 'all'")
+            continue
+        _check_gate_limit(member, f"{at}.all[{index}]", errors)
 
 
 def _check_track(track: str, config: dict, known: set[str], errors: list[dict]) -> None:
@@ -1237,6 +1430,7 @@ def validate_linkage_settings(settings, ruleset: dict, raw_columns) -> list[dict
         return [{"path": "linkage_settings", "message": "linkage_settings must be an object"}]
 
     _check_thresholds(settings, errors)
+    _check_max_distinct_values(settings, errors)
 
     raw = list(raw_columns)
     by_track = tracks(settings)

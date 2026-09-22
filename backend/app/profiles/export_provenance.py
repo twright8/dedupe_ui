@@ -230,6 +230,12 @@ def run_rows(context: dict, run_dir=None) -> list[list]:
         ["The lines in force", ""],
         ["Accept line", thresholds.get("accept_line")
          if thresholds else (bucketing or {}).get("accept_line")],
+        # A track may read a line of its own, so one number is no longer the
+        # whole answer (docs/LINKAGE.md). One row per track that set one.
+        *[[f"Accept line, {track}", line] for track, line in sorted(
+            ((thresholds.get("accept_line_by_track")
+              if thresholds else (bucketing or {}).get("accept_line_by_track"))
+             or {}).items())],
         ["Review line", thresholds.get("review_line")
          if thresholds else (bucketing or {}).get("review_line")],
         ["Lowest score kept", thresholds.get("lowest_score_kept")

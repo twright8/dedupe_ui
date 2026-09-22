@@ -170,13 +170,15 @@ Known follow-ups: donations person scores pile up at 0.70 to 0.80 because Splink
 
 ## Open items
 
-- **Donations person accept line.** On 2026-09-22 the second EM training rule for the person track was tightened (recipient party, accounting unit and title added), because blocking on the forename alone taught Splink that half of all true matches have a different surname. The surname now counts properly and the review queue on the September sheet falls from 1,235 to 713 pairs. Pair precision falls 98.7% to 98.3% because an exact surname match is now worth more too. The accept line was tuned against the old model and should be re-set on its own. Report: `psc_scratch/agent_reports/donations_surname_em_2026-09-22.md` on the laptop.
 - **An EM training rule that makes zero pairs is a silent failure.** The person track has no postcode, so a training rule on the postcode district blocks nothing, EM fails, and the comparisons that rule was meant to train stay untrained. The save-time check only compares column names. It should also refuse a priced rule that makes zero pairs.
 - **Organisation track, same check.** Its first training rule blocks on the first name token. Nobody has measured whether that block is loose enough to do to `name_core` what the forename block did to the surname.
 - D17's hard memory cap and low CPU priority are still not built. The run lock is.
 - PSC at full scale: see the progress table, slice 8, and `PSC_HANDOVER.md` section 108.
 
 Resolved or set aside:
+
+- **Donations person accept line — resolved 2026-09-22.** The second EM training rule for the person track was tightened on 2026-09-22 (recipient party, accounting unit and title added), which made the surname count properly and left the accept line tuned against a model that no longer existed. The accept line is now set per track, and the donations person line is 0.96 while the organisation line stays at 0.92. Measured on the September sheet: person pair precision 0.98770 against the 0.98720 the shipped configuration had, for 0.0009 of recall; organisation numbers unchanged. The run's review pairs are 907, against 1,235 before. Moving one line for both tracks was the thing that could not be done: the organisation track pays 0.0054 of recall at 0.96 for a precision gain it did not need. Reports: `psc_scratch/agent_reports/donations_surname_em_2026-09-22.md`, "Accept line sweep"; `docs/LINKAGE.md`.
+
 
 - The laptop disk. The orphaned spill files were deleted on 2026-09-19 and the caches cleaned; about 50 GB is free.
 - `RUN_LOCK_DIR` is set to one shared directory in both service units on the server.

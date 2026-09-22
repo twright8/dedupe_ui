@@ -556,8 +556,11 @@ def test_the_name_gate_takes_its_limit_from_the_linkage_settings():
     from app.rules import linkage
 
     assert stage_4_cluster.gate_settings({})["max_distinct_values"] == {}
+    # A track's entry normalises to a list of clauses, each a list of limits.
+    # A plain single-column entry is a clause of one.
     assert stage_4_cluster.gate_settings(NAME_GATE)["max_distinct_values"] == {
-        "person": [{"column": "surname_clean", "count": 3}]}
+        "person": [[{"columns": ["surname_clean"], "count": 3,
+                     "key": "surname_clean"}]]}
     assert linkage.max_distinct_values(
         {"max_distinct_values": {"person": {"column": "x", "count": 0}}}) == {}
 
@@ -700,3 +703,175 @@ def test_one_column_under_its_limit_does_not_excuse_another_over_it():
     _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
                                                         TWO_COLUMN_GATE)
     assert list(summary["status"]) == ["mixed_names"]
+
+
+# ---------------------------------------------------------------------------
+# A clause that needs two counts at once
+# ---------------------------------------------------------------------------
+
+
+def _people(rows, track: str = "person"):
+    """A cluster of len(rows) units joined end to end, with any columns given."""
+    ids = [f"p{i:02d}" for i in range(len(rows))]
+    units = pd.DataFrame([
+        {"unit_id": uid, "unit_size": 1, "track": track, "name": f"Person {uid}",
+         "existing_entity_id": None, "held_group_id": None, **row}
+        for uid, row in zip(ids, rows)
+    ])
+    members = pd.DataFrame([{"record_id": uid, "unit_id": uid} for uid in ids])
+    pairs = pd.DataFrame([
+        {"unit_id_l": a, "unit_id_r": b, "track": track, "match_probability": 0.99,
+         "bucket": "accept", "decided_by": "score"}
+        for a, b in zip(ids, ids[1:])
+    ])
+    return units, members, pairs
+
+
+# The PSC person conjunction: many registered offices mean nothing on their
+# own, and many registered offices with more than one birth date do.
+CONJUNCTION = {**SETTINGS, "max_distinct_values": {"person": [
+    {"all": [{"column": "postcode_district", "count": 2},
+             {"columns": ["dob_year_clean", "dob_month_clean"], "count": 1}]},
+]}}
+
+
+def _rows(districts, dobs):
+    return [{"postcode_district": d, "dob_year_clean": y, "dob_month_clean": m}
+            for d, (y, m) in zip(districts, dobs)]
+
+
+def test_one_count_over_its_limit_is_not_enough_for_a_conjunction():
+    """One person with four companies at four addresses and one birth date.
+    A district limit alone would hold this, and it would be wrong."""
+    units, members, pairs = _people(_rows(
+        ["E14", "SW1", "M1", "LS1"],
+        [("1970", "03")] * 4,
+    ))
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        CONJUNCTION)
+    assert list(summary["n_distinct_postcode_district"]) == [4]
+    assert list(summary["n_distinct_dob_year_clean+dob_month_clean"]) == [1]
+    assert list(summary["status"]) == ["ok"]
+
+
+def test_the_other_count_alone_is_not_enough_either():
+    units, members, pairs = _people(_rows(
+        ["E14", "E14", "E14", "E14"],
+        [("1970", "03"), ("1970", "08"), ("1971", "01"), ("1972", "05")],
+    ))
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        CONJUNCTION)
+    assert list(summary["n_distinct_postcode_district"]) == [1]
+    assert list(summary["n_distinct_dob_year_clean+dob_month_clean"]) == [4]
+    assert list(summary["status"]) == ["ok"]
+
+
+def test_both_counts_over_their_limits_holds_the_cluster():
+    units, members, pairs = _people(_rows(
+        ["E14", "SW1", "M1", "LS1"],
+        [("1970", "03"), ("1970", "08"), ("1970", "03"), ("1970", "08")],
+    ))
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        CONJUNCTION)
+    assert list(summary["n_distinct_postcode_district"]) == [4]
+    assert list(summary["n_distinct_dob_year_clean+dob_month_clean"]) == [2]
+    assert list(summary["status"]) == ["mixed_names"]
+    assert list(summary["withheld"]) == [True]
+
+
+def test_two_columns_are_counted_together_as_one_value():
+    """The same birth year in different months is more than one birth date.
+    Counting the year alone would see one value and let the cluster through."""
+    units, members, pairs = _people(_rows(
+        ["E14", "SW1", "M1"],
+        [("1985", "03"), ("1985", "07"), ("1985", "11")],
+    ))
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        CONJUNCTION)
+    assert list(summary["n_distinct_dob_year_clean+dob_month_clean"]) == [3]
+    assert list(summary["status"]) == ["mixed_names"]
+
+
+def test_a_unit_missing_half_a_combined_value_has_no_value_at_all():
+    """A filing with a birth year but no month is not a second birth date.
+    It is a unit this limit cannot judge, so it is not counted."""
+    units, members, pairs = _people(_rows(
+        ["E14", "SW1", "M1", "LS1"],
+        [("1970", "03"), ("1970", None), ("1971", ""), ("1970", "03")],
+    ))
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        CONJUNCTION)
+    assert list(summary["n_distinct_dob_year_clean+dob_month_clean"]) == [1]
+    assert list(summary["status"]) == ["ok"]
+
+
+def test_a_conjunction_on_a_column_the_units_do_not_carry_never_holds():
+    units, members, pairs = _people(_rows(
+        ["E14", "SW1", "M1", "LS1"],
+        [("1970", "03"), ("1970", "08"), ("1971", "01"), ("1972", "05")],
+    ))
+    units = units.drop(columns=["postcode_district"])
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        CONJUNCTION)
+    assert list(summary["n_distinct_postcode_district"]) == [0]
+    assert list(summary["status"]) == ["ok"]
+
+
+def test_a_clause_of_one_still_holds_on_its_own_beside_a_conjunction():
+    """Four clauses, as the PSC person track has them: any one holds."""
+    settings = {**SETTINGS, "max_distinct_values": {"person": [
+        {"column": "surname_clean", "count": 1},
+        {"all": [{"column": "postcode_district", "count": 2},
+                 {"columns": ["dob_year_clean", "dob_month_clean"], "count": 1}]},
+    ]}}
+    units, members, pairs = _people([
+        {"surname_clean": s, "postcode_district": "E14",
+         "dob_year_clean": "1970", "dob_month_clean": "03"}
+        for s in ("SMITH", "JONES", "PATEL")
+    ])
+    _clusters, summary = stage_4_cluster.build_clusters(units, members, pairs,
+                                                        settings)
+    # The conjunction does not hold — one district, one birth date — and the
+    # surname clause does.
+    assert list(summary["n_distinct_postcode_district"]) == [1]
+    assert list(summary["status"]) == ["mixed_names"]
+
+
+def test_a_limit_named_twice_is_measured_once():
+    settings = {**SETTINGS, "max_distinct_values": {"person": [
+        {"column": "postcode_district", "count": 9},
+        {"all": [{"column": "postcode_district", "count": 2},
+                 {"columns": ["dob_year_clean", "dob_month_clean"], "count": 1}]},
+    ]}}
+    per_track = stage_4_cluster.gate_settings(settings)["max_distinct_values"]
+    # Two clauses name the district at different counts; it is still one column
+    # to measure, and both clauses read the same number.
+    assert [l["key"] for l in stage_4_cluster.gate_limits(per_track)] == \
+        ["postcode_district", "dob_year_clean+dob_month_clean"]
+
+
+def test_the_cluster_detail_says_which_limits_held_it():
+    """Only the limits of a clause that actually held are reported, so
+    'split on the column with the most values' means the column that held
+    this cluster and not whichever column varies most."""
+    from app.services import clusters_reader
+
+    gate = stage_4_cluster.gate_settings(CONJUNCTION)["max_distinct_values"]
+    # Many districts, one birth date: the clause does not hold, so nothing is
+    # reported however much the district varies.
+    assert clusters_reader.gate_over(
+        gate, "person",
+        {"postcode_district": 9, "dob_year_clean+dob_month_clean": 1}) == []
+    # Both over: both limits are reported, the most different values first.
+    assert clusters_reader.gate_over(
+        gate, "person",
+        {"postcode_district": 9, "dob_year_clean+dob_month_clean": 4}) == [
+        {"key": "postcode_district", "columns": ["postcode_district"],
+         "count": 2, "n_distinct": 9},
+        {"key": "dob_year_clean+dob_month_clean",
+         "columns": ["dob_year_clean", "dob_month_clean"],
+         "count": 1, "n_distinct": 4},
+    ]
+    # A track with no entry is not gated this way at all.
+    assert clusters_reader.gate_over(gate, "organisation",
+                                     {"postcode_district": 9}) == []

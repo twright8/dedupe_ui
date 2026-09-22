@@ -214,8 +214,14 @@ def _agreement_of(batch: pd.DataFrame, id_lookup: pd.Series) -> pd.Series:
 
 
 def _add_at(edges: "_Edges", batch: pd.DataFrame, column: str, high: float,
-            lines: dict | None = None) -> None:
-    """Add the pairs one score alone would accept, ignoring every overlay."""
+            lines: dict | None = None, track_high: dict | None = None) -> None:
+    """Add the pairs one score alone would accept, ignoring every overlay.
+
+    *track_high* is ``{track: accept line}`` for the tracks that set one of
+    their own; *lines* is the graded models' ``{track: (review, high)}``. Both
+    are read per track, so a run whose person track accepts at 0.96 and whose
+    organisation track accepts at 0.92 is measured at the line each one used.
+    """
     if column not in batch.columns:
         return
     values = pd.to_numeric(batch[column], errors="coerce")
@@ -223,11 +229,13 @@ def _add_at(edges: "_Edges", batch: pd.DataFrame, column: str, high: float,
         return
     edges.saw_values()
     limits = np.full(len(batch), float(high))
-    if lines:
+    if track_high or lines:
         tracks = batch["track"].to_numpy() if "track" in batch.columns \
             else np.full(len(batch), None)
-        for track, (_review, track_high) in lines.items():
-            limits[tracks == track] = float(track_high)
+        for track, line in (track_high or {}).items():
+            limits[tracks == track] = float(line)
+        for track, (_review, model_high) in (lines or {}).items():
+            limits[tracks == track] = float(model_high)
     edges.add(batch, (values >= limits).to_numpy())
 
 
@@ -382,6 +390,9 @@ def evaluate(
     """
     exact_only = keys_eval.evaluate(records, groups)
     high = float((thresholds or {}).get("high") or 1.0)
+    # The accept line of every track that set one of its own, so `splink_only`
+    # is measured at the line each track really used (docs/LINKAGE.md).
+    track_high = (thresholds or {}).get("high_by_track") or {}
 
     ids = units["unit_id"].astype(str).to_numpy()
     position = pd.Series(np.arange(len(ids)), index=ids)
@@ -432,8 +443,10 @@ def evaluate(
         sets["without_vetoes_score"].add(
             batch, (batch["score_bucket"] == "accept").to_numpy())
         sets["with_human"].add(human, (human["bucket"] == "accept").to_numpy())
-        _add_at(sets["splink_only"], batch, "match_probability", high)
-        _add_at(sets["model_only"], batch, "gbt_score", high, model_lines)
+        _add_at(sets["splink_only"], batch, "match_probability", high,
+                track_high=track_high)
+        _add_at(sets["model_only"], batch, "gbt_score", high, model_lines,
+                track_high=track_high)
 
         totals.add(batch, agreement, no_veto, human)
         for track in pd.unique(batch["track"].dropna()):

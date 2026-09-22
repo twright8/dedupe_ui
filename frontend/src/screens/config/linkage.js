@@ -31,6 +31,9 @@ export const GATE_PATHS = [
   "linkage_settings.max_distinct_values",
 ];
 
+// Where the backend reports a bad per-track accept line.
+export const ACCEPT_LINE_PATH = `linkage_settings.${"match_probability_threshold_high_by_track"}`;
+
 // Every error or warning about one gate limit, including the ones about a
 // single row of it, so the message lands beside the box that caused it.
 export function gateErrors(errors, path) {
@@ -45,8 +48,19 @@ export function isGatePath(path) {
   return GATE_PATHS.some((g) => gateErrors([{ path }], g).length > 0);
 }
 
-/* One track's limits on different values, always as a list. The stored shape
-   allows a bare object for a single column, so it is read as a list of one. */
+/* One limit: the column or columns counted together, and the count they may
+   not pass. Several columns are counted as ONE value, so a cluster showing
+   1985-03 and 1985-07 shows two birth dates and not one. */
+function oneLimit(entry) {
+  const raw = entry.columns == null ? entry.column : entry.columns;
+  const columns = Array.isArray(raw) ? raw.map((c) => String(c ?? "")) : [String(raw ?? "")];
+  return { columns, count: Number(entry.count) };
+}
+
+/* One track's rules, always as a list of clauses, each clause a list of limits.
+   A cluster is held when ANY clause holds, and a clause holds when EVERY limit
+   in it is over its count. The stored shape allows a bare object for a single
+   limit and `{all: [...]}` for a conjunction, so both are read as a clause. */
 export function maxDistinctValues(settings, track) {
   const raw = (settings || {}).max_distinct_values;
   if (!raw || typeof raw !== "object") return [];
@@ -54,21 +68,92 @@ export function maxDistinctValues(settings, track) {
   if (!spec) return [];
   return (Array.isArray(spec) ? spec : [spec])
     .filter((e) => e && typeof e === "object")
-    .map((e) => ({ column: String(e.column || ""), count: Number(e.count) }));
+    .map((entry) =>
+      Array.isArray(entry.all)
+        ? entry.all.filter((l) => l && typeof l === "object").map(oneLimit)
+        : [oneLimit(entry)]
+    )
+    .filter((clause) => clause.length > 0);
 }
 
-/* Write one track's limits back. An empty list drops the track, and the last
+/* One limit in the shape the settings file stores. A limit on one column keeps
+   the singular key it has always had, so a version nobody has touched is
+   written back byte for byte. */
+function storedLimit(limit) {
+  const columns = limit.columns || [];
+  return columns.length === 1
+    ? { column: columns[0], count: limit.count }
+    : { columns, count: limit.count };
+}
+
+/* Write one track's clauses back. An empty list drops the track, and the last
    track going drops the setting, so a config version never carries an empty
    shell the backend has to guess at. */
-export function setMaxDistinctValues(settings, track, list) {
+export function setMaxDistinctValues(settings, track, clauses) {
   const raw = settings?.max_distinct_values;
   const next = { ...(raw && typeof raw === "object" ? raw : {}) };
-  if (!list || list.length === 0) delete next[track];
-  else next[track] = list.map((e) => ({ column: e.column, count: e.count }));
+  const list = (clauses || []).filter((c) => c && c.length > 0);
+  if (list.length === 0) delete next[track];
+  else
+    next[track] = list.map((clause) =>
+      clause.length === 1 ? storedLimit(clause[0]) : { all: clause.map(storedLimit) }
+    );
   const out = { ...settings };
   if (Object.keys(next).length === 0) delete out.max_distinct_values;
   else out.max_distinct_values = next;
   return out;
+}
+
+/* ---------- the accept line, per track ----------
+   One accept line is the default every track starts from. A track that needs
+   its own sets it here, because the two tracks do not want the same line:
+   measured on the donations sheet the person track wants 0.96 and the
+   organisation track 0.92 (docs/LINKAGE.md). */
+
+export const ACCEPT_LINE_BY_TRACK = "match_probability_threshold_high_by_track";
+
+// The accept line of every track named, with the shared line filled in.
+export function acceptLines(settings, trackKeys) {
+  const s = settings || {};
+  const shared = num(s.match_probability_threshold_high, 0.92);
+  const raw = s[ACCEPT_LINE_BY_TRACK];
+  const own = raw && typeof raw === "object" ? raw : {};
+  const out = {};
+  for (const key of trackKeys || []) out[key] = num(own[key], shared);
+  return out;
+}
+
+// Whether this track sets a line of its own rather than reading the shared one.
+export function hasOwnAcceptLine(settings, track) {
+  const raw = (settings || {})[ACCEPT_LINE_BY_TRACK];
+  return !!(raw && typeof raw === "object" && Number.isFinite(Number(raw[track])));
+}
+
+/* Move one track's accept line.
+
+   Every track's current line is written down, not just the one that moved, so
+   moving one slider can never drag another. Without that, raising the person
+   line would raise the shared line, and a track reading the shared line would
+   follow it somewhere its owner never chose.
+
+   The shared line is then the highest line any track reads. It is what a
+   reader that knows nothing about per-track lines sees, so leaving it at the
+   top means such a reader accepts no more than the tracks themselves do. The
+   review line still binds: an accept line can never sit below it. */
+export function setAcceptLine(settings, track, value, trackKeys) {
+  const s = settings || {};
+  const review = num(s.match_probability_threshold_review, 0.5);
+  const keys = trackKeys && trackKeys.length ? trackKeys : [track];
+  const next = { ...acceptLines(s, keys) };
+  next[track] = num(value, next[track]);
+  for (const key of Object.keys(next)) {
+    next[key] = +Math.max(next[key], review).toFixed(2);
+  }
+  return {
+    ...s,
+    [ACCEPT_LINE_BY_TRACK]: next,
+    match_probability_threshold_high: +Math.max(...Object.values(next)).toFixed(2),
+  };
 }
 
 // The fixed allow-list from LINKAGE.md, with the name each one goes by in the
@@ -355,9 +440,25 @@ export function orderedThresholds(settings, which, value) {
     next.candidate = Math.min(next.candidate, next.review);
   }
 
-  return {
+  const out = {
     match_probability_threshold_candidate: +next.candidate.toFixed(2),
     match_probability_threshold_review: +next.review.toFixed(2),
     match_probability_threshold_high: +next.high.toFixed(2),
   };
+
+  // A track with its own accept line is pushed by the review line too, so
+  // moving the review line up can never leave a track accepting below it.
+  const own = settings[ACCEPT_LINE_BY_TRACK];
+  if (own && typeof own === "object") {
+    const pushed = {};
+    for (const [track, line] of Object.entries(own)) {
+      pushed[track] = +Math.max(num(line, out.match_probability_threshold_high),
+                                out.match_probability_threshold_review).toFixed(2);
+    }
+    out[ACCEPT_LINE_BY_TRACK] = pushed;
+    out.match_probability_threshold_high = +Math.max(
+      out.match_probability_threshold_high, ...Object.values(pushed)
+    ).toFixed(2);
+  }
+  return out;
 }
