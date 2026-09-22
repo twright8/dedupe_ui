@@ -84,6 +84,7 @@ Fixed in code at `backend/app/rules/functions.py`. `GET /api/config/functions` l
 | `normalise_company_number` | target | strip non-alphanumerics, upper-case, left-pad pure digits to 8. Fewer than 2 characters, or no digit: null |
 | `metaphone`, `soundex` | target | phonetic key of the source |
 | `sorted_tokens` | target | distinct tokens, sorted, joined by a space |
+| `token_set` | target | distinct tokens, sorted, joined by ` | ` — a SET column, which is what a `no_overlap` veto compares |
 | `first_token`, `last_token`, `initials` | target | token helpers |
 
 In `GET /api/config/functions`, a single-output function reports `outputs: ["target"]`; a multi-output one reports its fixed column names. A step calling a multi-output function needs no `target`, and one calling any other function does.

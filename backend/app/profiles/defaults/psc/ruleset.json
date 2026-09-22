@@ -1269,6 +1269,26 @@
         ],
         "separator": " | ",
         "target": "address_key"
+      },
+      {
+        "id": "p28",
+        "description": "Forename and middle names as one field, so the given names can be compared as a set",
+        "op": "concat",
+        "sources": [
+          "forename_clean",
+          "middle_clean"
+        ],
+        "separator": " ",
+        "require_all": false,
+        "target": "given_names"
+      },
+      {
+        "id": "p29",
+        "description": "The given names as a set, for a no_overlap veto",
+        "op": "function",
+        "name": "token_set",
+        "source": "given_names",
+        "target": "given_tokens"
       }
     ],
     "organisation": [
@@ -1882,6 +1902,51 @@
       "action": "reject",
       "reason": "Numbered {left} and {right}",
       "_measured": "Fund II is not Fund III (deduping's veto B), over the cleaned numeric suffix with roman numerals read as digits."
+    },
+    {
+      "id": "v7",
+      "track": "person",
+      "description": "A birth month that differs, filed at two different addresses, is two people often enough that a person should look before they are merged.",
+      "when": [
+        {
+          "column": "dob_month_clean",
+          "op": "differs"
+        },
+        {
+          "column": "postcode_clean",
+          "op": "differs"
+        }
+      ],
+      "action": "review",
+      "reason": "Born in month {left} and month {right}, at two different postcodes",
+      "_measured": "Measured on the full run by re-applying the vetoes to the 40,992,151 pairs that had already been scored, without scoring anything again. It moves 187,854 accepted person pairs into review and moves nothing into reject. It also holds 11,763 pairs that were in review already and 2,026 that were rejected already for another reason. v6 rejects a birth month that differs when the years differ too, and reject beats review, so what is left for this rule is the same birth year, or a year that one side never filed. The evidence report of 2026-09-22 judged forty such accepted pairs and read twenty-five as one person and fifteen as two people; what separated them was the address. So this rule fires only when both full postcodes are filed and they disagree, which leaves alone the 35,785 accepted pairs that share a postcode, and that is where the month typos live. It is review and not reject because a birth month is one bit of evidence. Of twenty sampled pairs it moves, Liene Krastina of BD1 5DL against BD7 1RA and Parmjit Kaur Dhillon of UB4 0HR against UB3 1AP are each one person filed twice, and both now go to a reviewer instead of being merged unseen. The rule costs a reviewer's time and no data."
+    },
+    {
+      "id": "v8",
+      "track": "person",
+      "description": "Two clearly different forenames, two different addresses, and not one given name in common: two people, not one person filed twice.",
+      "when": [
+        {
+          "column": "forename_canon",
+          "op": "differs"
+        },
+        {
+          "column": "forename_canon",
+          "op": "similarity_lt",
+          "value": 0.7
+        },
+        {
+          "column": "postcode_clean",
+          "op": "differs"
+        },
+        {
+          "column": "given_tokens",
+          "op": "no_overlap"
+        }
+      ],
+      "action": "reject",
+      "reason": "Forenames {left} and {right}, at two different postcodes, with no given name in common",
+      "_measured": "Measured on the full run by re-applying the vetoes to the 40,992,151 pairs that had already been scored, without scoring anything again. It rejects 1,096,990 pairs that were sitting in review, which is 42.1% of the 2,605,985-pair person review queue, and it takes nothing out of the accept bucket. That is not an estimate: the whole run moved on exactly two transitions, 1,096,990 from review to reject and 187,854 from accept to review, and the second of those is v7. The rule is free because v2 already caps a clearly different forename at review, so promoting those pairs costs no accepted pair. A further 6,155,043 pairs it also holds were rejected already, on the score or by another veto. The guard is the last condition. Without 'and the two share no given name at all' the rule rejects Dr Thuduwa Wattage Bandula Buddadasa Jayaratne of HP20 2RQ against Dr Bandula Buddhadasa Jayaratne of HP19 0WG, who is one man: the parser splits his name differently on the two sides, and the two postcodes are two of his companies. Twenty sampled pairs that the rule moves are twenty pairs of different people, among them Nigel James against Sally Elizabeth Mackinnon, Rebecca Mary against Tracey May Ireland and Steven Andrew against Jonathan Francis Aspinall. One of the twenty, Panna Nitin Kotecha against Kalpana Kotecha, is a pair a reader could argue about."
     }
   ],
   "_vetoes_measured_and_not_shipped": [

@@ -210,6 +210,23 @@ def sorted_tokens_value(value) -> str | None:
     return " ".join(sorted(set(str(value).split()))) or None
 
 
+# How a set column is written, so a `no_overlap` veto can read it back. It is
+# the same separator as ``rules.vetoes.SET_SEPARATOR``; the two are pinned
+# together by a test rather than by an import, because the veto module and the
+# cleaning engine are deliberately independent of each other.
+SET_SEPARATOR = " | "
+
+
+def token_set_value(value) -> str | None:
+    """Distinct tokens, sorted, joined by ' | ' — a SET column.
+
+    The same shape as ``sorted_tokens``, written so a veto can compare it as a
+    set and not as a string: ' | ' is what the ``no_overlap`` operator splits
+    on. 'BANDULA WATTAGE BANDULA' becomes 'BANDULA | WATTAGE'.
+    """
+    return SET_SEPARATOR.join(sorted(set(str(value).split()))) or None
+
+
 def first_token_value(value) -> str | None:
     tokens = str(value).split()
     return tokens[0] if tokens else None
@@ -341,6 +358,16 @@ _SPECS = [
         outputs=["target"],
         example={"input": "TULLOCH A J", "output": "A J TULLOCH"},
         run=_series_fn("sorted_tokens_value"),
+    ),
+    FunctionSpec(
+        name="token_set",
+        description=(
+            "Distinct tokens, sorted, joined by ' | '. Writes a SET column, "
+            "which is what a `no_overlap` veto compares."
+        ),
+        outputs=["target"],
+        example={"input": "BANDULA WATTAGE BANDULA", "output": "BANDULA | WATTAGE"},
+        run=_series_fn("token_set_value"),
     ),
     FunctionSpec(
         name="first_token",

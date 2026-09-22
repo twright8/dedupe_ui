@@ -135,6 +135,25 @@ def test_no_overlap_reads_the_bar_joined_sets():
                                                             False, False]
 
 
+def test_a_token_set_column_feeds_the_no_overlap_operator():
+    """The cleaning engine writes the set column and the veto reads it back.
+
+    The pair is the one the guard exists for. A long name the parser splits
+    differently on the two sides still shares a given name, so `no_overlap` is
+    false and a veto guarded by it does not fire. Two people who share no
+    given name at all read true.
+    """
+    from app.rules import functions
+
+    left = functions.token_set_value("THUDUWA WATTAGE BANDULA BUDDADASA")
+    right = functions.token_set_value("BANDULA BUDDHADASA")
+    assert left == "BANDULA | BUDDADASA | THUDUWA | WATTAGE"
+
+    condition = {"column": "given_tokens", "op": "no_overlap"}
+    assert mask_for(condition, [left], [right]) == [False]
+    assert mask_for(condition, [left], [functions.token_set_value("SARAH")]) == [True]
+
+
 def test_an_unknown_operator_is_refused_rather_than_ignored():
     with pytest.raises(vetoes.VetoError):
         mask_for({"column": "c", "op": "sounds_wrong"}, ["A"], ["B"])
@@ -722,6 +741,77 @@ def test_the_preview_endpoint_reports_hits_and_the_accepted_ones(preview_client)
     assert entry["examples"][0]["pair_id"] == "1|2"
     assert entry["examples"][0]["left_name"] == "Acme Ltd"
     assert entry["examples"][0]["reason"] == "Company numbers 00000001 and 00000002"
+
+
+@pytest.fixture
+def preview_person_client(db_path, tmp_path, monkeypatch):
+    """The same preview run, but person units carrying a set column.
+
+    `given_tokens` is what the PSC person rule v8 compares with `no_overlap`,
+    and a preview has to be able to read it or the veto editor would promise
+    something a run does not deliver.
+    """
+    import app.auth as _auth_mod
+    import app.main as _main_mod
+    from app.db import write_db
+    from fastapi.testclient import TestClient
+
+    data_dir = tmp_path / "data"
+    run_dir = data_dir / "runs" / PREVIEW_RUN
+    run_dir.mkdir(parents=True)
+
+    units = units_frame([
+        {"unit_id": "1", "name": "Dr T W B B Jayaratne", "track": "person",
+         "given_tokens": "BANDULA | BUDDADASA | THUDUWA | WATTAGE"},
+        {"unit_id": "2", "name": "Dr Bandula Buddhadasa Jayaratne",
+         "track": "person", "given_tokens": "BANDULA | BUDDHADASA"},
+        {"unit_id": "3", "name": "Sarah Jayaratne", "track": "person",
+         "given_tokens": "SARAH"},
+    ])
+    pairs = finalise_pairs(
+        apply_overlays(pairs_frame([
+            {"unit_id_l": "1", "unit_id_r": "2", "match_probability": 0.99},
+            {"unit_id_l": "1", "unit_id_r": "3", "match_probability": 0.99},
+        ]), units, 0.5, 0.92, ruleset={}),
+        units,
+    )
+    units.to_parquet(run_dir / "units.parquet", index=False)
+    pairs.to_parquet(run_dir / "pairs.parquet", index=False)
+
+    monkeypatch.setattr(_main_mod, "DB_PATH", db_path)
+    monkeypatch.setattr(_main_mod, "DATA_DIR", data_dir)
+    monkeypatch.setattr(
+        _auth_mod, "_unsign", lambda token, max_age=None: {"authenticated": True}
+    )
+    write_db(db_path, "INSERT INTO runs (id, status) VALUES (?, ?)",
+             (PREVIEW_RUN, "complete"))
+    return TestClient(_main_mod.app, cookies={"session": "fake"})
+
+
+def test_the_preview_endpoint_reads_a_set_column(preview_person_client):
+    """A `no_overlap` veto over a `token_set` column previews the same way it
+    runs: the pair that shares a given name is spared, the pair that shares
+    none is hit.
+
+    The draft carries the cleaning step that writes the column as well as the
+    veto that reads it, because a veto may only name a column the ruleset
+    actually produces.
+    """
+    draft = _draft_with(veto("dv7", track="person", action="reject",
+                             reason="Given names {left} and {right}",
+                             column="given_tokens", op="no_overlap"))
+    draft["cleaning"] = {**draft["cleaning"],
+                         "person": list(draft["cleaning"]["person"]) + [
+                             {"id": "ptok", "description": "Given names as a set",
+                              "op": "function", "name": "token_set",
+                              "source": "name_clean", "target": "given_tokens"}]}
+    response = preview_person_client.post(
+        "/api/config/preview-vetoes",
+        json={"ruleset": draft, "run_id": PREVIEW_RUN})
+    assert response.status_code == 200
+    entry = response.json()["vetoes"][0]
+    assert entry["pairs_hit"] == 1
+    assert entry["examples"][0]["pair_id"] == "1|3"
 
 
 def test_the_preview_endpoint_refuses_an_invalid_draft(preview_client):
