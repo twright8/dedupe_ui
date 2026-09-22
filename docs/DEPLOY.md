@@ -930,6 +930,18 @@ cd ~/PycharmProjects/roe_ui
 git push prod main
 ```
 
+### When the code ships better default settings
+
+The app seeds a tool's first config version from the profile defaults only when the tool has never been used. After that, a better default shipped with the code changes nothing on the server: every run keeps the version the users have. So after a deploy that changed `backend/app/profiles/defaults/<profile>/linkage_settings.json`, save the new settings as a new config version on each used instance. The rules stay as they are. The version history shows what happened.
+
+```
+cd /opt/dedupe_ui/backend
+sudo -u dedupe_app PROFILE=donations .venv/bin/python scripts/adopt_linkage_defaults.py \
+    --db /var/lib/dedupe_ui/donations/linkage.db --dry-run
+```
+
+The dry run lists what would change. Run it again without `--dry-run` to save. It does nothing when the instance has never been used, or when the current version already holds the defaults. Use `PROFILE=psc` and the psc path for the other tool. The next run started from the New run page uses the new version by default. The How it works page and the Thresholds & Splink tab show the lines in force.
+
 ### Reading the logs
 
 Each tool writes to the system log. To see the last fifty lines:

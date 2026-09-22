@@ -37,7 +37,7 @@ The tool takes the Electoral Commission donations sheet. It finds the records th
 1. Open the site and choose Donations. Log in with the shared password.
 2. Click **New run** in the left menu.
 3. Drop in the Electoral Commission file. It can be the xlsx or a csv. The tool finds the right sheet by itself.
-4. Leave the configuration version and the two sliders alone the first time.
+4. Leave the configuration version and the sliders alone the first time. There is one accept line per track, people and organisations, and one review line.
 5. Click **Start run**. It takes about half a minute on the full sheet.
 
 Every label already saved is applied to the new run. The earlier grouping is read from the sheet at the same time.
