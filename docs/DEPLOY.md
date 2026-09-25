@@ -892,6 +892,14 @@ always did.
 
 ### Deploying a new version
 
+The short way, which also carries new default settings and rules onto each tool and runs the smoke test:
+
+```
+bash ~/PycharmProjects/dedupe_ui/deploy/scripts/deploy_from_laptop.sh
+```
+
+The long way, step by step:
+
 On your laptop:
 
 ```
