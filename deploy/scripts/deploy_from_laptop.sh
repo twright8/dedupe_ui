@@ -3,6 +3,7 @@
 # tool runs on the settings and default rules shipped with this version.
 #
 #   bash deploy/scripts/deploy_from_laptop.sh
+#   bash deploy/scripts/deploy_from_laptop.sh --settings-only   (steps 2 and 3, no push)
 #
 #   1. git push prod-dedupe main   (the server's hook builds and restarts the two tools)
 #   2. for each tool: never used (no runs, no labels) -> its database is moved aside
@@ -16,16 +17,18 @@
 # services "active", then "16 passed".
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-echo "== push"
-git push prod-dedupe main 2>&1 | sed 's/^remote: //' | grep -vE "^\s*$|gzip|transforming|rendering|computing|dynamic import|manualChunks|chunkSizeWarningLimit|Some chunks"
-echo
+if [ "${1:-}" != "--settings-only" ]; then
+  echo "== push"
+  git push prod-dedupe main 2>&1 | sed 's/^remote: //' | grep -vE "^\s*$|gzip|transforming|rendering|computing|dynamic import|manualChunks|chunkSizeWarningLimit|Some chunks"
+  echo
+fi
 echo "== settings on each tool"
 ssh roe-prod 'bash -s' <<'REMOTE'
 set -u
 for tool in donations psc; do
   db=/var/lib/dedupe_ui/$tool/linkage.db
   svc=dedupe_$tool
-  if [ ! -f "$db" ]; then echo "$tool: no database yet, the app seeds on start"; continue; fi
+  if ! sudo test -f "$db"; then echo "$tool: no database yet, the app seeds on start"; continue; fi
   used=$(sudo -u dedupe_app /opt/dedupe_ui/backend/.venv/bin/python - "$db" <<'PY'
 import sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
