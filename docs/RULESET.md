@@ -218,6 +218,10 @@ Three things the rules above leave open, settled in the build and written out in
 - **`decided_by` gains the value `veto`**, beside `score`, `model`, `import` and `human`, so a reviewer can see why a pair scoring 1.0 is sitting in review. `vetoed=yes|no` is a different question from `decided_by=veto`: a vetoed pair an imported label accepted reads `decided_by: "import"` and is still `vetoed=yes`.
 - **More than one veto on one pair.** The strongest action applies — `reject` beats `review` — and `vetoed_by` names the first veto in document order carrying that action. `{left}` and `{right}` are filled from the two sides' values of the first column the veto's conditions name, and a whole number loses its `.0`.
 
+### Switching a veto rule off
+
+A veto rule may carry `"enabled": false`. A rule switched off is kept in the document, shown greyed in the Veto rules tab, and applied to nothing: no run reads it, no preview counts it. Leave the key out, or set it to `true`, and the rule is in force. The switch is there so a rule can be tried and set aside without being deleted and typed again.
+
 ## API
 
 | Endpoint | Purpose |

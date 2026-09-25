@@ -98,7 +98,7 @@ def test_config_version_1_is_seeded_from_the_profile_defaults(db_path, monkeypat
     assert "person_titles" in ruleset["token_lists"]
     assert "nicknames" in ruleset["lookups"]
     assert [r["id"] for r in ruleset["track_rules"]] == ["t1", "t2", "t3", "t4"]
-    assert [v["id"] for v in ruleset["vetoes"]] == ["dv2"]
+    assert [v["id"] for v in ruleset["vetoes"]] == ["dv2", "dv3"]
 
     settings = json.loads(config["linkage_settings"])
     assert "match_probability_threshold_high" in settings

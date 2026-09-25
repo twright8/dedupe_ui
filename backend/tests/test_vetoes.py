@@ -1034,3 +1034,45 @@ def test_a_lookup_handed_back_in_is_not_rebuilt():
     units = units_frame([{"unit_id": "1"}, {"unit_id": "2"}])
     lookup = vetoes.unit_lookup(units)
     assert vetoes.unit_lookup(lookup) is lookup
+
+
+# ---------------------------------------------------------------------------
+# The on/off switch: "enabled": false keeps the rule in the document and
+# applies it to nothing
+# ---------------------------------------------------------------------------
+
+
+def test_a_veto_switched_off_is_kept_but_applied_to_nothing():
+    on = veto("on", column="dob_year", op="abs_diff_gt", value=1)
+    off = dict(veto("off", column="postcode", op="differs"), enabled=False)
+    rules = ruleset_with(on, off)
+    assert [v["id"] for v in vetoes.vetoes(rules)] == ["on", "off"]
+    assert [v["id"] for v in vetoes.active(rules)] == ["on"]
+    assert vetoes.columns_needed(rules) == ["dob_year"]
+    units = units_frame([
+        {"unit_id": "a", "dob_year": 1980, "postcode": "SW1A 1AA"},
+        {"unit_id": "b", "dob_year": 1980, "postcode": "EC1A 1BB"},
+    ])
+    pairs = pairs_frame([{"unit_id_l": "a", "unit_id_r": "b", "match_probability": 0.99,
+                          "bucket": "accept", "score_bucket": "accept", "decided_by": "score"}])
+    hit_ids = [entry["veto"]["id"] for entry in vetoes.hits(pairs, units, rules)]
+    assert hit_ids == ["on"]
+    out = vetoes.apply_to_buckets(pairs, units, rules, np.array(["accept"], dtype=object))
+    assert list(out["bucket"]) == ["accept"]
+    assert [row["id"] for row in vetoes.report(pairs, units, rules)] == ["on"]
+
+
+def test_an_absent_switch_means_on():
+    assert vetoes.is_on({"id": "x"}) is True
+    assert vetoes.is_on({"id": "x", "enabled": True}) is True
+    assert vetoes.is_on({"id": "x", "enabled": False}) is False
+
+
+def test_the_switch_must_be_true_or_false():
+    bad = dict(veto("v1", column="dob_year", op="differs"), enabled="yes")
+    errors: list[dict] = []
+    vetoes.validate(ruleset_with(bad), {"person": ["dob_year"]}, errors)
+    assert any(e["path"].endswith(".enabled") for e in errors)
+    errors = []
+    vetoes.validate(ruleset_with(dict(bad, enabled=False)), {"person": ["dob_year"]}, errors)
+    assert not [e for e in errors if e["path"].endswith(".enabled")]

@@ -143,7 +143,7 @@ On the run page there is a model panel for each track. Click **Train from this r
 - **Label library.** Every label ever saved, who saved it and when. You can withdraw one. The row stays, so nothing is lost.
 - **Audit log.** Every action the tool took.
 - **How it works.** The method, in the same words as this guide.
-- **Config & rules.** The cleaning steps, match keys, guards, veto rules and thresholds. Every change makes a new version, and each run names the version it used. Leave this alone until the process feels familiar.
+- **Config & rules.** The cleaning steps, match keys, guards, veto rules and thresholds. Each veto rule has an On switch, so a rule can be turned off for a run without deleting it. Every change makes a new version, and each run names the version it used. Leave this alone until the process feels familiar.
 
 ## Two questions still open
 

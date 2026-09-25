@@ -36,6 +36,29 @@ def _ruleset():
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _ruleset_without(veto_id):
+    ruleset = _ruleset()
+    ruleset["vetoes"] = [v for v in ruleset["vetoes"] if v["id"] != veto_id]
+    return ruleset
+
+
+def test_a_missing_default_veto_rule_is_added_and_the_rest_left_alone(db_path):
+    config_manager.save_version(db_path, created_by="tom", note="first",
+                                ruleset=_ruleset_without("dv3"),
+                                linkage_settings=script.default_settings("donations"))
+    out = io.StringIO()
+    assert script.adopt(db_path, "donations", out=out) == 2
+    current = config_manager.get_current(db_path)
+    ids = [v["id"] for v in current["ruleset"]["vetoes"]]
+    assert ids == [v["id"] for v in _ruleset_without("dv3")["vetoes"]] + ["dv3"]
+    assert "default rule dv3 added" in out.getvalue()
+    assert "dv3" in current["note"]
+    # Everything else in the rules is exactly as it was.
+    stripped = dict(current["ruleset"]); stripped.pop("vetoes")
+    expected = _ruleset_without("dv3"); expected.pop("vetoes")
+    assert stripped == expected
+
+
 def test_never_used_instance_is_left_alone(db_path):
     out = io.StringIO()
     assert script.adopt(db_path, "donations", out=out) is None

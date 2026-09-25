@@ -73,8 +73,26 @@ def vetoes(ruleset: dict) -> list[dict]:
     return [v for v in value if isinstance(v, dict)]
 
 
+def is_on(veto: dict) -> bool:
+    """A veto rule is in force unless it says ``"enabled": false``.
+
+    The switch exists so a rule can be turned off for a run and turned back on
+    without being deleted and retyped. An absent key means on, so every ruleset
+    written before the switch existed behaves exactly as it did.
+    """
+    return veto.get("enabled", True) is not False
+
+
+def active(ruleset: dict) -> list[dict]:
+    """The vetoes in force, in document order. This is what a run applies."""
+    return [v for v in vetoes(ruleset) if is_on(v)]
+
+
+active_vetoes = active
+
+
 def for_track(ruleset: dict, track: str) -> list[dict]:
-    return [v for v in vetoes(ruleset) if v.get("track") == track]
+    return [v for v in active(ruleset) if v.get("track") == track]
 
 
 def conditions(veto: dict) -> list[dict]:
@@ -97,7 +115,7 @@ def referenced_columns(veto: dict) -> list[str]:
 def columns_needed(ruleset: dict, track: str | None = None) -> list[str]:
     """Every unit column the vetoes name — the projection to read, and no more."""
     seen: list[str] = []
-    for veto in vetoes(ruleset):
+    for veto in active(ruleset):
         if track is not None and veto.get("track") != track:
             continue
         for column in referenced_columns(veto):
@@ -448,7 +466,7 @@ def hits(pairs: pd.DataFrame, units, ruleset: dict) -> list[dict]:
     result: list[dict] = []
     if not len(pairs):
         return result
-    active = vetoes(ruleset)
+    active = active_vetoes(ruleset)
     if not active:
         return result
 
@@ -542,7 +560,7 @@ def report(pairs: pd.DataFrame, units, ruleset: dict,
            max_examples: int = 10, name_column: str = "name") -> list[dict]:
     """Per veto: how many pairs it hits, how many of those would be accepted,
     and a handful of examples. This is what `preview-vetoes` serves."""
-    active = vetoes(ruleset)
+    active = active_vetoes(ruleset)
     if not active:
         return []
 
@@ -662,6 +680,9 @@ def validate(ruleset: dict, per_track: dict, errors: list[dict]) -> None:
         if action not in ACTIONS:
             _error(errors, f"{path}.action",
                    vocabulary.choice_error("action", veto.get("action"), ACTIONS))
+
+        if "enabled" in veto and not isinstance(veto.get("enabled"), bool):
+            _error(errors, f"{path}.enabled", "enabled must be true or false")
 
         reason = veto.get("reason")
         if reason is not None and not isinstance(reason, str):

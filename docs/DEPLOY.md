@@ -932,7 +932,7 @@ git push prod main
 
 ### When the code ships better default settings
 
-The app seeds a tool's first config version from the profile defaults only when the tool has never been used. After that, a better default shipped with the code changes nothing on the server: every run keeps the version the users have. So after a deploy that changed `backend/app/profiles/defaults/<profile>/linkage_settings.json`, save the new settings as a new config version on each used instance. The rules stay as they are. The version history shows what happened.
+The app seeds a tool's first config version from the profile defaults only when the tool has never been used. After that, a better default shipped with the code changes nothing on the server: every run keeps the version the users have. So after a deploy that changed `backend/app/profiles/defaults/<profile>/linkage_settings.json`, save the new settings as a new config version on each used instance. Any default veto rule the instance does not have is added, switched on. The other rules stay as they are. The version history shows what happened.
 
 ```
 cd /opt/dedupe_ui/backend

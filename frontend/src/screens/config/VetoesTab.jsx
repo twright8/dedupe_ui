@@ -277,6 +277,9 @@ export default function VetoesTab({ ruleset, setRuleset, errors, warnings, profi
                 <tr>
                   <th style={{ width: 34 }}>#</th>
                   <th style={{ width: 62 }}>Order</th>
+                  <th style={{ width: 52 }} title="A rule switched off stays here but is applied to nothing">
+                    On
+                  </th>
                   <th>
                     Veto rule <TermHint name="veto" />
                   </th>
@@ -292,17 +295,35 @@ export default function VetoesTab({ ruleset, setRuleset, errors, warnings, profi
                     <tr
                       key={v.id || index}
                       className={rowErrors.length ? "selected" : ""}
-                      style={
-                        !rowErrors.length && rowWarnings.length
+                      style={{
+                        ...(!rowErrors.length && rowWarnings.length
                           ? { background: "var(--amber-50)" }
-                          : undefined
-                      }
+                          : {}),
+                        ...(v.enabled === false ? { opacity: 0.55 } : {}),
+                      }}
                     >
                       <td className="mono muted" style={{ verticalAlign: "top", paddingTop: 14 }}>
                         {position + 1}
                       </td>
                       <td style={{ verticalAlign: "top", paddingTop: 11 }}>
                         <MoveButtons index={position} count={forTrack.length} onMove={moveWithinTrack} />
+                      </td>
+                      <td style={{ verticalAlign: "top", paddingTop: 13 }}>
+                        <label
+                          title={v.enabled === false ? "Off: this rule is applied to nothing" : "On: this rule is in force"}
+                          style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer" }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={v.enabled !== false}
+                            onChange={(e) =>
+                              updateVeto(index, e.target.checked ? { enabled: true } : { enabled: false })
+                            }
+                          />
+                          <span className="muted" style={{ fontSize: 12 }}>
+                            {v.enabled === false ? "Off" : "On"}
+                          </span>
+                        </label>
                       </td>
                       <td style={{ whiteSpace: "normal", minWidth: 0 }}>
                         <DescriptionInput
@@ -399,8 +420,8 @@ export default function VetoesTab({ ruleset, setRuleset, errors, warnings, profi
                         </button>
                       </td>
                     </tr>,
-                    <RowErrors key={(v.id || index) + "_e"} errors={rowErrors} colSpan={4} />,
-                    <RowWarnings key={(v.id || index) + "_w"} warnings={rowWarnings} colSpan={4} />,
+                    <RowErrors key={(v.id || index) + "_e"} errors={rowErrors} colSpan={5} />,
+                    <RowWarnings key={(v.id || index) + "_w"} warnings={rowWarnings} colSpan={5} />,
                   ];
                 })}
               </tbody>

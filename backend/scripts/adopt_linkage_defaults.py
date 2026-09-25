@@ -6,7 +6,10 @@ database has no version at all. Once a tool has been used, a better default
 shipped with the code changes nothing on that instance: every run keeps
 reading the version the user has. This script closes that gap for the
 operator. It saves a NEW config version whose linkage settings are the
-profile's defaults and whose ruleset is the current one, unchanged. Nothing is
+profile's defaults and whose ruleset is the current one, plus any default veto
+rule (matched by id) the current ruleset does not have. A rule that was deleted
+on purpose comes back this way, switched on; switch it off in the Veto rules
+tab if it is not wanted. Nothing else in the rules changes, nothing is
 overwritten, and the version history shows what happened and when.
 
     PROFILE=donations python scripts/adopt_linkage_defaults.py \
@@ -40,6 +43,24 @@ def default_settings(profile_key: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def default_ruleset(profile_key: str) -> dict:
+    path = DEFAULTS_DIR / profile_key / "ruleset.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def with_new_vetoes(ruleset: dict, defaults: dict) -> tuple[dict, list[str]]:
+    """The ruleset plus every default veto rule whose id it lacks, and those ids."""
+    current = ruleset.get("vetoes") if isinstance(ruleset.get("vetoes"), list) else []
+    have = {v.get("id") for v in current if isinstance(v, dict)}
+    added = [v for v in (defaults.get("vetoes") or [])
+             if isinstance(v, dict) and v.get("id") and v.get("id") not in have]
+    if not added:
+        return ruleset, []
+    out = json.loads(json.dumps(ruleset))
+    out["vetoes"] = list(current) + added
+    return out, [v["id"] for v in added]
+
+
 def describe_change(before: dict, after: dict) -> list[str]:
     """Plain lines saying what differs, top level and per track."""
     lines: list[str] = []
@@ -67,10 +88,10 @@ def adopt(db_path: str, profile_key: str, created_by: str = "system",
     if current is None or not current.get("ruleset"):
         print("Never used: no config version to update. The app seeds one on start.", file=out)
         return None
-    ruleset = current["ruleset"]
     before = json.loads(current.get("linkage_settings") or "{}")
     after = default_settings(profile_key)
-    if before == after:
+    ruleset, new_vetoes = with_new_vetoes(current["ruleset"], default_ruleset(profile_key))
+    if before == after and not new_vetoes:
         print(f"Version {current['version']} already holds the profile defaults. Nothing to do.",
               file=out)
         return None
@@ -82,14 +103,18 @@ def adopt(db_path: str, profile_key: str, created_by: str = "system",
         for error in errors:
             print(f"  {error}", file=out)
         return None
-    changes = describe_change(before, after)
-    for line in changes:
+    for line in describe_change(before, after):
         print(f"  {line}", file=out)
+    for veto_id in new_vetoes:
+        print(f"  vetoes: default rule {veto_id} added, switched on", file=out)
     if dry_run:
         print(f"Dry run: would save version {current['version'] + 1}.", file=out)
         return None
+    rules_note = (f"Rules unchanged from version {current['version']}" if not new_vetoes
+                  else f"Rules as in version {current['version']} plus the default veto rules "
+                       + ", ".join(new_vetoes))
     note = ("Linkage settings replaced with the profile defaults shipped with the code "
-            f"(scripts/adopt_linkage_defaults.py). Rules unchanged from version {current['version']}.")
+            f"(scripts/adopt_linkage_defaults.py). {rules_note}.")
     version = config_manager.save_version(db_path, created_by=created_by, note=note,
                                           ruleset=ruleset, linkage_settings=after)
     print(f"Saved config version {version}.", file=out)

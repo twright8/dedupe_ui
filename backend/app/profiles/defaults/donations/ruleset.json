@@ -981,7 +981,7 @@
     {
       "id": "dv2",
       "track": "organisation",
-      "description": "Two different company numbers are two companies. Send to review, because a number is mistyped often enough that a person should look.",
+      "description": "Two company numbers that differ by a digit or two look mistyped. Send to review, so a person decides.",
       "when": [
         {
           "column": "company_number_clean",
@@ -990,7 +990,22 @@
       ],
       "action": "review",
       "reason": "Company numbers {left} and {right}",
-      "_measured": "Two different company numbers, both present, are two companies. Review and not reject: a number is mistyped often enough that a human should see the pair. Measured against the September 2026 sheet: it vetoes 293 pairs, 139 of which the run would otherwise have accepted, and it moves score_only organisation precision from 0.965094 to 0.965416 for 0.000054 of recall."
+      "_measured": "Two company numbers, both present, that are not the same. Until 2026-09-25 this rule sent every such pair to review, because a number is mistyped often enough that a person should see it. Measured on the September 2026 sheet that was 136 pairs in the queue, and Steve's earlier grouping had kept 87 of the 89 it had judged apart. dv3 now rejects the clearly different numbers, so what reaches this rule is the near misses: 9 pairs in that run, such as SC51530 against SC051530 and 62533469 against 02533469. Reject beats review, so the order of the two rules does not matter."
+    },
+    {
+      "id": "dv3",
+      "track": "organisation",
+      "description": "Two clearly different company numbers are two companies. Reject, whatever the name says. Switch this rule off to send them to review instead.",
+      "when": [
+        {
+          "column": "company_number_clean",
+          "op": "similarity_lt",
+          "value": 0.9
+        }
+      ],
+      "action": "reject",
+      "reason": "Company numbers {left} and {right}",
+      "_measured": "Two company numbers, both present, whose Jaro-Winkler similarity is under 0.9: not a slip of one or two digits but a different number. Measured on the September 2026 sheet: 127 pairs leave the review queue and 9 near misses stay for dv2. Steve's earlier grouping agrees with the direction: of the different-number pairs it had judged, 87 of 89 were kept apart. The two it merged, Shore Capital and Canary Wharf, are group companies, and the earlier grouping outranks a veto rule, so they stay merged. Only 35% of organisation records carry a number at all, so names still decide the rest, and a numbered record is still compared by name with an unnumbered one."
     }
   ],
   "_vetoes_measured_and_not_shipped": [
